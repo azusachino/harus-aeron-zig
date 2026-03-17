@@ -1,3 +1,21 @@
 .zig-cache/
 zig-out/
 *.o
+
+# OS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Agent state (session-volatile)
+.agents/CURRENT_TASK.md
+.agents/MEMORY.md
+.agents/*.log
+
+# Environment
+.env
+.env.local
