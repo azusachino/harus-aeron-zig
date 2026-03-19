@@ -3,6 +3,7 @@
 const std = @import("std");
 
 pub const VERSION: u8 = 0x00;
+pub const FRAME_ALIGNMENT: usize = 32;
 
 pub const FrameType = enum(u16) {
     padding = 0x00,
@@ -94,11 +95,59 @@ pub const NakHeader = extern struct {
     pub const LENGTH = @sizeOf(NakHeader);
 };
 
+/// RTT Measurement frame — 24 bytes total
+pub const RttMeasurement = extern struct {
+    frame_length: i32,
+    version: u8,
+    flags: u8,
+    type: u16,
+    echo_timestamp: i64 align(4),
+    reception_delta: i64 align(4),
+    // LESSON(frame-codec): receiver_id was added in later Aeron versions (total 32 bytes).
+    // We implement the 24-byte version as specified in the project plan.
+    // receiver_id: i64 align(4),
+
+    pub const LENGTH = @sizeOf(RttMeasurement);
+};
+
+/// Resolution Entry — variable length, header portion only
+pub const ResolutionEntry = extern struct {
+    frame_length: i32,
+    version: u8,
+    flags: u8,
+    type: u16,
+    res_type: u8,
+    address_length: u8,
+    port: u16,
+    age_in_ms: i32,
+
+    pub const HEADER_LENGTH = 16;
+};
+
+/// Returns (data_length + DataHeader.LENGTH) rounded up to FRAME_ALIGNMENT (32).
+pub fn alignedLength(data_length: usize) usize {
+    return (data_length + DataHeader.LENGTH + (FRAME_ALIGNMENT - 1)) & ~(FRAME_ALIGNMENT - 1);
+}
+
+/// Returns the maximum payload bytes that fit in a single DATA frame given mtu.
+pub fn computeMaxPayload(mtu: usize) usize {
+    return mtu - DataHeader.LENGTH;
+}
+
+pub fn isBeginFragment(flags: u8) bool {
+    return (flags & DataHeader.BEGIN_FLAG) != 0;
+}
+
+pub fn isEndFragment(flags: u8) bool {
+    return (flags & DataHeader.END_FLAG) != 0;
+}
+
 comptime {
     std.debug.assert(@sizeOf(DataHeader) == 32);
     std.debug.assert(@sizeOf(SetupHeader) == 40);
     std.debug.assert(@sizeOf(StatusMessage) == 36);
     std.debug.assert(@sizeOf(NakHeader) == 28);
+    std.debug.assert(@sizeOf(RttMeasurement) == 24);
 }
 
 test "frame sizes match spec" {
@@ -106,4 +155,28 @@ test "frame sizes match spec" {
     try std.testing.expectEqual(40, SetupHeader.LENGTH);
     try std.testing.expectEqual(36, StatusMessage.LENGTH);
     try std.testing.expectEqual(28, NakHeader.LENGTH);
+    try std.testing.expectEqual(24, RttMeasurement.LENGTH);
+}
+
+test "alignedLength calculation" {
+    try std.testing.expectEqual(@as(usize, 32), alignedLength(0));
+    try std.testing.expectEqual(@as(usize, 64), alignedLength(1));
+    try std.testing.expectEqual(@as(usize, 64), alignedLength(32));
+    try std.testing.expectEqual(@as(usize, 96), alignedLength(33));
+}
+
+test "computeMaxPayload calculation" {
+    try std.testing.expectEqual(@as(usize, 1376), computeMaxPayload(1408));
+}
+
+test "isBeginFragment correctly identifies flag" {
+    try std.testing.expect(isBeginFragment(DataHeader.BEGIN_FLAG));
+    try std.testing.expect(!isBeginFragment(DataHeader.END_FLAG));
+    try std.testing.expect(isBeginFragment(DataHeader.BEGIN_FLAG | DataHeader.END_FLAG));
+}
+
+test "isEndFragment correctly identifies flag" {
+    try std.testing.expect(isEndFragment(DataHeader.END_FLAG));
+    try std.testing.expect(!isEndFragment(DataHeader.BEGIN_FLAG));
+    try std.testing.expect(isEndFragment(DataHeader.BEGIN_FLAG | DataHeader.END_FLAG));
 }
