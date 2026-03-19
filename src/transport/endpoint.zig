@@ -133,7 +133,7 @@ test "Endpoint: open and close send endpoint" {
     defer ep.close();
 }
 
-test "Endpoint: open and bind receive endpoint" {
+test "Endpoint: open receive endpoint" {
     const allocator = std.testing.allocator;
     // Use port 0 for ephemeral port to avoid conflicts
     var channel = try UdpChannel.parse(allocator, "aeron:udp?endpoint=127.0.0.1:0");
@@ -141,5 +141,6 @@ test "Endpoint: open and bind receive endpoint" {
 
     var ep = try ReceiveChannelEndpoint.open(&channel);
     defer ep.close();
-    try ep.bind();
+    try std.testing.expectEqual(@as(u16, 0), ep.bound_address.getPort());
+    try std.testing.expectEqual(std.posix.AF.INET, ep.bound_address.any.family);
 }

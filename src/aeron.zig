@@ -6,6 +6,13 @@ pub const protocol = @import("protocol/frame.zig");
 pub const logbuffer = @import("logbuffer/log_buffer.zig");
 pub const ipc = @import("ipc.zig");
 pub const driver = @import("driver/media_driver.zig");
+pub const archive = struct {
+    pub const protocol = @import("archive/protocol.zig");
+    pub const catalog = @import("archive/catalog.zig");
+    pub const conductor = @import("archive/conductor.zig");
+    pub const recorder = @import("archive/recorder.zig");
+    pub const replayer = @import("archive/replayer.zig");
+};
 pub const transport = struct {
     pub const ReceiveChannelEndpoint = @import("transport/endpoint.zig").ReceiveChannelEndpoint;
     pub const Poller = @import("transport/poller.zig").Poller;

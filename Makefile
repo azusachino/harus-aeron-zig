@@ -1,4 +1,6 @@
 NIX_RUN := $(if $(filter $(IN_NIX_SHELL),),nix develop --command ,)
+export ZIG_GLOBAL_CACHE_DIR := $(CURDIR)/.zig-global-cache
+export ZIG_LOCAL_CACHE_DIR := $(CURDIR)/.zig-cache
 
 .PHONY: fmt fmt-check build test lint check clean run tutorial-check
 
@@ -39,4 +41,4 @@ tutorial-check:
 	$(NIX_RUN) zig build tutorial-check
 
 clean:
-	rm -rf zig-out .zig-cache
+	rm -rf zig-out .zig-cache .zig-global-cache
