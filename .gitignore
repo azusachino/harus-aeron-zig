@@ -2,6 +2,11 @@
 zig-out/
 *.o
 
+# Compiled artifacts
+*.a
+*.so
+*.dylib
+
 # OS
 .DS_Store
 
@@ -15,6 +20,14 @@ zig-out/
 .agents/CURRENT_TASK.md
 .agents/MEMORY.md
 .agents/*.log
+.gemini/
+.cache/
+
+# Generated WASM/web tutorial assets (built separately)
+docs/*.html
+docs/*.js
+docs/*.wasm
+docs/*.tar
 
 # Environment
 .env
