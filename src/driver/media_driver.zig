@@ -8,6 +8,7 @@ const receiver = @import("receiver.zig");
 const ring_buffer = @import("../ipc/ring_buffer.zig");
 const broadcast = @import("../ipc/broadcast.zig");
 const counters = @import("../ipc/counters.zig");
+const loss_report_mod = @import("../loss_report.zig");
 
 const DriverConductor = conductor.DriverConductor;
 const Sender = sender.Sender;
@@ -40,6 +41,10 @@ pub const MediaDriver = struct {
     ring_buffer_buf: []u8,
     counters_meta_buf: []u8,
     counters_values_buf: []u8,
+    loss_report_buf: ?[]align(64) u8,
+
+    // Loss report
+    loss_report_instance: ?loss_report_mod.LossReport,
 
     // Owned objects
     ring_buf: ManyToOneRingBuffer,
@@ -70,6 +75,12 @@ pub const MediaDriver = struct {
         self.counters_values_buf = try allocator.alloc(u8, counters.COUNTER_LENGTH * 4);
         errdefer allocator.free(self.counters_values_buf);
         @memset(self.counters_values_buf, 0);
+
+        // Allocate loss report buffer (4KB = 64 entries, 64-byte aligned)
+        self.loss_report_buf = try allocator.alignedAlloc(u8, .@"64", loss_report_mod.LOSS_REPORT_BUFFER_LENGTH);
+        errdefer allocator.free(self.loss_report_buf.?);
+        @memset(self.loss_report_buf.?, 0);
+        self.loss_report_instance = loss_report_mod.LossReport.init(self.loss_report_buf.?);
 
         self.allocator = allocator;
         self.ctx = ctx_;
@@ -103,7 +114,8 @@ pub const MediaDriver = struct {
         self.sender_agent = try Sender.init(allocator, &self.send_endpoint, &self.counters_map);
         errdefer self.sender_agent.deinit();
 
-        self.receiver_agent = try Receiver.init(allocator, &self.recv_endpoint, &self.send_endpoint, &self.counters_map);
+        const lr_ptr: ?*loss_report_mod.LossReport = if (self.loss_report_instance != null) &self.loss_report_instance.? else null;
+        self.receiver_agent = try Receiver.init(allocator, &self.recv_endpoint, &self.send_endpoint, &self.counters_map, lr_ptr);
 
         return self;
     }
@@ -140,6 +152,8 @@ pub const MediaDriver = struct {
             .ring_buffer_buf = ring_buffer_buf,
             .counters_meta_buf = counters_meta_buf,
             .counters_values_buf = counters_values_buf,
+            .loss_report_buf = null,
+            .loss_report_instance = null,
             .ring_buf = ring_buf,
             .broadcaster = broadcaster,
             .counters_map = counters_map,
@@ -161,6 +175,9 @@ pub const MediaDriver = struct {
         self.receiver_agent.deinit();
         self.sender_agent.deinit();
         self.conductor_agent.deinit();
+        if (self.loss_report_buf) |buf| {
+            self.allocator.free(buf);
+        }
         self.deinit();
         self.allocator.destroy(self);
     }

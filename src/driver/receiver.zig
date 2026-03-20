@@ -6,6 +6,7 @@ const metadata = @import("../logbuffer/metadata.zig");
 const counters = @import("../ipc/counters.zig");
 const protocol = @import("../protocol/frame.zig");
 const transport = @import("../transport/endpoint.zig");
+const loss_report = @import("../loss_report.zig");
 
 pub const Image = struct {
     session_id: i32,
@@ -106,6 +107,7 @@ pub const Receiver = struct {
     recv_endpoint: *transport.ReceiveChannelEndpoint,
     send_endpoint: *transport.SendChannelEndpoint,
     counters_map: *counters.CountersMap,
+    loss_report_instance: ?*loss_report.LossReport,
     allocator: std.mem.Allocator,
     recv_buf: [4096]u8,
 
@@ -114,12 +116,14 @@ pub const Receiver = struct {
         recv_endpoint: *transport.ReceiveChannelEndpoint,
         send_endpoint: *transport.SendChannelEndpoint,
         counters_map: *counters.CountersMap,
+        loss_rpt: ?*loss_report.LossReport,
     ) !Receiver {
         return .{
             .images = std.ArrayList(*Image){},
             .recv_endpoint = recv_endpoint,
             .send_endpoint = send_endpoint,
             .counters_map = counters_map,
+            .loss_report_instance = loss_rpt,
             .allocator = allocator,
             .recv_buf = undefined,
         };
@@ -172,6 +176,20 @@ pub const Receiver = struct {
 
                         // Write frame to log buffer
                         _ = image.insertFrame(self.counters_map, header, payload);
+
+                        // Check for gap and record loss observation
+                        if (image.hasGap(self.counters_map)) {
+                            if (self.loss_report_instance) |lr| {
+                                const now: i64 = @intCast(@as(i128, std.time.nanoTimestamp()));
+                                lr.recordObservation(
+                                    @as(i64, @intCast(payload.len)),
+                                    now,
+                                    image.session_id,
+                                    image.stream_id,
+                                    "aeron:udp",
+                                );
+                            }
+                        }
 
                         // Send status message
                         self.sendStatus(image) catch {};
@@ -272,7 +290,7 @@ test "Receiver init and deinit" {
         .socket = dummy_socket,
     };
 
-    var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &counters_map);
+    var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &counters_map, null);
     defer receiver.deinit();
 
     try std.testing.expectEqual(@as(usize, 0), receiver.images.items.len);
@@ -294,7 +312,7 @@ test "Receiver onAddSubscription and onRemoveSubscription" {
         .socket = dummy_socket,
     };
 
-    var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &counters_map);
+    var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &counters_map, null);
     defer receiver.deinit();
 
     // Create a test image
