@@ -38,7 +38,6 @@ pub const MediaDriver = struct {
 
     // Shared buffers
     ring_buffer_buf: []u8,
-    broadcast_buf: []u8,
     counters_meta_buf: []u8,
     counters_values_buf: []u8,
 
@@ -56,11 +55,6 @@ pub const MediaDriver = struct {
         const ring_buffer_buf = try allocator.alloc(u8, 4096);
         errdefer allocator.free(ring_buffer_buf);
         @memset(ring_buffer_buf, 0);
-
-        // Allocate broadcast buffer (8KB default)
-        const broadcast_buf = try allocator.alloc(u8, 8192);
-        errdefer allocator.free(broadcast_buf);
-        @memset(broadcast_buf, 0);
 
         // Allocate counters metadata and values buffers
         const counters_meta_buf = try allocator.alloc(u8, counters.METADATA_LENGTH * 4);
@@ -106,7 +100,6 @@ pub const MediaDriver = struct {
             .receiver_agent = receiver_agent,
             .running = std.atomic.Value(bool).init(false),
             .ring_buffer_buf = ring_buffer_buf,
-            .broadcast_buf = broadcast_buf,
             .counters_meta_buf = counters_meta_buf,
             .counters_values_buf = counters_values_buf,
             .ring_buf = ring_buf,
@@ -123,7 +116,6 @@ pub const MediaDriver = struct {
         self.conductor_agent.deinit();
         self.broadcaster.deinit(self.allocator);
         self.allocator.free(self.ring_buffer_buf);
-        self.allocator.free(self.broadcast_buf);
         self.allocator.free(self.counters_meta_buf);
         self.allocator.free(self.counters_values_buf);
         std.posix.close(self.send_endpoint.socket);
