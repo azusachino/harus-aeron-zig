@@ -10,12 +10,12 @@ const FragmentHandler = aeron.logbuffer.term_reader.FragmentHandler;
 
 pub const TestHarness = struct {
     allocator: std.mem.Allocator,
-    driver: MediaDriver,
+    driver: *MediaDriver,
     log_buffers: std.ArrayList(*LogBuffer),
     images: std.ArrayList(*Image),
 
     pub fn init(allocator: std.mem.Allocator) !TestHarness {
-        const md = try MediaDriver.init(allocator, .{});
+        const md = try MediaDriver.create(allocator, .{});
         return .{
             .allocator = allocator,
             .driver = md,
@@ -35,7 +35,7 @@ pub const TestHarness = struct {
             self.allocator.destroy(lb);
         }
         self.log_buffers.deinit(self.allocator);
-        self.driver.deinit();
+        self.driver.destroy();
     }
 
     pub fn createPublication(self: *TestHarness, stream_id: i32, channel: []const u8) !ExclusivePublication {

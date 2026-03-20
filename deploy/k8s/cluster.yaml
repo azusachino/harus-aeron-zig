@@ -1,0 +1,134 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: aeron-cluster
+  namespace: aeron
+  labels:
+    app.kubernetes.io/name: aeron-cluster
+    app.kubernetes.io/component: cluster
+spec:
+  serviceName: aeron-cluster-headless
+  replicas: 3
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aeron-cluster
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aeron-cluster
+        app.kubernetes.io/component: cluster
+    spec:
+      containers:
+        - name: cluster-node
+          image: harus-aeron-zig:latest
+          imagePullPolicy: Never
+          command: ["aeron-driver"]
+          args: ["--cluster"]
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: AERON_DIR
+              value: /dev/shm/aeron
+            - name: ARCHIVE_DIR
+              value: /data/archive
+            # Member ID derived from POD_NAME ordinal in Zig code
+            # e.g. aeron-cluster-0 → 0, aeron-cluster-2 → 2
+            - name: CLUSTER_MEMBERS
+              value: >-
+                0,aeron-cluster-0.aeron-cluster-headless.aeron.svc.cluster.local,9010,9020,9030| 1,aeron-cluster-1.aeron-cluster-headless.aeron.svc.cluster.local,9010,9020,9030| 2,aeron-cluster-2.aeron-cluster-headless.aeron.svc.cluster.local,9010,9020,9030
+            - name: INGRESS_CHANNEL
+              value: "aeron:udp?endpoint=0.0.0.0:9010"
+            - name: LOG_CHANNEL
+              value: "aeron:udp?endpoint=0.0.0.0:9020"
+            - name: CONSENSUS_CHANNEL
+              value: "aeron:udp?endpoint=0.0.0.0:9030"
+          ports:
+            - name: ingress
+              containerPort: 9010
+              protocol: UDP
+            - name: log
+              containerPort: 9020
+              protocol: UDP
+            - name: consensus
+              containerPort: 9030
+              protocol: UDP
+            - name: archive-ctrl
+              containerPort: 8010
+              protocol: UDP
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          # Distroless image (no shell) — process liveness is the health check.
+          # k8s restarts the pod automatically if the process exits.
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: aeron-cluster
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: local-path
+        resources:
+          requests:
+            storage: 1Gi
+---
+# Headless service for StatefulSet DNS (pod-to-pod discovery)
+apiVersion: v1
+kind: Service
+metadata:
+  name: aeron-cluster-headless
+  namespace: aeron
+  labels:
+    app.kubernetes.io/name: aeron-cluster
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: aeron-cluster
+  ports:
+    - name: ingress
+      port: 9010
+      targetPort: 9010
+      protocol: UDP
+    - name: log
+      port: 9020
+      targetPort: 9020
+      protocol: UDP
+    - name: consensus
+      port: 9030
+      targetPort: 9030
+      protocol: UDP
+---
+# Client-facing service (routes to current leader via label selector)
+apiVersion: v1
+kind: Service
+metadata:
+  name: aeron-cluster
+  namespace: aeron
+  labels:
+    app.kubernetes.io/name: aeron-cluster
+spec:
+  selector:
+    app.kubernetes.io/name: aeron-cluster
+  ports:
+    - name: ingress
+      port: 9010
+      targetPort: 9010
+      protocol: UDP

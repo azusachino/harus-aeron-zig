@@ -13,6 +13,13 @@ pub const archive = struct {
     pub const recorder = @import("archive/recorder.zig");
     pub const replayer = @import("archive/replayer.zig");
 };
+pub const cluster = struct {
+    pub const protocol = @import("cluster/protocol.zig");
+    pub const election = @import("cluster/election.zig");
+    pub const log = @import("cluster/log.zig");
+    pub const conductor = @import("cluster/conductor.zig");
+    pub const consensus = @import("cluster/cluster.zig");
+};
 pub const transport = struct {
     pub const ReceiveChannelEndpoint = @import("transport/endpoint.zig").ReceiveChannelEndpoint;
     pub const Poller = @import("transport/poller.zig").Poller;

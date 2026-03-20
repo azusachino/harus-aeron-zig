@@ -1,69 +1,146 @@
-// Aeron Media Driver entry point
+// Aeron unified entry point — runs media driver, archive, or cluster node
 // Reference: https://github.com/aeron-io/aeron
 const std = @import("std");
 const media_driver = @import("driver/media_driver.zig");
+const archive_mod = @import("archive/archive.zig");
+const cluster_mod = @import("cluster/cluster.zig");
+
+const Mode = enum { driver, archive, cluster };
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.log.info("Aeron Media Driver starting...", .{});
-
-    // Parse CLI arguments
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    var ctx = media_driver.MediaDriverContext{};
+    // Determine mode from args
+    var mode: Mode = .driver;
+    var driver_ctx = media_driver.MediaDriverContext{};
 
-    // Parse -Daeron.dir=PATH, -Daeron.term.buffer.length=N, etc.
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
 
-        if (std.mem.startsWith(u8, arg, "-Daeron.dir=")) {
-            const path = arg["-Daeron.dir=".len..];
-            ctx.aeron_dir = path;
-            std.log.info("Set aeron_dir={s}", .{path});
+        if (std.mem.eql(u8, arg, "--archive")) {
+            mode = .archive;
+        } else if (std.mem.eql(u8, arg, "--cluster")) {
+            mode = .cluster;
+        } else if (std.mem.startsWith(u8, arg, "-Daeron.dir=")) {
+            driver_ctx.aeron_dir = arg["-Daeron.dir=".len..];
         } else if (std.mem.startsWith(u8, arg, "-Daeron.term.buffer.length=")) {
-            const val_str = arg["-Daeron.term.buffer.length=".len..];
-            if (std.fmt.parseInt(i32, val_str, 10)) |val| {
-                ctx.term_buffer_length = val;
-                std.log.info("Set term_buffer_length={}", .{val});
-            } else |_| {
-                std.log.warn("Invalid term buffer length: {s}", .{val_str});
-            }
-        } else if (std.mem.startsWith(u8, arg, "-Daeron.ipc.term.buffer.length=")) {
-            const val_str = arg["-Daeron.ipc.term.buffer.length=".len..];
-            if (std.fmt.parseInt(i32, val_str, 10)) |val| {
-                ctx.ipc_term_buffer_length = val;
-                std.log.info("Set ipc_term_buffer_length={}", .{val});
-            } else |_| {
-                std.log.warn("Invalid IPC term buffer length: {s}", .{val_str});
-            }
+            if (std.fmt.parseInt(i32, arg["-Daeron.term.buffer.length=".len..], 10)) |val| {
+                driver_ctx.term_buffer_length = val;
+            } else |_| {}
         } else if (std.mem.startsWith(u8, arg, "-Daeron.mtu.length=")) {
-            const val_str = arg["-Daeron.mtu.length=".len..];
-            if (std.fmt.parseInt(i32, val_str, 10)) |val| {
-                ctx.mtu_length = val;
-                std.log.info("Set mtu_length={}", .{val});
-            } else |_| {
-                std.log.warn("Invalid MTU length: {s}", .{val_str});
-            }
+            if (std.fmt.parseInt(i32, arg["-Daeron.mtu.length=".len..], 10)) |val| {
+                driver_ctx.mtu_length = val;
+            } else |_| {}
         }
     }
 
-    // Initialize MediaDriver
-    var md = try media_driver.MediaDriver.init(allocator, ctx);
-    defer md.deinit();
+    switch (mode) {
+        .driver => try runDriver(allocator, driver_ctx),
+        .archive => try runArchive(allocator),
+        .cluster => try runCluster(allocator),
+    }
+}
+
+fn ensureAeronDir(aeron_dir: []const u8) void {
+    std.fs.makeDirAbsolute(aeron_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => std.log.warn("Could not create aeron_dir={s}: {}", .{ aeron_dir, err }),
+    };
+}
+
+fn runDriver(allocator: std.mem.Allocator, ctx: media_driver.MediaDriverContext) !void {
+    std.log.info("Aeron Media Driver starting...", .{});
+    ensureAeronDir(ctx.aeron_dir);
+
+    const md = try media_driver.MediaDriver.create(allocator, ctx);
+    defer md.destroy();
 
     std.log.info("MediaDriver initialized with aeron_dir={s}", .{ctx.aeron_dir});
 
-    // Embedded mode: run duty-cycle loop
-    // In real implementation, this would spawn threads or wait for signals
-    var work_count: i64 = 0;
-    while (work_count < 100) : (work_count += 1) {
+    // Run duty-cycle loop until interrupted
+    while (true) {
         _ = md.doWork();
+        // Yield to avoid busy-spinning at 100% CPU in container
+        std.Thread.sleep(1 * std.time.ns_per_ms);
     }
+}
 
-    std.log.info("Aeron Media Driver stopping...", .{});
+fn runArchive(allocator: std.mem.Allocator) !void {
+    std.log.info("Aeron Archive starting...", .{});
+    ensureAeronDir(std.posix.getenv("AERON_DIR") orelse "/dev/shm/aeron");
+
+    const archive_dir = std.posix.getenv("ARCHIVE_DIR") orelse "/tmp/aeron-archive";
+    const control_channel = std.posix.getenv("ARCHIVE_CONTROL_CHANNEL") orelse "aeron:udp?endpoint=0.0.0.0:8010";
+
+    const ctx = archive_mod.ArchiveContext{
+        .archive_dir = archive_dir,
+        .control_channel = control_channel,
+    };
+
+    var archive = archive_mod.Archive.init(allocator, ctx);
+    defer archive.deinit();
+
+    archive.start();
+    std.log.info("Archive running — dir={s} control={s}", .{ archive_dir, control_channel });
+
+    // Run duty-cycle loop
+    while (true) {
+        _ = archive.doWork() catch |err| {
+            std.log.err("Archive doWork error: {}", .{err});
+        };
+        std.Thread.sleep(1 * std.time.ns_per_ms);
+    }
+}
+
+fn runCluster(allocator: std.mem.Allocator) !void {
+    std.log.info("Aeron Cluster node starting...", .{});
+    ensureAeronDir(std.posix.getenv("AERON_DIR") orelse "/dev/shm/aeron");
+
+    // Parse member ID from POD_NAME (k8s StatefulSet ordinal: aeron-cluster-N → N)
+    const member_id = blk: {
+        if (std.posix.getenv("POD_NAME")) |pod_name| {
+            if (std.mem.lastIndexOfScalar(u8, pod_name, '-')) |dash_pos| {
+                break :blk std.fmt.parseInt(i32, pod_name[dash_pos + 1 ..], 10) catch 0;
+            }
+        }
+        break :blk @as(i32, 0);
+    };
+
+    const ingress_channel = std.posix.getenv("INGRESS_CHANNEL") orelse "aeron:udp?endpoint=0.0.0.0:9010";
+    const log_channel = std.posix.getenv("LOG_CHANNEL") orelse "aeron:udp?endpoint=0.0.0.0:9020";
+    const consensus_channel = std.posix.getenv("CONSENSUS_CHANNEL") orelse "aeron:udp?endpoint=0.0.0.0:9030";
+
+    const ctx = cluster_mod.ClusterContext{
+        .member_id = member_id,
+        .ingress_channel = ingress_channel,
+        .log_channel = log_channel,
+        .consensus_channel = consensus_channel,
+    };
+
+    var module = try cluster_mod.ConsensusModule.init(allocator, ctx);
+    defer module.deinit();
+
+    module.start();
+    std.log.info("Cluster node {d} running — ingress={s} log={s} consensus={s}", .{
+        member_id,
+        ingress_channel,
+        log_channel,
+        consensus_channel,
+    });
+
+    // Run duty-cycle loop with cluster time
+    var now_ns: i64 = 0;
+    while (true) {
+        now_ns += 10 * std.time.ns_per_ms; // advance cluster time by 10ms per tick
+        _ = module.doWork(now_ns) catch |err| {
+            std.log.err("Cluster doWork error: {}", .{err});
+        };
+        std.Thread.sleep(10 * std.time.ns_per_ms);
+    }
 }
