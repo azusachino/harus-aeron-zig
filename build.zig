@@ -75,22 +75,31 @@ pub fn build(b: *std.Build) void {
     const tutorial_check_step = b.step("tutorial-check", "Compile-check tutorial stubs");
     tutorial_check_step.dependOn(&tutorial_check.step);
 
-    // Example: cluster demo
-    const cluster_demo = b.addExecutable(.{
-        .name = "cluster-demo",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("examples/cluster_demo.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "aeron", .module = aeron_mod },
-            },
-        }),
-    });
-    b.installArtifact(cluster_demo);
-    const run_demo = b.addRunArtifact(cluster_demo);
+    // Examples
+    const example_files = [_]struct { name: []const u8, path: []const u8 }{
+        .{ .name = "cluster-demo", .path = "examples/cluster_demo.zig" },
+        .{ .name = "basic-publisher", .path = "examples/basic_publisher.zig" },
+        .{ .name = "basic-subscriber", .path = "examples/basic_subscriber.zig" },
+        .{ .name = "throughput-example", .path = "examples/throughput.zig" },
+    };
+    const examples_step = b.step("examples", "Build all examples");
+    for (example_files) |example| {
+        const exe = b.addExecutable(.{
+            .name = example.name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(example.path),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "aeron", .module = aeron_mod },
+                },
+            }),
+        });
+        b.installArtifact(exe);
+        examples_step.dependOn(&exe.step);
+    }
     const demo_step = b.step("demo", "Run cluster demo");
-    demo_step.dependOn(&run_demo.step);
+    demo_step.dependOn(examples_step);
 
     // Fuzz tests
     const fuzz_files = [_][]const u8{

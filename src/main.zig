@@ -1,13 +1,16 @@
-// Aeron unified entry point — runs media driver, archive, or cluster node
+// Aeron unified entry point — runs media driver, archive, cluster, or CLI tools
 // Reference: https://github.com/aeron-io/aeron
 const std = @import("std");
 const media_driver = @import("driver/media_driver.zig");
 const archive_mod = @import("archive/archive.zig");
 const cluster_mod = @import("cluster/cluster.zig");
-const counters_mod = @import("ipc/counters.zig");
-const counters_report_mod = @import("counters_report.zig");
-
-const Mode = enum { driver, archive, cluster, counters };
+const cli = @import("cli.zig");
+const tools_stat = @import("tools/stat.zig");
+const tools_errors = @import("tools/errors.zig");
+const tools_loss = @import("tools/loss.zig");
+const tools_streams = @import("tools/streams.zig");
+const tools_events = @import("tools/events.zig");
+const tools_cluster = @import("tools/cluster_tool.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -17,38 +20,29 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    // Determine mode from args
-    var mode: Mode = .driver;
-    var driver_ctx = media_driver.MediaDriverContext{};
+    const opts = cli.parse(args);
 
-    var i: usize = 1;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-
-        if (std.mem.eql(u8, arg, "--archive")) {
-            mode = .archive;
-        } else if (std.mem.eql(u8, arg, "--counters")) {
-            mode = .counters;
-        } else if (std.mem.eql(u8, arg, "--cluster")) {
-            mode = .cluster;
-        } else if (std.mem.startsWith(u8, arg, "-Daeron.dir=")) {
-            driver_ctx.aeron_dir = arg["-Daeron.dir=".len..];
-        } else if (std.mem.startsWith(u8, arg, "-Daeron.term.buffer.length=")) {
-            if (std.fmt.parseInt(i32, arg["-Daeron.term.buffer.length=".len..], 10)) |val| {
-                driver_ctx.term_buffer_length = val;
-            } else |_| {}
-        } else if (std.mem.startsWith(u8, arg, "-Daeron.mtu.length=")) {
-            if (std.fmt.parseInt(i32, arg["-Daeron.mtu.length=".len..], 10)) |val| {
-                driver_ctx.mtu_length = val;
-            } else |_| {}
-        }
-    }
-
-    switch (mode) {
-        .driver => try runDriver(allocator, driver_ctx),
+    switch (opts.command) {
+        .driver => {
+            var ctx = media_driver.MediaDriverContext{};
+            ctx.aeron_dir = opts.aeron_dir;
+            if (opts.term_buffer_length) |v| ctx.term_buffer_length = v;
+            if (opts.mtu_length) |v| ctx.mtu_length = v;
+            try runDriver(allocator, ctx);
+        },
         .archive => try runArchive(allocator),
         .cluster => try runCluster(allocator),
-        .counters => runCounters(driver_ctx.aeron_dir),
+        .stat => tools_stat.run(opts.aeron_dir),
+        .errors => tools_errors.run(opts.aeron_dir),
+        .loss => tools_loss.run(opts.aeron_dir),
+        .streams => tools_streams.run(opts.aeron_dir),
+        .events => tools_events.run(opts.aeron_dir),
+        .cluster_tool => tools_cluster.run(opts.aeron_dir),
+        .help => {
+            var stdout_buf: [4096]u8 = undefined;
+            var stdout = std.fs.File.stdout().writer(&stdout_buf);
+            cli.printUsage(&stdout.interface) catch {};
+        },
     }
 }
 
@@ -68,10 +62,8 @@ fn runDriver(allocator: std.mem.Allocator, ctx: media_driver.MediaDriverContext)
 
     std.log.info("MediaDriver initialized with aeron_dir={s}", .{ctx.aeron_dir});
 
-    // Run duty-cycle loop until interrupted
     while (true) {
         _ = md.doWork();
-        // Yield to avoid busy-spinning at 100% CPU in container
         std.Thread.sleep(1 * std.time.ns_per_ms);
     }
 }
@@ -94,7 +86,6 @@ fn runArchive(allocator: std.mem.Allocator) !void {
     archive.start();
     std.log.info("Archive running — dir={s} control={s}", .{ archive_dir, control_channel });
 
-    // Run duty-cycle loop
     while (true) {
         _ = archive.doWork() catch |err| {
             std.log.err("Archive doWork error: {}", .{err});
@@ -103,34 +94,10 @@ fn runArchive(allocator: std.mem.Allocator) !void {
     }
 }
 
-fn runCounters(aeron_dir: []const u8) void {
-    std.log.info("Aeron Counters Report — dir={s}", .{aeron_dir});
-
-    // Placeholder: create a local CountersMap with sample data to demonstrate formatting.
-    // Real mmap of CnC file is future work.
-    var meta align(64) = [_]u8{0} ** (counters_mod.METADATA_LENGTH * 4);
-    var values align(64) = [_]u8{0} ** (counters_mod.COUNTER_LENGTH * 4);
-    var cm = counters_mod.CountersMap.init(&meta, &values);
-
-    const h1 = cm.allocate(counters_mod.PUBLISHER_LIMIT, "pub-limit");
-    cm.set(h1.counter_id, 12345);
-
-    const h2 = cm.allocate(counters_mod.SENDER_POSITION, "sender-pos");
-    cm.set(h2.counter_id, 100);
-
-    const report = counters_report_mod.CountersReport.init(&cm);
-    var stdout_buf: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&stdout_buf);
-    report.formatTable(&stdout.interface) catch |err| {
-        std.log.err("Failed to format counters table: {}", .{err});
-    };
-}
-
 fn runCluster(allocator: std.mem.Allocator) !void {
     std.log.info("Aeron Cluster node starting...", .{});
     ensureAeronDir(std.posix.getenv("AERON_DIR") orelse "/dev/shm/aeron");
 
-    // Parse member ID from POD_NAME (k8s StatefulSet ordinal: aeron-cluster-N → N)
     const member_id = blk: {
         if (std.posix.getenv("POD_NAME")) |pod_name| {
             if (std.mem.lastIndexOfScalar(u8, pod_name, '-')) |dash_pos| {
@@ -162,10 +129,9 @@ fn runCluster(allocator: std.mem.Allocator) !void {
         consensus_channel,
     });
 
-    // Run duty-cycle loop with cluster time
     var now_ns: i64 = 0;
     while (true) {
-        now_ns += 10 * std.time.ns_per_ms; // advance cluster time by 10ms per tick
+        now_ns += 10 * std.time.ns_per_ms;
         _ = module.doWork(now_ns) catch |err| {
             std.log.err("Cluster doWork error: {}", .{err});
         };
