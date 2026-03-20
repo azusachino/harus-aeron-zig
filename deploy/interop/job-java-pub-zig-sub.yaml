@@ -1,0 +1,41 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: interop-java-pub-zig-sub
+  namespace: aeron
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 120
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: java-publisher
+          image: java-aeron:latest
+          imagePullPolicy: Never
+          command: ["/opt/aeron/test-publisher.sh"]
+          env:
+            - name: CHANNEL
+              value: "aeron:udp?endpoint=0.0.0.0:40124"
+            - name: STREAM_ID
+              value: "1001"
+            - name: MESSAGE_COUNT
+              value: "1000"
+            - name: MESSAGE_LENGTH
+              value: "256"
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+        - name: zig-subscriber
+          image: harus-aeron-zig:latest
+          imagePullPolicy: Never
+          command: ["/opt/aeron/aeron-driver"]
+          args: ["--subscribe", "--channel=aeron:udp?endpoint=java-pub:40124", "--stream-id=1001", "--messages=1000"]
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi
