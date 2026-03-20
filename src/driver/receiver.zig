@@ -7,6 +7,7 @@ const counters = @import("../ipc/counters.zig");
 const protocol = @import("../protocol/frame.zig");
 const transport = @import("../transport/endpoint.zig");
 const loss_report = @import("../loss_report.zig");
+const event_log_mod = @import("../event_log.zig");
 
 pub const Image = struct {
     session_id: i32,
@@ -108,6 +109,7 @@ pub const Receiver = struct {
     send_endpoint: *transport.SendChannelEndpoint,
     counters_map: *counters.CountersMap,
     loss_report_instance: ?*loss_report.LossReport,
+    event_log: ?*event_log_mod.EventLog,
     allocator: std.mem.Allocator,
     recv_buf: [4096]u8,
 
@@ -118,12 +120,24 @@ pub const Receiver = struct {
         counters_map: *counters.CountersMap,
         loss_rpt: ?*loss_report.LossReport,
     ) !Receiver {
+        return initWithEventLog(allocator, recv_endpoint, send_endpoint, counters_map, loss_rpt, null);
+    }
+
+    pub fn initWithEventLog(
+        allocator: std.mem.Allocator,
+        recv_ep: *transport.ReceiveChannelEndpoint,
+        send_ep: *transport.SendChannelEndpoint,
+        counters_map_: *counters.CountersMap,
+        loss_rpt: ?*loss_report.LossReport,
+        el: ?*event_log_mod.EventLog,
+    ) !Receiver {
         return .{
             .images = std.ArrayList(*Image){},
-            .recv_endpoint = recv_endpoint,
-            .send_endpoint = send_endpoint,
-            .counters_map = counters_map,
+            .recv_endpoint = recv_ep,
+            .send_endpoint = send_ep,
+            .counters_map = counters_map_,
             .loss_report_instance = loss_rpt,
+            .event_log = el,
             .allocator = allocator,
             .recv_buf = undefined,
         };
@@ -176,6 +190,12 @@ pub const Receiver = struct {
 
                         // Write frame to log buffer
                         _ = image.insertFrame(self.counters_map, header, payload);
+
+                        // Log frame_in event
+                        if (self.event_log) |el| {
+                            const evt_now: i64 = @intCast(@as(i128, std.time.nanoTimestamp()));
+                            el.log(.frame_in, evt_now, image.session_id, image.stream_id, payload);
+                        }
 
                         // Check for gap and record loss observation
                         if (image.hasGap(self.counters_map)) {
@@ -245,6 +265,12 @@ pub const Receiver = struct {
 
         const nak_bytes = @as([*]const u8, @ptrCast(&nak_header))[0..protocol.NakHeader.LENGTH];
         _ = try self.send_endpoint.send(image.source_address, nak_bytes);
+
+        // Log send_nak event
+        if (self.event_log) |el| {
+            const nak_now: i64 = @intCast(@as(i128, std.time.nanoTimestamp()));
+            el.log(.send_nak, nak_now, image.session_id, image.stream_id, nak_bytes);
+        }
     }
 
     // Send a STATUS message to source_address acknowledging receipt

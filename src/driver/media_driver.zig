@@ -9,6 +9,7 @@ const ring_buffer = @import("../ipc/ring_buffer.zig");
 const broadcast = @import("../ipc/broadcast.zig");
 const counters = @import("../ipc/counters.zig");
 const loss_report_mod = @import("../loss_report.zig");
+const event_log_mod = @import("../event_log.zig");
 
 const DriverConductor = conductor.DriverConductor;
 const Sender = sender.Sender;
@@ -42,9 +43,13 @@ pub const MediaDriver = struct {
     counters_meta_buf: []u8,
     counters_values_buf: []u8,
     loss_report_buf: ?[]align(64) u8,
+    event_log_buf: ?[]u8,
 
     // Loss report
     loss_report_instance: ?loss_report_mod.LossReport,
+
+    // Event log
+    event_log_instance: ?event_log_mod.EventLog,
 
     // Owned objects
     ring_buf: ManyToOneRingBuffer,
@@ -82,6 +87,11 @@ pub const MediaDriver = struct {
         @memset(self.loss_report_buf.?, 0);
         self.loss_report_instance = loss_report_mod.LossReport.init(self.loss_report_buf.?);
 
+        // Allocate event log buffer (64KB)
+        self.event_log_buf = try allocator.alloc(u8, event_log_mod.EVENT_LOG_BUFFER_LENGTH);
+        errdefer allocator.free(self.event_log_buf.?);
+        self.event_log_instance = event_log_mod.EventLog.init(self.event_log_buf.?);
+
         self.allocator = allocator;
         self.ctx = ctx_;
         self.running = std.atomic.Value(bool).init(false);
@@ -111,11 +121,13 @@ pub const MediaDriver = struct {
         self.conductor_agent = try DriverConductor.init(allocator, &self.ring_buf, &self.broadcaster, &self.counters_map);
         errdefer self.conductor_agent.deinit();
 
-        self.sender_agent = try Sender.init(allocator, &self.send_endpoint, &self.counters_map);
+        const el_ptr: ?*event_log_mod.EventLog = if (self.event_log_instance != null) &self.event_log_instance.? else null;
+
+        self.sender_agent = try Sender.initWithEventLog(allocator, &self.send_endpoint, &self.counters_map, el_ptr);
         errdefer self.sender_agent.deinit();
 
         const lr_ptr: ?*loss_report_mod.LossReport = if (self.loss_report_instance != null) &self.loss_report_instance.? else null;
-        self.receiver_agent = try Receiver.init(allocator, &self.recv_endpoint, &self.send_endpoint, &self.counters_map, lr_ptr);
+        self.receiver_agent = try Receiver.initWithEventLog(allocator, &self.recv_endpoint, &self.send_endpoint, &self.counters_map, lr_ptr, el_ptr);
 
         return self;
     }
@@ -154,6 +166,8 @@ pub const MediaDriver = struct {
             .counters_values_buf = counters_values_buf,
             .loss_report_buf = null,
             .loss_report_instance = null,
+            .event_log_buf = null,
+            .event_log_instance = null,
             .ring_buf = ring_buf,
             .broadcaster = broadcaster,
             .counters_map = counters_map,
@@ -175,6 +189,9 @@ pub const MediaDriver = struct {
         self.receiver_agent.deinit();
         self.sender_agent.deinit();
         self.conductor_agent.deinit();
+        if (self.event_log_buf) |buf| {
+            self.allocator.free(buf);
+        }
         if (self.loss_report_buf) |buf| {
             self.allocator.free(buf);
         }
