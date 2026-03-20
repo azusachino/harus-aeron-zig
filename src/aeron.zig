@@ -24,6 +24,7 @@ pub const transport = struct {
     pub const ReceiveChannelEndpoint = @import("transport/endpoint.zig").ReceiveChannelEndpoint;
     pub const Poller = @import("transport/poller.zig").Poller;
     pub const UdpChannel = @import("transport/udp_channel.zig").UdpChannel;
+    pub const AeronUri = @import("transport/uri.zig").AeronUri;
 };
 
 pub const ExclusivePublication = @import("publication.zig").ExclusivePublication;
