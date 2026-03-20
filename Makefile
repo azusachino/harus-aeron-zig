@@ -98,5 +98,7 @@ interop-run:  ## Run interop test jobs in k3s
 	kubectl delete jobs -n aeron -l app.kubernetes.io/part-of=interop --ignore-not-found
 	kubectl apply -k deploy/interop/
 	@echo "Waiting for interop jobs to complete..."
-	kubectl wait --for=condition=complete --timeout=180s jobs -n aeron -l app.kubernetes.io/part-of=interop
+	kubectl wait --for=condition=complete --timeout=180s jobs -n aeron -l app.kubernetes.io/part-of=interop || \
+		{ kubectl get jobs -n aeron -l app.kubernetes.io/part-of=interop -o wide >&2; \
+		  echo "Interop jobs did not complete (timeout or failure)" >&2; exit 1; }
 	@echo "All interop tests passed!"

@@ -14,7 +14,7 @@ spec:
           image: harus-aeron-zig:latest
           imagePullPolicy: Never
           command: ["/opt/aeron/aeron-driver"]
-          args: ["--publish", "--channel=aeron:udp?endpoint=java-archive:40123", "--stream-id=2001", "--messages=500"]
+          args: ["--publish", "--channel=aeron:udp?endpoint=localhost:40123", "--stream-id=2001", "--messages=500"]
           volumeMounts:
             - name: shm
               mountPath: /dev/shm
