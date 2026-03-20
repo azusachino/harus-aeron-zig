@@ -1,0 +1,22 @@
+FROM eclipse-temurin:21-jdk-slim
+
+# Download Aeron JAR from Maven Central
+RUN apt-get update && apt-get install -y curl && \
+    curl -fsSL -o /tmp/aeron-all-1.46.7.jar \
+    https://repo1.maven.org/maven2/io/aeron/aeron-all/1.46.7/aeron-all-1.46.7.jar && \
+    apt-get remove -y curl && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Create shared memory directory for Aeron
+RUN mkdir -p /dev/shm/aeron && chmod 1777 /dev/shm/aeron
+
+# Set Aeron working directory
+ENV AERON_DIR=/dev/shm/aeron
+
+# Set working directory and copy JAR
+WORKDIR /opt/aeron
+RUN mv /tmp/aeron-all-1.46.7.jar /opt/aeron/aeron-all.jar
+
+# Default entrypoint
+ENTRYPOINT ["java", "-cp", "/opt/aeron/aeron-all.jar"]

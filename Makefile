@@ -3,7 +3,8 @@ export ZIG_GLOBAL_CACHE_DIR := $(CURDIR)/.zig-global-cache
 export ZIG_LOCAL_CACHE_DIR := $(CURDIR)/.zig-cache
 
 .PHONY: fmt fmt-check build test lint check clean run tutorial-check \
-       nix-image k8s-up k8s-down k8s-status k8s-logs colima-up colima-down
+       nix-image k8s-up k8s-down k8s-status k8s-logs colima-up colima-down \
+       interop interop-build interop-run
 
 fmt:
 	$(NIX_RUN) zig fmt .
@@ -81,3 +82,23 @@ k8s-logs:
 	@echo "=== Cluster Node 0 ===" && kubectl -n aeron logs aeron-cluster-0 --tail=20 2>/dev/null || true
 	@echo "\n=== Cluster Node 1 ===" && kubectl -n aeron logs aeron-cluster-1 --tail=20 2>/dev/null || true
 	@echo "\n=== Cluster Node 2 ===" && kubectl -n aeron logs aeron-cluster-2 --tail=20 2>/dev/null || true
+
+# =============================================================================
+# Interop Testing
+# =============================================================================
+
+interop: interop-build interop-run  ## Run full interop test suite
+
+interop-build: nix-image  ## Build interop test images
+	docker build -t java-aeron:latest -f deploy/interop/Dockerfile.java-aeron deploy/interop/
+	nerdctl -n k8s.io image import $$(docker save java-aeron:latest | nerdctl -n k8s.io image load 2>&1 | grep -oP 'sha256:\S+') || \
+		docker save java-aeron:latest | nerdctl -n k8s.io image load
+
+interop-run:  ## Run interop test jobs in k3s
+	kubectl delete jobs -n aeron -l app.kubernetes.io/part-of=interop --ignore-not-found
+	kubectl apply -k deploy/interop/
+	@echo "Waiting for interop jobs to complete..."
+	kubectl wait --for=condition=complete --timeout=180s jobs -n aeron -l app.kubernetes.io/part-of=interop || \
+		{ kubectl get jobs -n aeron -l app.kubernetes.io/part-of=interop -o wide >&2; \
+		  echo "Interop jobs did not complete (timeout or failure)" >&2; exit 1; }
+	@echo "All interop tests passed!"

@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: interop-bidirectional
+  namespace: aeron
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 120
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: zig-instance
+          image: harus-aeron-zig:latest
+          imagePullPolicy: Never
+          command: ["/opt/aeron/aeron-driver"]
+          args: ["--bidirectional", "--publish-channel=aeron:udp?endpoint=localhost:40125", "--publish-stream=1001", "--subscribe-channel=aeron:udp?endpoint=0.0.0.0:40124", "--subscribe-stream=1002", "--messages=500"]
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+        - name: java-instance
+          image: java-aeron:latest
+          imagePullPolicy: Never
+          command: ["/opt/aeron/test-bidirectional.sh"]
+          env:
+            - name: PUB_CHANNEL
+              value: "aeron:udp?endpoint=0.0.0.0:40125"
+            - name: PUB_STREAM_ID
+              value: "1002"
+            - name: SUB_CHANNEL
+              value: "aeron:udp?endpoint=localhost:40124"
+            - name: SUB_STREAM_ID
+              value: "1001"
+            - name: MESSAGE_COUNT
+              value: "500"
+            - name: TIMEOUT_SEC
+              value: "60"
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi
