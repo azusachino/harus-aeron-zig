@@ -17,22 +17,22 @@
 - [x] P1-13: Client Library (`src/aeron.zig`, `src/publication.zig`, etc.) — after P1-5,6,7
 - [x] P1-14: Integration Tests (`test/`) — after P1-12,13
 
-## Phase 2 — Aeron Archive
+## Phase 2 — Aeron Archive (Complete)
 
-- [ ] P2-1: Archive Protocol Codec
-- [ ] P2-2: Recording Catalog
-- [ ] P2-3: Recorder
-- [ ] P2-4: Replayer
-- [ ] P2-5: Archive Conductor
-- [ ] P2-6: Archive Context + Main
+- [x] P2-1: Archive Protocol Codec (`src/archive/protocol.zig`)
+- [x] P2-2: Recording Catalog (`src/archive/catalog.zig`)
+- [x] P2-3: Recorder (`src/archive/recorder.zig`)
+- [x] P2-4: Replayer (`src/archive/replayer.zig`)
+- [x] P2-5: Archive Conductor (`src/archive/conductor.zig`)
+- [x] P2-6: Archive Context + Main (`src/archive/archive.zig`)
 
-## Phase 3 — Aeron Cluster
+## Phase 3 — Aeron Cluster (Complete)
 
-- [ ] P3-1: Cluster Protocol Codec
-- [ ] P3-2: Raft Election
-- [ ] P3-3: Log Replication
-- [ ] P3-4: Cluster Conductor
-- [ ] P3-5: Cluster Context + Main
+- [x] P3-1: Cluster Protocol Codec (`src/cluster/protocol.zig`)
+- [x] P3-2: Raft Election (`src/cluster/election.zig`)
+- [x] P3-3: Log Replication (`src/cluster/log.zig`)
+- [x] P3-4: Cluster Conductor (`src/cluster/conductor.zig`)
+- [x] P3-5: Cluster Context + Main (`src/cluster/cluster.zig`)
 
 ## Phase 4 — Polish & Observability
 
