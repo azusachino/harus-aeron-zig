@@ -60,3 +60,19 @@ Two parallel code trees — agents must maintain both:
 - IPC: client→driver via ManyToOneRingBuffer; driver→client via BroadcastTransmitter
 - Frame alignment: all frames padded to 32-byte boundaries (FRAME_ALIGNMENT = 32)
 - Session established via SETUP handshake before DATA frames flow
+
+## Phase 5 Additions
+
+### CLI & Tooling (Phase 5c)
+
+- `src/cli.zig` — subcommand dispatcher; parses `[driver|archive|cluster|stat|errors|loss|streams|events|cluster-tool|help]` plus legacy flags (`--archive`, `--cluster`, `--counters`)
+- `src/cnc.zig` — CnC file descriptor; maps `/dev/shm/aeron/cnc.dat` for shared-memory stats (placeholder until full mmap)
+- `src/tools/{stat,errors,loss,streams,events,cluster_tool}.zig` — one function each, reads CnC descriptor; all placeholder until CnC mmap is implemented
+- `examples/{basic_publisher,basic_subscriber,throughput}.zig` — reference client apps; built via `make build` / `zig build examples`
+
+### Infrastructure Layer (Phase 5d)
+
+- `src/log.zig` — structured logging (JSON or text); level filtered by `AERON_LOG_LEVEL` env var; wraps `std.log`
+- `src/config.zig` — reads env vars (`AERON_DIR`, `AERON_TERM_BUFFER_LENGTH`, `AERON_HEALTH_PORT`, etc.) with platform-aware defaults; `Config.validate()` must be called at startup
+- `src/signal.zig` — installs SIGTERM/SIGINT handlers; exposes `signal.isRunning()` atomic flag for graceful shutdown loops
+- `src/health.zig` — HTTP server on `AERON_HEALTH_PORT` (default 8080) serving `/healthz` (always 200) and `/readyz` (200 when ready flag set); must be started in `main.zig` and loop must check `signal.isRunning()`
