@@ -3,7 +3,7 @@ export ZIG_GLOBAL_CACHE_DIR := $(CURDIR)/.zig-global-cache
 export ZIG_LOCAL_CACHE_DIR := $(CURDIR)/.zig-cache
 
 .PHONY: fmt fmt-check build test lint check clean run tutorial-check \
-       docker-build k8s-up k8s-down k8s-status k8s-logs colima-up colima-down
+       nix-image k8s-up k8s-down k8s-status k8s-logs colima-up colima-down
 
 fmt:
 	$(NIX_RUN) zig fmt .
@@ -52,16 +52,18 @@ IMAGE_NAME := harus-aeron-zig
 IMAGE_TAG  := latest
 
 colima-up:
-	colima start --runtime docker --kubernetes \
+	colima start --runtime containerd --kubernetes \
 		--cpu 4 --memory 4 --disk 20
 
 colima-down:
 	colima stop
 
-docker-build:
-	docker build -t $(IMAGE_NAME):$(IMAGE_TAG) .
+nix-image:
+	nix build .#oci
+	colima nerdctl load < result
+	colima ssh -- sudo ctr -n k8s.io images import - < result
 
-k8s-up: docker-build
+k8s-up: nix-image
 	kubectl apply -k deploy/k8s/
 
 k8s-down:

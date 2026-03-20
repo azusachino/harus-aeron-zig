@@ -6,8 +6,12 @@ RUN apk add --no-cache curl xz
 
 # Install Zig 0.15.2
 ARG ZIG_VERSION=0.15.2
-RUN curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-$(uname -m)-${ZIG_VERSION}.tar.xz" \
-    | tar -xJ -C /usr/local --strip-components=1
+ARG TARGETARCH
+RUN ARCH=$(uname -m) && \
+    curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ARCH}-linux-${ZIG_VERSION}.tar.xz" \
+    | tar -xJ -C /opt && \
+    ln -s /opt/zig-${ARCH}-linux-${ZIG_VERSION}/zig /usr/local/bin/zig && \
+    ln -s /opt/zig-${ARCH}-linux-${ZIG_VERSION}/lib /usr/local/lib/zig
 
 WORKDIR /src
 COPY build.zig build.zig.zon ./
