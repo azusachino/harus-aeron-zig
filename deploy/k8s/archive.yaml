@@ -1,0 +1,96 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aeron-archive
+  namespace: aeron
+  labels:
+    app.kubernetes.io/name: aeron-archive
+    app.kubernetes.io/component: archive
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aeron-archive
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aeron-archive
+        app.kubernetes.io/component: archive
+    spec:
+      containers:
+        - name: archive
+          image: harus-aeron-zig:latest
+          imagePullPolicy: Never
+          command: ["aeron-driver"]
+          args: ["--archive"]
+          env:
+            - name: AERON_DIR
+              value: /dev/shm/aeron
+            - name: ARCHIVE_DIR
+              value: /data/archive
+            - name: ARCHIVE_CONTROL_CHANNEL
+              value: "aeron:udp?endpoint=0.0.0.0:8010"
+            - name: ARCHIVE_CONTROL_STREAM_ID
+              value: "10"
+          ports:
+            - name: archive-ctrl
+              containerPort: 8010
+              protocol: UDP
+            - name: archive-events
+              containerPort: 8011
+              protocol: UDP
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+            - name: archive-data
+              mountPath: /data/archive
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi
+        - name: archive-data
+          persistentVolumeClaim:
+            claimName: aeron-archive-pvc
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: aeron-archive-pvc
+  namespace: aeron
+  labels:
+    app.kubernetes.io/name: aeron-archive
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aeron-archive
+  namespace: aeron
+  labels:
+    app.kubernetes.io/name: aeron-archive
+spec:
+  selector:
+    app.kubernetes.io/name: aeron-archive
+  ports:
+    - name: archive-ctrl
+      port: 8010
+      targetPort: 8010
+      protocol: UDP
+    - name: archive-events
+      port: 8011
+      targetPort: 8011
+      protocol: UDP

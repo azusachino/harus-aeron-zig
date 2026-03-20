@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aeron-driver
+  namespace: aeron
+  labels:
+    app.kubernetes.io/name: aeron-driver
+    app.kubernetes.io/component: media-driver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aeron-driver
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aeron-driver
+        app.kubernetes.io/component: media-driver
+    spec:
+      containers:
+        - name: driver
+          image: harus-aeron-zig:latest
+          imagePullPolicy: Never
+          command: ["aeron-driver"]
+          env:
+            - name: AERON_DIR
+              value: /dev/shm/aeron
+          ports:
+            - name: udp-data
+              containerPort: 40123
+              protocol: UDP
+            - name: udp-control
+              containerPort: 40124
+              protocol: UDP
+          volumeMounts:
+            - name: shm
+              mountPath: /dev/shm
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aeron-driver
+  namespace: aeron
+  labels:
+    app.kubernetes.io/name: aeron-driver
+spec:
+  selector:
+    app.kubernetes.io/name: aeron-driver
+  ports:
+    - name: udp-data
+      port: 40123
+      targetPort: 40123
+      protocol: UDP
+    - name: udp-control
+      port: 40124
+      targetPort: 40124
+      protocol: UDP
