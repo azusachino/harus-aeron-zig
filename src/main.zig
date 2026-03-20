@@ -4,8 +4,10 @@ const std = @import("std");
 const media_driver = @import("driver/media_driver.zig");
 const archive_mod = @import("archive/archive.zig");
 const cluster_mod = @import("cluster/cluster.zig");
+const counters_mod = @import("ipc/counters.zig");
+const counters_report_mod = @import("counters_report.zig");
 
-const Mode = enum { driver, archive, cluster };
+const Mode = enum { driver, archive, cluster, counters };
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -25,6 +27,8 @@ pub fn main() !void {
 
         if (std.mem.eql(u8, arg, "--archive")) {
             mode = .archive;
+        } else if (std.mem.eql(u8, arg, "--counters")) {
+            mode = .counters;
         } else if (std.mem.eql(u8, arg, "--cluster")) {
             mode = .cluster;
         } else if (std.mem.startsWith(u8, arg, "-Daeron.dir=")) {
@@ -44,6 +48,7 @@ pub fn main() !void {
         .driver => try runDriver(allocator, driver_ctx),
         .archive => try runArchive(allocator),
         .cluster => try runCluster(allocator),
+        .counters => runCounters(driver_ctx.aeron_dir),
     }
 }
 
@@ -96,6 +101,29 @@ fn runArchive(allocator: std.mem.Allocator) !void {
         };
         std.Thread.sleep(1 * std.time.ns_per_ms);
     }
+}
+
+fn runCounters(aeron_dir: []const u8) void {
+    std.log.info("Aeron Counters Report — dir={s}", .{aeron_dir});
+
+    // Placeholder: create a local CountersMap with sample data to demonstrate formatting.
+    // Real mmap of CnC file is future work.
+    var meta align(64) = [_]u8{0} ** (counters_mod.METADATA_LENGTH * 4);
+    var values align(64) = [_]u8{0} ** (counters_mod.COUNTER_LENGTH * 4);
+    var cm = counters_mod.CountersMap.init(&meta, &values);
+
+    const h1 = cm.allocate(counters_mod.PUBLISHER_LIMIT, "pub-limit");
+    cm.set(h1.counter_id, 12345);
+
+    const h2 = cm.allocate(counters_mod.SENDER_POSITION, "sender-pos");
+    cm.set(h2.counter_id, 100);
+
+    const report = counters_report_mod.CountersReport.init(&cm);
+    var stdout_buf: [4096]u8 = undefined;
+    var stdout = std.fs.File.stdout().writer(&stdout_buf);
+    report.formatTable(&stdout.interface) catch |err| {
+        std.log.err("Failed to format counters table: {}", .{err});
+    };
 }
 
 fn runCluster(allocator: std.mem.Allocator) !void {

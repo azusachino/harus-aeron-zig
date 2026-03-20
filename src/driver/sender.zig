@@ -7,6 +7,7 @@ const metadata = @import("../logbuffer/metadata.zig");
 const counters = @import("../ipc/counters.zig");
 const protocol = @import("../protocol/frame.zig");
 const endpoint = @import("../transport/endpoint.zig");
+const event_log_mod = @import("../event_log.zig");
 
 pub const RetransmitRequest = struct {
     session_id: i32,
@@ -37,19 +38,30 @@ pub const Sender = struct {
     allocator: std.mem.Allocator,
     retransmit_queue: std.ArrayList(RetransmitRequest),
     current_time_ms: i64,
+    event_log: ?*event_log_mod.EventLog,
 
     pub fn init(
         allocator: std.mem.Allocator,
         send_endpoint: *endpoint.SendChannelEndpoint,
         counters_map: *counters.CountersMap,
     ) !Sender {
+        return initWithEventLog(allocator, send_endpoint, counters_map, null);
+    }
+
+    pub fn initWithEventLog(
+        allocator: std.mem.Allocator,
+        send_ep: *endpoint.SendChannelEndpoint,
+        counters_map_: *counters.CountersMap,
+        el: ?*event_log_mod.EventLog,
+    ) !Sender {
         return .{
             .publications = std.ArrayList(*NetworkPublication){},
-            .send_endpoint = send_endpoint,
-            .counters_map = counters_map,
+            .send_endpoint = send_ep,
+            .counters_map = counters_map_,
             .allocator = allocator,
             .retransmit_queue = std.ArrayList(RetransmitRequest){},
             .current_time_ms = 0,
+            .event_log = el,
         };
     }
 
@@ -171,6 +183,12 @@ pub const Sender = struct {
             _ = publication.send_channel.send(publication.dest_address, frame_data) catch {
                 break;
             };
+
+            // Log frame_out event
+            if (self.event_log) |el| {
+                const now: i64 = @intCast(@as(i128, std.time.nanoTimestamp()));
+                el.log(.frame_out, now, publication.session_id, publication.stream_id, frame_data);
+            }
 
             current_pos += @as(i64, @intCast(aligned_len));
             work_count += 1;

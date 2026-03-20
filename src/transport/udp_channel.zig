@@ -1,4 +1,6 @@
 const std = @import("std");
+const uri_mod = @import("uri.zig");
+const AeronUri = uri_mod.AeronUri;
 
 pub const UdpChannel = struct {
     uri: []const u8,
@@ -7,9 +9,16 @@ pub const UdpChannel = struct {
     is_multicast: bool,
     mtu: ?usize,
     ttl: ?u8,
+    control: ?std.net.Address,
+    control_mode: ?AeronUri.ControlMode,
+    session_id: ?i32,
+    term_length: ?u32,
 
-    pub fn parse(allocator: std.mem.Allocator, uri: []const u8) !UdpChannel {
-        const owned_uri = try allocator.dupe(u8, uri);
+    pub fn parse(allocator: std.mem.Allocator, uri_str: []const u8) !UdpChannel {
+        var aeron_uri = try AeronUri.parse(allocator, uri_str);
+        defer aeron_uri.deinit();
+
+        const owned_uri = try allocator.dupe(u8, uri_str);
         errdefer allocator.free(owned_uri);
 
         var channel = UdpChannel{
@@ -17,36 +26,31 @@ pub const UdpChannel = struct {
             .endpoint = null,
             .local_address = null,
             .is_multicast = false,
-            .mtu = null,
-            .ttl = null,
+            .mtu = aeron_uri.mtu(),
+            .ttl = aeron_uri.ttl(),
+            .control = null,
+            .control_mode = aeron_uri.controlMode(),
+            .session_id = aeron_uri.sessionId(),
+            .term_length = aeron_uri.termLength(),
         };
 
-        if (std.mem.eql(u8, uri, "aeron:ipc")) {
+        if (aeron_uri.media_type == .ipc) {
             return channel;
         }
 
-        if (!std.mem.startsWith(u8, uri, "aeron:udp?")) {
-            return channel;
+        // Resolve endpoint address
+        if (aeron_uri.endpoint()) |ep| {
+            channel.endpoint = try parseAddress(ep, 0);
         }
 
-        const query = uri["aeron:udp?".len..];
-        var it = std.mem.tokenizeScalar(u8, query, '|');
-        while (it.next()) |param| {
-            var kv_it = std.mem.splitScalar(u8, param, '=');
-            const key = kv_it.next() orelse continue;
-            const value = kv_it.next() orelse continue;
+        // Resolve interface address
+        if (aeron_uri.interfaceName()) |iface| {
+            channel.local_address = parseAddress(iface, 0) catch null;
+        }
 
-            if (std.mem.eql(u8, key, "endpoint")) {
-                channel.endpoint = try parseAddress(value, 0);
-            } else if (std.mem.eql(u8, key, "interface")) {
-                // For interface, we try to parse it. If it fails (like "eth0"),
-                // we set it to null which usually means bind to any interface.
-                channel.local_address = parseAddress(value, 0) catch null;
-            } else if (std.mem.eql(u8, key, "mtu")) {
-                channel.mtu = std.fmt.parseInt(usize, value, 10) catch null;
-            } else if (std.mem.eql(u8, key, "ttl")) {
-                channel.ttl = std.fmt.parseInt(u8, value, 10) catch null;
-            }
+        // Resolve control address
+        if (aeron_uri.controlEndpoint()) |ctrl| {
+            channel.control = parseAddress(ctrl, 0) catch null;
         }
 
         if (channel.endpoint) |ep| {
@@ -127,4 +131,16 @@ test "UdpChannel: parse IPC URI" {
     try std.testing.expect(channel.endpoint == null);
     try std.testing.expect(channel.local_address == null);
     try std.testing.expect(!channel.isMulticast());
+}
+
+test "UdpChannel: parse with control and session-id" {
+    const allocator = std.testing.allocator;
+    var channel = try UdpChannel.parse(allocator, "aeron:udp?endpoint=localhost:40123|control=192.168.1.1:40124|control-mode=dynamic|session-id=42|term-length=131072");
+    defer channel.deinit(allocator);
+
+    try std.testing.expect(channel.endpoint != null);
+    try std.testing.expect(channel.control != null);
+    try std.testing.expectEqual(AeronUri.ControlMode.dynamic, channel.control_mode.?);
+    try std.testing.expectEqual(@as(i32, 42), channel.session_id.?);
+    try std.testing.expectEqual(@as(u32, 131072), channel.term_length.?);
 }

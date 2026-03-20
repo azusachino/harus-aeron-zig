@@ -34,12 +34,12 @@
 - [x] P3-4: Cluster Conductor (`src/cluster/conductor.zig`)
 - [x] P3-5: Cluster Context + Main (`src/cluster/cluster.zig`)
 
-## Phase 4 — Polish & Observability
+## Phase 4 — Polish & Observability (Complete)
 
-- [ ] P4-1: Aeron URI Parser
-- [ ] P4-2: Loss Report
-- [ ] P4-3: Driver Events Log
-- [ ] P4-4: Counters Reporting
+- [x] P4-1: Aeron URI Parser (`src/transport/uri.zig`)
+- [x] P4-2: Loss Report (`src/loss_report.zig`)
+- [x] P4-3: Driver Events Log (`src/event_log.zig`)
+- [x] P4-4: Counters Reporting (`src/counters_report.zig`)
 
 ## Done
 

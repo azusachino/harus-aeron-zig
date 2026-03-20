@@ -6,6 +6,9 @@ pub const protocol = @import("protocol/frame.zig");
 pub const logbuffer = @import("logbuffer/log_buffer.zig");
 pub const ipc = @import("ipc.zig");
 pub const driver = @import("driver/media_driver.zig");
+pub const loss_report = @import("loss_report.zig");
+pub const event_log = @import("event_log.zig");
+pub const counters_report = @import("counters_report.zig");
 pub const archive = struct {
     pub const protocol = @import("archive/protocol.zig");
     pub const catalog = @import("archive/catalog.zig");
@@ -24,6 +27,7 @@ pub const transport = struct {
     pub const ReceiveChannelEndpoint = @import("transport/endpoint.zig").ReceiveChannelEndpoint;
     pub const Poller = @import("transport/poller.zig").Poller;
     pub const UdpChannel = @import("transport/udp_channel.zig").UdpChannel;
+    pub const AeronUri = @import("transport/uri.zig").AeronUri;
 };
 
 pub const ExclusivePublication = @import("publication.zig").ExclusivePublication;
