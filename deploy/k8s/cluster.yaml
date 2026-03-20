@@ -34,9 +34,8 @@ spec:
               value: /dev/shm/aeron
             - name: ARCHIVE_DIR
               value: /data/archive
-            # Member ID derived from pod ordinal (aeron-cluster-0 → 0, etc.)
-            - name: CLUSTER_MEMBER_ID
-              value: "$(POD_NAME##*-)"
+            # Member ID derived from POD_NAME ordinal in Zig code
+            # e.g. aeron-cluster-0 → 0, aeron-cluster-2 → 2
             - name: CLUSTER_MEMBERS
               value: >-
                 0,aeron-cluster-0.aeron-cluster-headless.aeron.svc.cluster.local,9010,9020,9030| 1,aeron-cluster-1.aeron-cluster-headless.aeron.svc.cluster.local,9010,9020,9030| 2,aeron-cluster-2.aeron-cluster-headless.aeron.svc.cluster.local,9010,9020,9030
