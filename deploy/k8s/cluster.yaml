@@ -45,7 +45,12 @@ spec:
               value: "aeron:udp?endpoint=0.0.0.0:9020"
             - name: CONSENSUS_CHANNEL
               value: "aeron:udp?endpoint=0.0.0.0:9030"
+            - name: AERON_HEALTH_PORT
+              value: "8080"
           ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
             - name: ingress
               containerPort: 9010
               protocol: UDP
@@ -58,6 +63,18 @@ spec:
             - name: archive-ctrl
               containerPort: 8010
               protocol: UDP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
           volumeMounts:
             - name: shm
               mountPath: /dev/shm

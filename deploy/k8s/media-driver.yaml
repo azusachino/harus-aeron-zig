@@ -25,13 +25,30 @@ spec:
           env:
             - name: AERON_DIR
               value: /dev/shm/aeron
+            - name: AERON_HEALTH_PORT
+              value: "8080"
           ports:
+            - name: health
+              containerPort: 8080
+              protocol: TCP
             - name: udp-data
               containerPort: 40123
               protocol: UDP
             - name: udp-control
               containerPort: 40124
               protocol: UDP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
           volumeMounts:
             - name: shm
               mountPath: /dev/shm
