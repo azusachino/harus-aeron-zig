@@ -70,16 +70,8 @@ spec:
             limits:
               cpu: "1"
               memory: 512Mi
-          readinessProbe:
-            exec:
-              command: ["test", "-d", "/dev/shm/aeron"]
-            initialDelaySeconds: 5
-            periodSeconds: 10
-          livenessProbe:
-            exec:
-              command: ["test", "-d", "/dev/shm/aeron"]
-            initialDelaySeconds: 10
-            periodSeconds: 15
+          # Distroless image (no shell) — process liveness is the health check.
+          # k8s restarts the pod automatically if the process exits.
       volumes:
         - name: shm
           emptyDir:

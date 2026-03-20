@@ -47,8 +47,16 @@ pub fn main() !void {
     }
 }
 
+fn ensureAeronDir(aeron_dir: []const u8) void {
+    std.fs.makeDirAbsolute(aeron_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => std.log.warn("Could not create aeron_dir={s}: {}", .{ aeron_dir, err }),
+    };
+}
+
 fn runDriver(allocator: std.mem.Allocator, ctx: media_driver.MediaDriverContext) !void {
     std.log.info("Aeron Media Driver starting...", .{});
+    ensureAeronDir(ctx.aeron_dir);
 
     const md = try media_driver.MediaDriver.create(allocator, ctx);
     defer md.destroy();
@@ -65,6 +73,7 @@ fn runDriver(allocator: std.mem.Allocator, ctx: media_driver.MediaDriverContext)
 
 fn runArchive(allocator: std.mem.Allocator) !void {
     std.log.info("Aeron Archive starting...", .{});
+    ensureAeronDir(std.posix.getenv("AERON_DIR") orelse "/dev/shm/aeron");
 
     const archive_dir = std.posix.getenv("ARCHIVE_DIR") orelse "/tmp/aeron-archive";
     const control_channel = std.posix.getenv("ARCHIVE_CONTROL_CHANNEL") orelse "aeron:udp?endpoint=0.0.0.0:8010";
@@ -91,6 +100,7 @@ fn runArchive(allocator: std.mem.Allocator) !void {
 
 fn runCluster(allocator: std.mem.Allocator) !void {
     std.log.info("Aeron Cluster node starting...", .{});
+    ensureAeronDir(std.posix.getenv("AERON_DIR") orelse "/dev/shm/aeron");
 
     // Parse member ID from POD_NAME (k8s StatefulSet ordinal: aeron-cluster-N → N)
     const member_id = blk: {

@@ -74,4 +74,21 @@ pub fn build(b: *std.Build) void {
     });
     const tutorial_check_step = b.step("tutorial-check", "Compile-check tutorial stubs");
     tutorial_check_step.dependOn(&tutorial_check.step);
+
+    // Example: cluster demo
+    const cluster_demo = b.addExecutable(.{
+        .name = "cluster-demo",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("examples/cluster_demo.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+            },
+        }),
+    });
+    b.installArtifact(cluster_demo);
+    const run_demo = b.addRunArtifact(cluster_demo);
+    const demo_step = b.step("demo", "Run cluster demo");
+    demo_step.dependOn(&run_demo.step);
 }
