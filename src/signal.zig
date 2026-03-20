@@ -5,14 +5,14 @@ pub var running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true);
 pub fn install() void {
     const handler = std.posix.Sigaction{
         .handler = .{ .handler = handleSignal },
-        .mask = std.posix.empty_sigset,
+        .mask = std.mem.zeroes(std.posix.sigset_t),
         .flags = 0,
     };
-    std.posix.sigaction(std.posix.SIG.TERM, &handler, null) catch {};
-    std.posix.sigaction(std.posix.SIG.INT, &handler, null) catch {};
+    std.posix.sigaction(std.posix.SIG.TERM, &handler, null);
+    std.posix.sigaction(std.posix.SIG.INT, &handler, null);
 }
 
-fn handleSignal(_: c_int) callconv(.C) void {
+fn handleSignal(_: c_int) callconv(.c) void {
     running.store(false, .release);
 }
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const signal = @import("signal.zig");
 
 pub const HealthServer = struct {
     port: u16,
@@ -14,13 +15,17 @@ pub const HealthServer = struct {
     }
 
     fn serve(self: *HealthServer) void {
-        const addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, self.port) catch return;
+        const addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, self.port);
         var server = addr.listen(.{
             .reuse_address = true,
         }) catch return;
         defer server.deinit();
 
-        while (true) {
+        // Set 100ms accept timeout so the loop can check signal.isRunning() periodically.
+        const timeout = std.posix.timeval{ .sec = 0, .usec = 100_000 };
+        std.posix.setsockopt(server.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+
+        while (signal.isRunning()) {
             const conn = server.accept() catch continue;
             defer conn.stream.close();
             handleConnection(conn.stream, self.is_ready);
