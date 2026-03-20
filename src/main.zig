@@ -52,9 +52,9 @@ pub fn main() !void {
         }
     }
 
-    // Initialize MediaDriver
-    var md = try media_driver.MediaDriver.init(allocator, ctx);
-    defer md.deinit();
+    // Initialize MediaDriver — heap-allocated so internal pointers remain stable
+    const md = try media_driver.MediaDriver.create(allocator, ctx);
+    defer md.destroy();
 
     std.log.info("MediaDriver initialized with aeron_dir={s}", .{ctx.aeron_dir});
 
