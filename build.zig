@@ -91,4 +91,93 @@ pub fn build(b: *std.Build) void {
     const run_demo = b.addRunArtifact(cluster_demo);
     const demo_step = b.step("demo", "Run cluster demo");
     demo_step.dependOn(&run_demo.step);
+
+    // Fuzz tests
+    const fuzz_files = [_][]const u8{
+        "src/fuzz/frame.zig",
+        "src/fuzz/uri.zig",
+        "src/fuzz/ring_buffer.zig",
+        "src/fuzz/broadcast.zig",
+        "src/fuzz/log_buffer.zig",
+        "src/fuzz/catalog.zig",
+    };
+    const fuzz_step = b.step("fuzz", "Run fuzz tests");
+    for (fuzz_files) |fuzz_file| {
+        const fuzz_test = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(fuzz_file),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "aeron", .module = aeron_mod },
+                },
+            }),
+        });
+        fuzz_step.dependOn(&b.addRunArtifact(fuzz_test).step);
+    }
+
+    // Benchmarks
+    const bench_files = [_]struct { name: []const u8, path: []const u8 }{
+        .{ .name = "bench-throughput", .path = "src/bench/throughput.zig" },
+        .{ .name = "bench-latency", .path = "src/bench/latency.zig" },
+        .{ .name = "bench-fanout", .path = "src/bench/fanout.zig" },
+    };
+    const bench_step = b.step("bench", "Run benchmarks");
+    for (bench_files) |bench| {
+        const bench_exe = b.addExecutable(.{
+            .name = bench.name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(bench.path),
+                .target = target,
+                .optimize = .ReleaseFast,
+                .imports = &.{
+                    .{ .name = "aeron", .module = aeron_mod },
+                },
+            }),
+        });
+        b.installArtifact(bench_exe);
+        bench_step.dependOn(&b.addRunArtifact(bench_exe).step);
+    }
+
+    // Stress tests
+    const stress_term_rotation = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/stress/term_rotation.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+            },
+        }),
+    });
+    const run_stress_term_rotation = b.addRunArtifact(stress_term_rotation);
+
+    const stress_concurrent_pubs = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/stress/concurrent_pubs.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+            },
+        }),
+    });
+    const run_stress_concurrent_pubs = b.addRunArtifact(stress_concurrent_pubs);
+
+    const stress_reconnect = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/stress/reconnect.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+            },
+        }),
+    });
+    const run_stress_reconnect = b.addRunArtifact(stress_reconnect);
+
+    const stress_step = b.step("stress", "Run stress tests");
+    stress_step.dependOn(&run_stress_term_rotation.step);
+    stress_step.dependOn(&run_stress_concurrent_pubs.step);
+    stress_step.dependOn(&run_stress_reconnect.step);
 }

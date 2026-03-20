@@ -3,6 +3,7 @@ export ZIG_GLOBAL_CACHE_DIR := $(CURDIR)/.zig-global-cache
 export ZIG_LOCAL_CACHE_DIR := $(CURDIR)/.zig-cache
 
 .PHONY: fmt fmt-check build test lint check clean run tutorial-check \
+       fuzz bench stress \
        nix-image k8s-up k8s-down k8s-status k8s-logs colima-up colima-down \
        interop interop-build interop-run
 
@@ -82,6 +83,17 @@ k8s-logs:
 	@echo "=== Cluster Node 0 ===" && kubectl -n aeron logs aeron-cluster-0 --tail=20 2>/dev/null || true
 	@echo "\n=== Cluster Node 1 ===" && kubectl -n aeron logs aeron-cluster-1 --tail=20 2>/dev/null || true
 	@echo "\n=== Cluster Node 2 ===" && kubectl -n aeron logs aeron-cluster-2 --tail=20 2>/dev/null || true
+
+# --- Performance & Hardening ---
+
+fuzz:  ## Run fuzz tests
+	$(NIX_RUN) zig build fuzz
+
+bench:  ## Run benchmarks (ReleaseFast)
+	$(NIX_RUN) zig build bench
+
+stress:  ## Run stress tests
+	$(NIX_RUN) zig build stress
 
 # =============================================================================
 # Interop Testing
