@@ -1,3 +1,6 @@
+# ConfigMap containing Java Aeron smoke test apps for interop verification.
+# Mounted as /mnt/apps in interop job containers.
+# Used by: job-java-pub-zig-sub.yaml, job-zig-pub-java-sub.yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:

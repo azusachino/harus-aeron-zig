@@ -11,8 +11,15 @@ no brokers, no overhead, just bytes and math.
 
 ## Project Status: v1.0.0
 
-`harus-aeron-zig` is a complete, wire-compatible implementation of the Aeron messaging protocol.
-It supports the full lifecycle from media driver and client IPC to archiving and cluster consensus.
+`harus-aeron-zig` is a **complete, wire-compatible implementation of the Aeron messaging protocol**.
+All three phases are production-ready:
+
+- **Phase 1-4**: Media Driver (Conductor, Sender, Receiver agents) + Client API (Publication/Subscription)
+- **Phase 5**: Archive (recording, replay, catalog persistence)
+- **Phase 6**: Cluster (Raft consensus, replicated state machine)
+
+See [`docs/plan-phase6.md`](docs/plan-phase6.md) for the complete v1.0 implementation roadmap and
+[`docs/audit-2026-03-23.md`](docs/audit-2026-03-23.md) for wire-compatibility audit against Aeron 1.44.1.
 
 ## What Is This Repo?
 

@@ -101,6 +101,12 @@ stress:  ## Run stress tests
 # =============================================================================
 # Interop Testing
 # =============================================================================
+# Consolidated into single `make interop` target that:
+# - Builds OCI image (nix-image dependency)
+# - Compiles Java Aeron interop apps
+# - Deploys K8s jobs (java-pub-zig-sub, zig-pub-java-sub)
+# - Waits for completion and reports results
+# See: test/interop/k8s-verify.sh
 
 interop:  ## Run full interop test suite
 	bash test/interop/k8s-verify.sh
