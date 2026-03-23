@@ -33,6 +33,9 @@ test-unit:
 test-integration:
 	$(NIX_RUN) zig build test-integration
 
+test-interop:
+	bash test/interop/run.sh
+
 lint: fmt-check
 
 check: fmt-check build test
@@ -62,8 +65,12 @@ colima-down:
 
 nix-image:
 	nix build .#oci
-	colima nerdctl load < result
-	colima ssh -- sudo ctr -n k8s.io images import - < result
+	# Try docker load first, then nerdctl/ctr
+	docker load < result || true
+	# Import into k8s.io namespace
+	docker save harus-aeron-zig:latest | colima ssh -- sudo ctr -n k8s.io images import -
+	# Ensure it's tagged without docker.io prefix if needed
+	colima ssh -- sudo ctr -n k8s.io images tag $$(colima ssh -- sudo ctr -n k8s.io images ls -q | grep harus-aeron-zig | head -n 1) harus-aeron-zig:latest || true
 
 k8s-up: nix-image
 	kubectl apply -k deploy/k8s/
@@ -103,14 +110,15 @@ interop: interop-build interop-run  ## Run full interop test suite
 
 interop-build: nix-image  ## Build interop test images
 	docker build -t java-aeron:latest -f deploy/interop/Dockerfile.java-aeron deploy/interop/
-	nerdctl -n k8s.io image import $$(docker save java-aeron:latest | nerdctl -n k8s.io image load 2>&1 | grep -oP 'sha256:\S+') || \
-		docker save java-aeron:latest | nerdctl -n k8s.io image load
+	docker save java-aeron:latest | colima nerdctl image load --namespace k8s.io || \
+		docker save java-aeron:latest | colima ssh -- sudo ctr -n k8s.io images import -
 
 interop-run:  ## Run interop test jobs in k3s
+	kubectl create namespace aeron --dry-run=client -o yaml | kubectl apply -f -
 	kubectl delete jobs -n aeron -l app.kubernetes.io/part-of=interop --ignore-not-found
-	kubectl apply -k deploy/interop/
+	kubectl apply -k deploy/interop/ || kubectl replace --force -k deploy/interop/
 	@echo "Waiting for interop jobs to complete..."
-	kubectl wait --for=condition=complete --timeout=180s jobs -n aeron -l app.kubernetes.io/part-of=interop || \
+	kubectl wait --for=condition=complete --timeout=20s jobs -n aeron -l app.kubernetes.io/part-of=interop || \
 		{ kubectl get jobs -n aeron -l app.kubernetes.io/part-of=interop -o wide >&2; \
 		  echo "Interop jobs did not complete (timeout or failure)" >&2; exit 1; }
 	@echo "All interop tests passed!"

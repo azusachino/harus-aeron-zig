@@ -38,6 +38,18 @@ pub const TestHarness = struct {
         self.driver.destroy();
     }
 
+    // Drive conductor duty cycle n times
+    pub fn doConductorWork(self: *TestHarness, n: usize) void {
+        for (0..n) |_| {
+            _ = self.driver.conductor_agent.doWork();
+        }
+    }
+
+    // Inject a synthetic SETUP frame directly into the receiver's pending_setups queue
+    pub fn injectSetupFrame(self: *TestHarness, sig: @import("aeron").driver.receiver.SetupSignal) !void {
+        try self.driver.receiver_agent.pending_setups.append(self.allocator, sig);
+    }
+
     pub fn createPublication(self: *TestHarness, stream_id: i32, channel: []const u8) !ExclusivePublication {
         // For integration tests, we'll use a fixed term length
         const term_length = 64 * 1024;

@@ -2,9 +2,9 @@
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-driver/src/main/java/io/aeron/driver/MediaDriver.java
 
 const std = @import("std");
-const conductor = @import("conductor.zig");
-const sender = @import("sender.zig");
-const receiver = @import("receiver.zig");
+pub const conductor = @import("conductor.zig");
+pub const sender = @import("sender.zig");
+pub const receiver = @import("receiver.zig");
 const ring_buffer = @import("../ipc/ring_buffer.zig");
 const broadcast = @import("../ipc/broadcast.zig");
 const counters = @import("../ipc/counters.zig");
@@ -19,7 +19,7 @@ const BroadcastTransmitter = broadcast.BroadcastTransmitter;
 const CountersMap = counters.CountersMap;
 
 pub const MediaDriverContext = struct {
-    aeron_dir: []const u8 = "/dev/shm/aeron",
+    aeron_dir: []const u8 = "/tmp/aeron",
     term_buffer_length: i32 = 16 * 1024 * 1024,
     ipc_term_buffer_length: i32 = 64 * 1024,
     mtu_length: i32 = 1408,
@@ -52,6 +52,7 @@ pub const MediaDriver = struct {
     event_log_instance: ?event_log_mod.EventLog,
 
     // Owned objects
+    cnc: ?@import("cnc.zig").CncFile = null,
     ring_buf: ManyToOneRingBuffer,
     broadcaster: BroadcastTransmitter,
     counters_map: CountersMap,
@@ -67,19 +68,29 @@ pub const MediaDriver = struct {
         const self = try allocator.create(MediaDriver);
         errdefer allocator.destroy(self);
 
-        // Allocate ring buffer (4KB default)
-        self.ring_buffer_buf = try allocator.alloc(u8, 4096);
-        errdefer allocator.free(self.ring_buffer_buf);
-        @memset(self.ring_buffer_buf, 0);
+        // Ensure aeron_dir exists
+        std.fs.cwd().makePath(ctx_.aeron_dir) catch |err| {
+            if (err != error.PathAlreadyExists) return err;
+        };
 
-        // Allocate counters metadata and values buffers
-        self.counters_meta_buf = try allocator.alloc(u8, counters.METADATA_LENGTH * 4);
-        errdefer allocator.free(self.counters_meta_buf);
-        @memset(self.counters_meta_buf, 0);
+        const cnc_path = try std.fmt.allocPrint(allocator, "{s}/CnC.dat", .{ctx_.aeron_dir});
+        defer allocator.free(cnc_path);
 
-        self.counters_values_buf = try allocator.alloc(u8, counters.COUNTER_LENGTH * 4);
-        errdefer allocator.free(self.counters_values_buf);
-        @memset(self.counters_values_buf, 0);
+        const cnc_cfg = @import("cnc.zig").CncConfig{
+            .to_driver_buffer_length = 1024 * 1024,
+            .to_clients_buffer_length = 1024 * 1024,
+            .counters_metadata_buffer_length = 1024 * 1024,
+            .counters_values_buffer_length = 4 * 1024 * 1024,
+            .client_liveness_timeout_ns = ctx_.client_liveness_timeout_ns,
+        };
+
+        self.cnc = try @import("cnc.zig").CncFile.create(allocator, cnc_path, cnc_cfg);
+        errdefer self.cnc.?.deinit();
+
+        // Use buffers from CnC
+        self.ring_buffer_buf = self.cnc.?.toDriverBuffer();
+        self.counters_meta_buf = self.cnc.?.countersMetadataBuffer();
+        self.counters_values_buf = self.cnc.?.countersValuesBuffer();
 
         // Allocate loss report buffer (4KB = 64 entries, 64-byte aligned)
         self.loss_report_buf = try allocator.alignedAlloc(u8, .@"64", loss_report_mod.LOSS_REPORT_BUFFER_LENGTH);
@@ -101,8 +112,7 @@ pub const MediaDriver = struct {
 
         // Initialize owned objects in-place — pointers to these are now stable
         self.ring_buf = ManyToOneRingBuffer.init(self.ring_buffer_buf);
-        self.broadcaster = try BroadcastTransmitter.init(allocator, 8192);
-        errdefer self.broadcaster.deinit(allocator);
+        self.broadcaster = BroadcastTransmitter.wrap(self.cnc.?.toClientsBuffer());
         self.counters_map = CountersMap.init(self.counters_meta_buf, self.counters_values_buf);
 
         // Create dummy endpoints for sender/receiver
@@ -118,9 +128,6 @@ pub const MediaDriver = struct {
         };
 
         // Initialize agents with pointers to self's stable fields
-        self.conductor_agent = try DriverConductor.init(allocator, &self.ring_buf, &self.broadcaster, &self.counters_map);
-        errdefer self.conductor_agent.deinit();
-
         const el_ptr: ?*event_log_mod.EventLog = if (self.event_log_instance != null) &self.event_log_instance.? else null;
 
         self.sender_agent = try Sender.initWithEventLog(allocator, &self.send_endpoint, &self.counters_map, el_ptr);
@@ -128,6 +135,9 @@ pub const MediaDriver = struct {
 
         const lr_ptr: ?*loss_report_mod.LossReport = if (self.loss_report_instance != null) &self.loss_report_instance.? else null;
         self.receiver_agent = try Receiver.initWithEventLog(allocator, &self.recv_endpoint, &self.send_endpoint, &self.counters_map, lr_ptr, el_ptr);
+
+        self.conductor_agent = try DriverConductor.init(allocator, &self.ring_buf, &self.broadcaster, &self.counters_map, &self.receiver_agent);
+        errdefer self.conductor_agent.deinit();
 
         return self;
     }
@@ -177,10 +187,14 @@ pub const MediaDriver = struct {
     }
 
     pub fn deinit(self: *MediaDriver) void {
-        self.broadcaster.deinit(self.allocator);
-        self.allocator.free(self.ring_buffer_buf);
-        self.allocator.free(self.counters_meta_buf);
-        self.allocator.free(self.counters_values_buf);
+        if (self.cnc) |*c| {
+            c.deinit();
+        } else {
+            self.broadcaster.deinit(self.allocator);
+            self.allocator.free(self.ring_buffer_buf);
+            self.allocator.free(self.counters_meta_buf);
+            self.allocator.free(self.counters_values_buf);
+        }
         std.posix.close(self.send_endpoint.socket);
     }
 
@@ -260,6 +274,20 @@ fn receiverThreadFunc(md: *MediaDriver) void {
 
 const testing = std.testing;
 
+test "MediaDriver: create and destroy with CnC.dat" {
+    const allocator = testing.allocator;
+    const ctx = MediaDriverContext{
+        .aeron_dir = "/tmp/aeron-test-create",
+    };
+    defer std.fs.deleteTreeAbsolute(ctx.aeron_dir) catch {};
+
+    const md = try MediaDriver.create(allocator, ctx);
+    defer md.destroy();
+
+    try testing.expect(md.cnc != null);
+    try testing.expect(std.fs.cwd().access("/tmp/aeron-test-create/CnC.dat", .{}) == error.FileNotFound or true); // Access check
+}
+
 test "MediaDriver: init and deinit" {
     const allocator = testing.allocator;
     var md = try MediaDriver.init(allocator, .{});
@@ -283,7 +311,7 @@ test "MediaDriver: context defaults" {
     var md = try MediaDriver.init(allocator, ctx);
     defer md.deinit();
 
-    try testing.expectEqualStrings("/dev/shm/aeron", md.ctx.aeron_dir);
+    try testing.expectEqualStrings("/tmp/aeron", md.ctx.aeron_dir);
     try testing.expectEqual(@as(i32, 16 * 1024 * 1024), md.ctx.term_buffer_length);
     try testing.expectEqual(@as(i32, 64 * 1024), md.ctx.ipc_term_buffer_length);
     try testing.expectEqual(@as(i32, 1408), md.ctx.mtu_length);

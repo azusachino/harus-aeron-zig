@@ -1,0 +1,27 @@
+services:
+  java-pub:
+    image: eclipse-temurin:21
+    volumes:
+      - ./BasicPublisher.java:/app/BasicPublisher.java
+      - ./aeron-all.jar:/app/aeron-all.jar
+      - /dev/shm:/dev/shm
+    working_dir: /app
+    environment:
+      - JAVA_OPTS=-Djava.io.tmpdir=/dev/shm
+    command: >
+      sh -c "javac -cp aeron-all.jar BasicPublisher.java &&
+             java -cp .:aeron-all.jar BasicPublisher"
+    network_mode: host
+
+  zig-sub:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    volumes:
+      - /dev/shm:/dev/shm
+    environment:
+      - AERON_DIR=/dev/shm/aeron
+    command: ["basic-subscriber-interop"]
+    network_mode: host
+    depends_on:
+      - java-pub

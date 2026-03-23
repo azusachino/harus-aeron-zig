@@ -6,10 +6,17 @@ const std = @import("std");
 const ring_buffer = @import("../ipc/ring_buffer.zig");
 const broadcast = @import("../ipc/broadcast.zig");
 const counters = @import("../ipc/counters.zig");
+const receiver_mod = @import("receiver.zig");
+const sender_mod = @import("sender.zig");
+const logbuffer = @import("../logbuffer/log_buffer.zig");
+const transport_uri = @import("../transport/udp_channel.zig");
+const endpoint_mod = @import("../transport/endpoint.zig");
 
 const ManyToOneRingBuffer = ring_buffer.ManyToOneRingBuffer;
 const BroadcastTransmitter = broadcast.BroadcastTransmitter;
 const CountersMap = counters.CountersMap;
+const Receiver = receiver_mod.Receiver;
+const Image = receiver_mod.Image;
 
 // Command type IDs
 pub const CMD_ADD_PUBLICATION: i32 = 0x01;
@@ -34,6 +41,8 @@ pub const PublicationEntry = struct {
     stream_id: i32,
     channel: []u8,
     ref_count: i32,
+    log_buffer: ?*logbuffer.LogBuffer = null,
+    network_pub: ?*sender_mod.NetworkPublication = null,
 };
 
 pub const SubscriptionEntry = struct {
@@ -46,30 +55,49 @@ pub const DriverConductor = struct {
     ring_buffer: *ManyToOneRingBuffer,
     broadcaster: *BroadcastTransmitter,
     counters_map: *CountersMap,
+    receiver: *Receiver,
+    sender: *sender_mod.Sender,
     allocator: std.mem.Allocator,
     publications: std.ArrayList(PublicationEntry),
     subscriptions: std.ArrayList(SubscriptionEntry),
     next_session_id: i32,
+    recv_endpoint: *endpoint_mod.ReceiveChannelEndpoint,
+    recv_bound: bool,
 
     pub fn init(
         allocator: std.mem.Allocator,
         ring_buffer_ptr: *ManyToOneRingBuffer,
         broadcaster_ptr: *BroadcastTransmitter,
         counters_map_ptr: *CountersMap,
+        receiver_ptr: *Receiver,
+        sender_ptr: *sender_mod.Sender,
+        recv_ep: *endpoint_mod.ReceiveChannelEndpoint,
+        recv_bound: bool,
     ) !DriverConductor {
         return DriverConductor{
             .ring_buffer = ring_buffer_ptr,
             .broadcaster = broadcaster_ptr,
             .counters_map = counters_map_ptr,
+            .receiver = receiver_ptr,
+            .sender = sender_ptr,
+            .recv_endpoint = recv_ep,
+            .recv_bound = recv_bound,
             .allocator = allocator,
-            .publications = std.ArrayList(PublicationEntry){},
-            .subscriptions = std.ArrayList(SubscriptionEntry){},
+            .publications = .{},
+            .subscriptions = .{},
             .next_session_id = 1,
         };
     }
 
     pub fn deinit(self: *DriverConductor) void {
         for (self.publications.items) |pub_entry| {
+            if (pub_entry.network_pub) |np| {
+                self.allocator.destroy(np);
+            }
+            if (pub_entry.log_buffer) |lb| {
+                lb.deinit();
+                self.allocator.destroy(lb);
+            }
             self.allocator.free(pub_entry.channel);
         }
         self.publications.deinit(self.allocator);
@@ -81,22 +109,85 @@ pub const DriverConductor = struct {
     }
 
     pub fn doWork(self: *DriverConductor) i32 {
-        return self.ring_buffer.read(handleMessage, @ptrCast(self), 10);
+        var work: i32 = 0;
+        work += self.ring_buffer.read(handleMessage, @ptrCast(self), 10);
+
+        // Drain receiver SETUP signals
+        const setups = self.receiver.drainPendingSetups();
+        defer self.allocator.free(setups);
+
+        if (setups.len > 0) {
+            std.debug.print("[CONDUCTOR] Processing {d} setups\n", .{setups.len});
+        }
+
+        for (setups) |sig| {
+            // Find matching subscription
+            var found = false;
+            for (self.subscriptions.items) |sub| {
+                if (sub.stream_id == sig.stream_id) {
+                    std.debug.print("[CONDUCTOR] Found subscription for stream {d}, creating image...\n", .{sig.stream_id});
+                    found = true;
+                    // Create Image
+                    const lb = self.allocator.create(@import("../logbuffer/log_buffer.zig").LogBuffer) catch continue;
+                    lb.* = @import("../logbuffer/log_buffer.zig").LogBuffer.init(self.allocator, sig.term_length) catch continue;
+
+                    const hwm_label = std.fmt.allocPrint(self.allocator, "hwm: {d}:{d}", .{ sig.session_id, sig.stream_id }) catch "hwm";
+                    defer if (!std.mem.eql(u8, hwm_label, "hwm")) self.allocator.free(hwm_label);
+                    const hwm_handle = self.counters_map.allocate(counters.RECEIVER_HWM, hwm_label);
+
+                    const sub_pos_label = std.fmt.allocPrint(self.allocator, "sub-pos: {d}:{d}", .{ sig.session_id, sig.stream_id }) catch "sub-pos";
+                    defer if (!std.mem.eql(u8, sub_pos_label, "sub-pos")) self.allocator.free(sub_pos_label);
+                    const sub_pos_handle = self.counters_map.allocate(counters.SUBSCRIBER_POSITION, sub_pos_label);
+
+                    const image = self.allocator.create(Image) catch continue;
+                    image.* = Image.init(
+                        sig.session_id,
+                        sig.stream_id,
+                        sig.term_length,
+                        sig.mtu,
+                        sig.initial_term_id,
+                        lb,
+                        hwm_handle,
+                        sub_pos_handle,
+                        sig.source_address,
+                    );
+                    self.receiver.onAddSubscription(image) catch continue;
+
+                    // Send ON_IMAGE_READY to clients
+                    self.sendImageReady(sig.session_id, sig.stream_id, sub.registration_id);
+                    work += 1;
+                    break;
+                }
+            }
+            if (!found) {
+                std.debug.print("[CONDUCTOR] No subscription found for stream {d} (active subs: {d})\n", .{ sig.stream_id, self.subscriptions.items.len });
+            }
+        }
+
+        return work;
+    }
+
+    fn sendImageReady(self: *DriverConductor, session_id: i32, stream_id: i32, registration_id: i64) void {
+        var buf: [16]u8 = undefined;
+        std.mem.writeInt(i64, buf[0..8], registration_id, .little);
+        std.mem.writeInt(i32, buf[8..12], session_id, .little);
+        std.mem.writeInt(i32, buf[12..16], stream_id, .little);
+        self.broadcaster.transmit(RESPONSE_ON_IMAGE_READY, &buf);
     }
 
     fn handleAddPublication(self: *DriverConductor, data: []const u8) void {
-        if (data.len < 16) return; // Need at least correlation_id (8) + stream_id (4) + channel_len (4)
+        if (data.len < 24) return;
 
         const correlation_id = std.mem.readInt(i64, data[0..8], .little);
-        const stream_id = std.mem.readInt(i32, data[8..12], .little);
-        const channel_len = std.mem.readInt(i32, data[12..16], .little);
+        const stream_id = std.mem.readInt(i32, data[16..20], .little);
+        const channel_len = std.mem.readInt(i32, data[20..24], .little);
 
-        if (channel_len < 0 or data.len < 16 + @as(usize, @intCast(channel_len))) {
+        if (channel_len < 0 or data.len < 24 + @as(usize, @intCast(channel_len))) {
             self.sendError(correlation_id, 1, "Invalid ADD_PUBLICATION message");
             return;
         }
 
-        const channel_data = data[16 .. 16 + @as(usize, @intCast(channel_len))];
+        const channel_data = data[24 .. 24 + @as(usize, @intCast(channel_len))];
         const session_id = self.next_session_id;
         self.next_session_id +%= 1;
 
@@ -105,15 +196,71 @@ pub const DriverConductor = struct {
             return;
         };
 
+        // Parse channel URI to get dest address
+        var udp_ch = transport_uri.UdpChannel.parse(self.allocator, channel_data) catch null;
+        defer if (udp_ch) |*ch| ch.deinit(self.allocator);
+
+        const dest_address = if (udp_ch) |ch| ch.endpoint orelse std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40124) else std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40124);
+
+        // Create log buffer (64KB term for interop test)
+        const term_len: i32 = 64 * 1024;
+        const lb = self.allocator.create(logbuffer.LogBuffer) catch {
+            self.allocator.free(channel_copy);
+            self.sendError(correlation_id, 2, "Out of memory");
+            return;
+        };
+        lb.* = logbuffer.LogBuffer.init(self.allocator, term_len) catch {
+            self.allocator.destroy(lb);
+            self.allocator.free(channel_copy);
+            self.sendError(correlation_id, 2, "LogBuffer init failed");
+            return;
+        };
+
+        // Allocate counters
+        const sp_label = "sender-pos";
+        const pl_label = "pub-limit";
+        const sender_pos_handle = self.counters_map.allocate(counters.SENDER_POSITION, sp_label);
+        const pub_limit_handle = self.counters_map.allocate(counters.PUBLISHER_LIMIT, pl_label);
+        // Set publisher_limit to term_length so first offer succeeds
+        self.counters_map.set(pub_limit_handle.counter_id, term_len);
+
+        // Create NetworkPublication
+        const net_pub = self.allocator.create(sender_mod.NetworkPublication) catch {
+            lb.deinit();
+            self.allocator.destroy(lb);
+            self.allocator.free(channel_copy);
+            self.sendError(correlation_id, 2, "Out of memory");
+            return;
+        };
+        net_pub.* = sender_mod.NetworkPublication{
+            .session_id = session_id,
+            .stream_id = stream_id,
+            .initial_term_id = 0,
+            .log_buffer = lb,
+            .sender_position = sender_pos_handle,
+            .publisher_limit = pub_limit_handle,
+            .send_channel = self.sender.send_endpoint,
+            .dest_address = dest_address,
+            .mtu = 1408,
+            .last_setup_time_ms = 0,
+        };
+        self.sender.onAddPublication(net_pub);
+
         const entry = PublicationEntry{
             .registration_id = correlation_id,
             .session_id = session_id,
             .stream_id = stream_id,
             .channel = channel_copy,
             .ref_count = 1,
+            .log_buffer = lb,
+            .network_pub = net_pub,
         };
 
         self.publications.append(self.allocator, entry) catch {
+            self.sender.onRemovePublication(session_id, stream_id);
+            self.allocator.destroy(net_pub);
+            lb.deinit();
+            self.allocator.destroy(lb);
             self.allocator.free(channel_copy);
             self.sendError(correlation_id, 2, "Out of memory");
             return;
@@ -137,16 +284,26 @@ pub const DriverConductor = struct {
 
         if (found_index) |idx| {
             const removed = self.publications.swapRemove(idx);
+            if (removed.network_pub) |np| {
+                self.sender.onRemovePublication(removed.session_id, removed.stream_id);
+                self.allocator.destroy(np);
+            }
+            if (removed.log_buffer) |lb| {
+                lb.deinit();
+                self.allocator.destroy(lb);
+            }
             self.allocator.free(removed.channel);
         }
     }
 
     fn handleAddSubscription(self: *DriverConductor, data: []const u8) void {
-        if (data.len < 16) return;
+        if (data.len < 12) return;
 
         const correlation_id = std.mem.readInt(i64, data[0..8], .little);
         const stream_id = std.mem.readInt(i32, data[8..12], .little);
-        const channel_len = std.mem.readInt(i32, data[12..16], .little);
+        const channel_len = if (data.len >= 16) std.mem.readInt(i32, data[12..16], .little) else 0;
+
+        std.debug.print("[CONDUCTOR] ADD_SUBSCRIPTION: correlation={d} stream={d} channel_len={d}\n", .{ correlation_id, stream_id, channel_len });
 
         if (channel_len < 0 or data.len < 16 + @as(usize, @intCast(channel_len))) {
             self.sendError(correlation_id, 1, "Invalid ADD_SUBSCRIPTION message");
@@ -154,6 +311,22 @@ pub const DriverConductor = struct {
         }
 
         const channel_data = data[16 .. 16 + @as(usize, @intCast(channel_len))];
+
+        // Bind recv endpoint to channel port on first subscription (if not already bound)
+        if (!self.recv_bound) {
+            var udp_ch = transport_uri.UdpChannel.parse(self.allocator, channel_data) catch null;
+            defer if (udp_ch) |*ch| ch.deinit(self.allocator);
+            if (udp_ch) |ch| {
+                if (ch.endpoint) |ep| {
+                    const port = ep.getPort();
+                    if (port != 0) {
+                        const bind_addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
+                        std.posix.bind(self.recv_endpoint.socket, &bind_addr.any, bind_addr.getOsSockLen()) catch {};
+                        self.recv_bound = true;
+                    }
+                }
+            }
+        }
 
         const channel_copy = self.allocator.dupe(u8, channel_data) catch {
             self.sendError(correlation_id, 2, "Out of memory");
@@ -244,10 +417,9 @@ pub const DriverConductor = struct {
     }
 
     fn sendSubscriptionReady(self: *DriverConductor, correlation_id: i64, stream_id: i32) void {
-        var buf: [16]u8 = undefined;
+        var buf: [12]u8 = undefined;
         std.mem.writeInt(i64, buf[0..8], correlation_id, .little);
         std.mem.writeInt(i32, buf[8..12], stream_id, .little);
-        std.mem.writeInt(i32, buf[12..16], 0, .little); // padding
         self.broadcaster.transmit(RESPONSE_ON_SUBSCRIPTION_READY, &buf);
     }
 
@@ -312,7 +484,21 @@ test "DriverConductor init and deinit" {
     var values_buf: [4096]u8 = undefined;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
 
-    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm);
+    const dummy_socket: std.posix.socket_t = undefined;
+    var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
+        .socket = dummy_socket,
+        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+    };
+    var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{
+        .socket = dummy_socket,
+    };
+    var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &cm, null);
+    defer receiver.deinit();
+
+    var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
+    defer sender.deinit();
+
+    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false);
     defer conductor.deinit();
 
     try testing.expectEqual(@as(i32, 1), conductor.next_session_id);
@@ -335,19 +521,34 @@ test "DriverConductor ADD_PUBLICATION creates entry and sends ready response" {
     var values_buf: [4096]u8 = undefined;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
 
-    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm);
+    const dummy_socket: std.posix.socket_t = undefined;
+    var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
+        .socket = dummy_socket,
+        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+    };
+    var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{
+        .socket = dummy_socket,
+    };
+    var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &cm, null);
+    defer receiver.deinit();
+
+    var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
+    defer sender.deinit();
+
+    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false);
     defer conductor.deinit();
 
     // Simulate ADD_PUBLICATION command
-    var cmd_buf: [32]u8 = undefined;
+    var cmd_buf: [64]u8 = undefined;
+    @memset(&cmd_buf, 0);
     const channel = "aeron:udp";
     std.mem.writeInt(i64, cmd_buf[0..8], 12345, .little); // correlation_id
-    std.mem.writeInt(i32, cmd_buf[8..12], 42, .little); // stream_id
-    std.mem.writeInt(i32, cmd_buf[12..16], @as(i32, @intCast(channel.len)), .little);
-    @memcpy(cmd_buf[16 .. 16 + channel.len], channel);
+    std.mem.writeInt(i32, cmd_buf[16..20], 42, .little); // stream_id
+    std.mem.writeInt(i32, cmd_buf[20..24], @as(i32, @intCast(channel.len)), .little);
+    @memcpy(cmd_buf[24 .. 24 + channel.len], channel);
 
     // Directly call handler
-    conductor.handleAddPublication(cmd_buf[0 .. 16 + channel.len]);
+    conductor.handleAddPublication(cmd_buf[0 .. 24 + channel.len]);
 
     try testing.expectEqual(@as(usize, 1), conductor.publications.items.len);
     try testing.expectEqual(@as(i32, 42), conductor.publications.items[0].stream_id);
@@ -370,15 +571,33 @@ test "DriverConductor ADD_SUBSCRIPTION creates entry and sends ready response" {
     var values_buf: [4096]u8 = undefined;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
 
-    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm);
+    const dummy_socket: std.posix.socket_t = undefined;
+    var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
+        .socket = dummy_socket,
+        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+    };
+    var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{
+        .socket = dummy_socket,
+    };
+    var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &cm, null);
+    defer receiver.deinit();
+
+    var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
+    defer sender.deinit();
+
+    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false);
     defer conductor.deinit();
 
+    // Skip socket binding for dummy socket in tests
+    conductor.recv_bound = true;
+
     // Simulate ADD_SUBSCRIPTION command
-    var cmd_buf: [32]u8 = undefined;
+    var cmd_buf: [64]u8 = undefined;
+    @memset(&cmd_buf, 0);
     const channel = "aeron:udp";
     std.mem.writeInt(i64, cmd_buf[0..8], 54321, .little); // correlation_id
     std.mem.writeInt(i32, cmd_buf[8..12], 99, .little); // stream_id
-    std.mem.writeInt(i32, cmd_buf[12..16], @as(i32, @intCast(channel.len)), .little);
+    std.mem.writeInt(i32, cmd_buf[12..16], @as(i32, @intCast(channel.len)), .little); // channel_len
     @memcpy(cmd_buf[16 .. 16 + channel.len], channel);
 
     // Directly call handler
@@ -405,17 +624,32 @@ test "DriverConductor REMOVE_PUBLICATION cleans up entry" {
     var values_buf: [4096]u8 = undefined;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
 
-    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm);
+    const dummy_socket: std.posix.socket_t = undefined;
+    var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
+        .socket = dummy_socket,
+        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+    };
+    var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{
+        .socket = dummy_socket,
+    };
+    var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &cm, null);
+    defer receiver.deinit();
+
+    var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
+    defer sender.deinit();
+
+    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false);
     defer conductor.deinit();
 
     // Add a publication first
-    var cmd_buf: [32]u8 = undefined;
+    var cmd_buf: [64]u8 = undefined;
+    @memset(&cmd_buf, 0);
     const channel = "aeron:udp";
     std.mem.writeInt(i64, cmd_buf[0..8], 11111, .little);
-    std.mem.writeInt(i32, cmd_buf[8..12], 42, .little);
-    std.mem.writeInt(i32, cmd_buf[12..16], @as(i32, @intCast(channel.len)), .little);
-    @memcpy(cmd_buf[16 .. 16 + channel.len], channel);
-    conductor.handleAddPublication(cmd_buf[0 .. 16 + channel.len]);
+    std.mem.writeInt(i32, cmd_buf[16..20], 42, .little);
+    std.mem.writeInt(i32, cmd_buf[20..24], @as(i32, @intCast(channel.len)), .little);
+    @memcpy(cmd_buf[24 .. 24 + channel.len], channel);
+    conductor.handleAddPublication(cmd_buf[0 .. 24 + channel.len]);
 
     try testing.expectEqual(@as(usize, 1), conductor.publications.items.len);
 

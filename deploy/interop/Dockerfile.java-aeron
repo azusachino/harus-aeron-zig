@@ -1,12 +1,11 @@
-FROM eclipse-temurin:21-jdk-slim
+FROM amazoncorretto:21-alpine
 
 # Download Aeron JAR from Maven Central
-RUN apt-get update && apt-get install -y curl && \
+RUN apk add --no-cache curl && \
     curl -fsSL -o /tmp/aeron-all-1.46.7.jar \
     https://repo1.maven.org/maven2/io/aeron/aeron-all/1.46.7/aeron-all-1.46.7.jar && \
-    apt-get remove -y curl && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    apk del curl && \
+    rm -rf /var/cache/apk/*
 
 # Create shared memory directory for Aeron
 RUN mkdir -p /dev/shm/aeron && chmod 1777 /dev/shm/aeron

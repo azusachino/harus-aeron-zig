@@ -18,20 +18,20 @@ Update the `Status` column as tasks complete. Valid values: `pending`, `in_progr
 
 | ID | Lane | Milestone | Status | Files |
 |----|------|-----------|--------|-------|
-| C-1 | course | pre-M1 | pending | `docs/course/lesson-gap-report.md` |
-| I-1 | interop | M1 | pending | `src/publication.zig` |
-| I-2 | interop | M1 | pending | `src/ipc/broadcast.zig` |
-| I-3 | interop | M1 | pending | `src/protocol/frame.zig` |
-| I-4 | interop | M1 | pending | `src/driver/receiver.zig`, `src/driver/conductor.zig` |
-| I-5 | interop | M1 | pending | `src/driver/receiver.zig` |
-| **M1** | merge | — | pending | `make check` full tree |
+| C-1 | course | pre-M1 | done | `docs/course/lesson-gap-report.md` |
+| I-1 | interop | M1 | done | `src/publication.zig` |
+| I-2 | interop | M1 | done | `src/ipc/broadcast.zig` |
+| I-3 | interop | M1 | done | `src/protocol/frame.zig` |
+| I-4 | interop | M1 | done | `src/driver/receiver.zig`, `src/driver/conductor.zig` |
+| I-5 | interop | M1 | done | `src/driver/receiver.zig` |
+| **M1** | merge | — | done | `make check` full tree |
 | C-2 | course | M2 | pending | `src/protocol/frame.zig`, `docs/tutorial/part/frame-codec.md` |
 | C-3 | course | M2 | pending | `src/logbuffer/`, `docs/tutorial/part/logbuffer.md` |
 | C-4 | course | M2 | pending | `src/ipc/`, `docs/tutorial/part/ipc.md` |
-| I-6 | interop | M2 | pending | `src/logbuffer/log_buffer.zig` |
-| I-7 | interop | M2 | pending | `src/driver/cnc.zig` (new), `src/driver/media_driver.zig` |
-| I-8 | interop | M2 | pending | `src/aeron.zig` |
-| **M2** | merge | — | pending | `make check` + integration test |
+| I-6 | interop | M2 | done | `src/logbuffer/log_buffer.zig` |
+| I-7 | interop | M2 | done | `src/driver/cnc.zig` (new), `src/driver/media_driver.zig` |
+| I-8 | interop | M2 | done | `src/aeron.zig` |
+| **M2** | merge | — | done | `make check` + integration test |
 | C-5 | course | M3 | pending | `src/transport/`, `docs/tutorial/part/transport.md` |
 | C-6 | course | M3 | pending | `src/driver/`, `docs/tutorial/part/conductor-cnc.md` |
 | C-7 | course | M3 | pending | `examples/*.zig` |
