@@ -33,3 +33,8 @@ docs/*.tar
 # Environment
 .env
 .env.local
+
+# Unwanted artifacts
+node-compile-cache/
+result
+test_writer

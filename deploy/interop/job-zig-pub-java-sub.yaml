@@ -27,42 +27,7 @@ spec:
           args:
             - |
               mkdir -p /dev/shm/java
-              cat <<EOF > BasicSubscriber.java
-              import io.aeron.Aeron;
-              import io.aeron.Subscription;
-              import io.aeron.driver.MediaDriver;
-
-              public class BasicSubscriber {
-                  public static void main(String[] args) throws Exception {
-                      final String channel = System.getenv("CHANNEL");
-                      final int streamId = Integer.parseInt(System.getenv("STREAM_ID"));
-                      final String aeronDir = System.getenv("AERON_DIR");
-
-                      System.out.println("Launching Java Media Driver at " + aeronDir + "...");
-                      MediaDriver.Context driverCtx = new MediaDriver.Context()
-                          .aeronDirectoryName(aeronDir)
-                          .dirDeleteOnStart(true);
-
-                      try (MediaDriver driver = MediaDriver.launch(driverCtx)) {
-                          Thread.sleep(1000);
-                          try (Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver.aeronDirectoryName()));
-                               Subscription sub = aeron.addSubscription(channel, streamId)) {
-
-                              System.out.println("Java Subscriber connected to " + channel);
-                              int messagesReceived = 0;
-                              while (messagesReceived < 100) {
-                                  final int fragments = sub.poll((buffer, offset, length, header) -> {
-                                      // Log message
-                                  }, 10);
-                                  messagesReceived += fragments;
-                                  if (fragments == 0) Thread.yield();
-                              }
-                              System.out.println("Java Subscriber smoke test: SUCCESS (received 100 messages)");
-                          }
-                      }
-                  }
-              }
-              EOF
+              cp /mnt/apps/BasicSubscriber.java .
               javac -cp /opt/aeron/aeron-all.jar BasicSubscriber.java
               java -cp .:/opt/aeron/aeron-all.jar BasicSubscriber
           env:
@@ -75,8 +40,14 @@ spec:
           volumeMounts:
             - name: shm
               mountPath: /dev/shm
+            - name: apps
+              mountPath: /mnt/apps
+              readOnly: true
       volumes:
         - name: shm
           emptyDir:
             medium: Memory
             sizeLimit: 256Mi
+        - name: apps
+          configMap:
+            name: java-interop-apps

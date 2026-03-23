@@ -17,46 +17,7 @@ spec:
           args:
             - |
               mkdir -p /dev/shm/java
-              cat <<EOF > BasicPublisher.java
-              import io.aeron.Aeron;
-              import io.aeron.Publication;
-              import io.aeron.driver.MediaDriver;
-              import org.agrona.concurrent.UnsafeBuffer;
-              import java.nio.ByteBuffer;
-
-              public class BasicPublisher {
-                  public static void main(String[] args) throws Exception {
-                      final String channel = System.getenv("CHANNEL");
-                      final int streamId = Integer.parseInt(System.getenv("STREAM_ID"));
-                      final String aeronDir = System.getenv("AERON_DIR");
-
-                      System.out.println("Launching Java Media Driver at " + aeronDir + "...");
-                      MediaDriver.Context driverCtx = new MediaDriver.Context()
-                          .aeronDirectoryName(aeronDir)
-                          .dirDeleteOnStart(true);
-
-                      try (MediaDriver driver = MediaDriver.launch(driverCtx)) {
-                          Thread.sleep(1000);
-                          try (Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver.aeronDirectoryName()));
-                               Publication pub = aeron.addPublication(channel, streamId)) {
-
-                              System.out.println("Java Publisher connected to " + channel);
-                              UnsafeBuffer buffer = new UnsafeBuffer(ByteBuffer.allocateDirect(128));
-                              for (int i = 0; i < 100; i++) {
-                                  String msg = "Hello Aeron " + i;
-                                  buffer.putStringWithoutLengthUtf8(0, msg);
-                                  while (pub.offer(buffer, 0, msg.length()) < 0) {
-                                      Thread.yield();
-                                  }
-                                  if (i % 10 == 0) System.out.println("Sent " + i + " messages...");
-                              }
-                              Thread.sleep(1000); // Wait for delivery
-                              System.out.println("Java Publisher smoke test: SUCCESS (sent 100 messages)");
-                          }
-                      }
-                  }
-              }
-              EOF
+              cp /mnt/apps/BasicPublisher.java .
               javac -cp /opt/aeron/aeron-all.jar BasicPublisher.java
               java -cp .:/opt/aeron/aeron-all.jar BasicPublisher
           env:
@@ -69,6 +30,9 @@ spec:
           volumeMounts:
             - name: shm
               mountPath: /dev/shm
+            - name: apps
+              mountPath: /mnt/apps
+              readOnly: true
         - name: zig-subscriber
           image: harus-aeron-zig:latest
           imagePullPolicy: Never
@@ -86,3 +50,6 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 256Mi
+        - name: apps
+          configMap:
+            name: java-interop-apps
