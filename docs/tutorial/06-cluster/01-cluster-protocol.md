@@ -1,61 +1,64 @@
-# 6.1 Cluster Protocol
+# Chapter 6.1: Cluster Protocol
 
-## What you'll learn
+Aeron Cluster provides Raft-based consensus for high-availability. This chapter covers the message protocol that coordinates a cluster of nodes.
 
-- The three message families in Aeron Cluster: client-facing, consensus, and service
-- How Raft consensus messages map to `extern struct` codec types
-- The relationship between leadership terms, log positions, and member IDs
+## The Problem
 
-## Background
+How do you maintain a single consistent "truth" when multiple nodes in a cluster might fail at any time? How can a client be sure that a message was actually committed and replicated to a majority of nodes?
 
-Aeron Cluster implements Raft-based consensus for state machine replication.
-The protocol has three distinct message families:
+---
 
-| Family | Direction | MSG_TYPE_ID range | Purpose |
-|--------|-----------|-------------------|---------|
-| Client | Client ↔ Cluster | 201–210 | Session management, message routing |
-| Consensus | Node ↔ Node | 211–220 | Leader election, log replication, commit |
-| Service | Cluster → Service | 221–230 | Committed log delivery, snapshots |
+## Zig Track: Explicit Padding and Alignment
 
-### Key Raft concepts in the protocol
+Cluster messages often involve 64-bit timestamps and positions. When these structs are shared via memory-mapped log buffers, alignment becomes critical for performance and correctness across architectures.
 
-- **Leadership term** (`leader_ship_term_id`): monotonically increasing epoch number
-- **Log position** (`log_position`): byte offset in the replicated log
-- **Member ID** (`member_id`): unique node identifier within the cluster
-- **Candidate term** (`candidate_term_id`): term proposed during an election
+### The `_padding` Field
 
-## Message catalog
+In Zig, we use `extern struct` to match the C ABI, but we also include explicit `_padding` fields to ensure that all 64-bit fields are aligned to 8-byte boundaries.
 
-### Client-facing
-| Struct | Fields | Purpose |
-|--------|--------|---------|
-| `SessionConnectRequest` | correlation_id, cluster_session_id, response_stream_id | Client connects to cluster |
-| `SessionCloseRequest` | cluster_session_id, leader_ship_term_id | Client disconnects |
-| `SessionMessageHeader` | cluster_session_id, timestamp, correlation_id | Wraps client messages |
-| `SessionEvent` | cluster_session_id, correlation_id, leader_ship_term_id, event_code | Cluster notifications |
+```zig
+// LESSON(cluster/zig): Using extern structs with explicit _padding fields ensures the 64-bit alignment required for shared memory.
+pub const AppendRequestHeader = extern struct {
+    leader_ship_term_id: i64,
+    log_position: i64,
+    timestamp: i64,
+    leader_member_id: i32,
+    _padding: i32 = 0, // Padding to 8-byte boundary
+};
+```
 
-### Consensus (Raft)
-| Struct | Fields | Purpose |
-|--------|--------|---------|
-| `RequestVoteHeader` | candidate_term_id, log_position, candidate_member_id | Raft vote request |
-| `VoteHeader` | candidate_term_id, candidate_member_id, follower_member_id, vote | Raft vote response |
-| `AppendRequestHeader` | leader_ship_term_id, log_position, timestamp, leader_member_id | Log append from leader |
-| `AppendPositionHeader` | leader_ship_term_id, log_position, follower_member_id | Follower ACK |
-| `CommitPositionHeader` | leader_ship_term_id, log_position, leader_member_id | Leader commit broadcast |
-| `NewLeadershipTermHeader` | leader_ship_term_id, log_position, leader_member_id | Term transition |
+This explicit padding avoids "implicit" compiler-inserted space, making the memory layout predictable and identical across all languages.
 
-### Service
-| Struct | Fields | Purpose |
-|--------|--------|---------|
-| `ServiceAck` | log_position, timestamp, service_id | Service acknowledges committed entry |
+---
+
+## Aeron Track: Consensus and Replication
+
+Aeron Cluster uses the **Raft consensus algorithm** to manage a replicated log. The protocol is divided into three distinct message families:
+
+### 1. Client Messages (MSG_TYPE 201–210)
+Used for session lifecycle (`Connect`, `Close`) and routing client messages through the cluster.
+
+### 2. Consensus Messages (MSG_TYPE 211–220)
+The heart of the Raft algorithm. These coordinate:
+- **Elections**: `RequestVote` and `Vote` headers.
+- **Replication**: `AppendRequest` (leader sends data) and `AppendPosition` (follower acknowledges).
+- **Commitment**: `CommitPosition` (leader announces that a majority have the data).
+
+### 3. Service Messages (MSG_TYPE 221–230)
+Notify the application service that a message has been safely committed and is ready to be processed.
+
+---
+
+## Implementation Walkthrough
+
+- **`src/cluster/protocol.zig`**: Defines the `extern struct` layouts for the 3-family Cluster protocol.
+- **`src/cluster/election.zig`**: Implements the Raft leader election state machine.
+- **`src/cluster/log.zig`**: Manages the replicated log and commit progress.
 
 ## Exercise
 
-Open `tutorial/cluster/protocol.zig` and implement all message types.
+1. Open `tutorial/cluster/protocol.zig` and implement the `AppendRequestHeader`.
+2. Implement the `VoteHeader` struct, ensuring it has the correct `_padding` for 64-bit fields.
+3. Verify with `make tutorial-check`.
 
-Run `make tutorial-check` to verify.
-
-## Reference
-
-- `src/cluster/protocol.zig` — reference implementation
-- `aeron-cluster/src/main/java/io/aeron/cluster/codecs/` — upstream Java SBE codecs
+Further reading: [Aeron Cluster Specification](https://github.com/aeron-io/aeron/tree/master/aeron-cluster)

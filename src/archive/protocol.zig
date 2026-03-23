@@ -1,5 +1,7 @@
 // Aeron Archive control protocol codec
 // Reference: https://github.com/aeron-io/aeron/tree/master/aeron-archive/src/main/java/io/aeron/archive/codecs
+// LESSON(archive/aeron): Archive uses a request/response protocol over Aeron streams (not raw UDP).
+// LESSON(archive/zig): Every message is an extern struct to ensure bit-perfect wire compatibility with Java.
 const std = @import("std");
 
 pub const SourceLocation = enum(i32) {
@@ -18,6 +20,7 @@ pub const ControlResponseCode = enum(i32) {
 // ============================================================================
 
 /// StartRecordingRequest — initiate recording on a channel
+// LESSON(archive/aeron): StartRecordingRequest tells the archive conductor to create a new recording session.
 pub const StartRecordingRequest = extern struct {
     correlation_id: i64,
     stream_id: i32,
@@ -41,6 +44,7 @@ pub const StopRecordingRequest = extern struct {
 };
 
 /// ReplayRequest — initiate replay of a recording
+// LESSON(archive/aeron): ReplayRequest allows a client to request a range of data from a saved recording.
 pub const ReplayRequest = extern struct {
     correlation_id: i64,
     recording_id: i64,
@@ -121,6 +125,7 @@ pub const RecordingProgress = extern struct {
 };
 
 /// RecordingDescriptor — metadata for a recorded session
+// LESSON(archive/aeron): RecordingDescriptor contains all metadata needed to replay a stream, including term_length and MTU.
 pub const RecordingDescriptor = extern struct {
     recording_id: i64,
     start_timestamp: i64,
@@ -146,6 +151,7 @@ pub const RecordingDescriptor = extern struct {
 
 /// Encode a length-prefixed channel string into buffer.
 /// Returns number of bytes written (length prefix + string data).
+// LESSON(archive/zig): Zig's @memcpy and @intCast make encoding variable-length SBE-style strings efficient and safe.
 pub fn encodeChannel(buf: []u8, channel: []const u8) !usize {
     if (buf.len < 4 + channel.len) {
         return error.BufferTooSmall;

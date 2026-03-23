@@ -80,34 +80,61 @@ Shared memory IPC between client and driver.
 
 ### `src/transport/`
 
-UDP network layer.
+UDP network layer and URI parsing.
 
 | File | Contents |
 |------|----------|
-| `udp_channel.zig` | UdpChannel — socket, bind, multicast join/leave, send/recv |
-| `endpoint.zig` | SendChannelEndpoint, ReceiveChannelEndpoint — manage channels per URI |
-| `poller.zig` | I/O polling loop (poll/select), dispatch to endpoints |
+| `uri.zig` | AeronUri — parses `aeron:udp?...` into params |
+| `udp_channel.zig` | UdpChannel — resolves hostnames, multicast detection |
+| `endpoint.zig` | SendChannelEndpoint, ReceiveChannelEndpoint |
+| `poller.zig` | I/O multiplexing with `std.posix.poll` |
 
 ### `src/driver/`
 
-Media driver agents — each runs a duty-cycle loop.
+Media driver agents and the CnC rendezvous.
 
 | File | Contents |
 |------|----------|
-| `conductor.zig` | DriverConductor — processes client commands, manages pub/sub lifecycle |
-| `sender.zig` | Sender — reads publications, sends DATA + SETUP, manages retransmit |
-| `receiver.zig` | Receiver — dispatches incoming frames, writes to subscriber log buffers |
-| `media_driver.zig` | MediaDriver — launches agents, owns all resources |
+| `conductor.zig` | DriverConductor — commands, resource lifecycle |
+| `sender.zig` | Sender — reads log buffer, sends DATA/SETUP |
+| `receiver.zig` | Receiver — UDP frames, NAKs, writes log buffer |
+| `cnc.zig` | CncFile — mmap layout and header creation |
+| `media_driver.zig` | MediaDriver facade and agent orchestration |
+
+### `src/archive/`
+
+Persistent recording and replay.
+
+| File | Contents |
+|------|----------|
+| `protocol.zig` | Control protocol message codecs |
+| `catalog.zig` | Persistent recording directory |
+| `conductor.zig` | ArchiveConductor — manage recording sessions |
+| `recorder.zig` | Recording — write Aeron streams to disk |
+| `replayer.zig` | Replayer — read from recording and send via Aeron |
+
+### `src/cluster/`
+
+Raft-based consensus.
+
+| File | Contents |
+|------|----------|
+| `protocol.zig` | Client, Consensus (Raft), and Service message codecs |
+| `election.zig` | Election state machine (init, canvass, candidate, leader) |
+| `log.zig` | LogLeader and LogFollower replication progress |
+| `cluster.zig` | ConsensusModule — top-level Raft agent |
 
 ### `src/`
 
+Client library and top-level entry.
+
 | File | Contents |
 |------|----------|
-| `aeron.zig` | Aeron client context — connect to driver, create pub/sub |
-| `publication.zig` | ExclusivePublication, ConcurrentPublication |
-| `subscription.zig` | Subscription — poll for new images, invoke fragment handlers |
-| `image.zig` | Image — one received stream from one publisher |
-| `main.zig` | Driver binary entry — parse args, start MediaDriver |
+| `aeron.zig` | Aeron client context and connection bootstrap |
+| `publication.zig` | ExclusivePublication — atomic offer path |
+| `subscription.zig` | Subscription — polls for and processes image frames |
+| `cnc.zig` | CnC reader for clients |
+| `main.zig` | Standalone MediaDriver binary |
 
 ## Aeron UDP Protocol
 
@@ -139,10 +166,8 @@ Frame types: DATA(0x01), SETUP(0x03), STATUS(0x04), NAK(0x05), RTT(0x0B)
 2. Receiver validates SETUP, creates Image, sends STATUS with receiver window
 3. Data flow begins; flow control via STATUS window updates
 
-## Phase Roadmap
+## Phase History
 
-1. **Phase 1 — Media Driver**: full pub/sub over UDP, wire-compatible
-2. **Phase 2 — Archive**: record and replay via `aeron-archive`
-3. **Phase 3 — Cluster**: Raft consensus via `aeron-cluster`
+- **v1.0.0**: Media Driver, Client API, Archive, and Cluster complete. Java interop verified.
+- **v0.5.0**: Initial preview. Basic IPC pub/sub working.
 
-See `docs/plan.md` for detailed task breakdown.
