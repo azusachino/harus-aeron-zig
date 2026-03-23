@@ -1,7 +1,7 @@
 const std = @import("std");
 const ReceiveChannelEndpoint = @import("endpoint.zig").ReceiveChannelEndpoint;
 
-// LESSON(poller/aeron): Multiplexing strategy reduces per-datagram syscall overhead by batching multiple sockets into a single poll() call. See docs/tutorial/02-data-path/03-udp-transport.md
+// LESSON(transport/aeron): Multiplexing strategy reduces per-datagram syscall overhead by batching multiple sockets into a single poll() call. See docs/tutorial/02-data-path/03-udp-transport.md
 pub const Poller = struct {
     fds: std.ArrayList(std.posix.pollfd),
     endpoints: std.ArrayList(*ReceiveChannelEndpoint),
@@ -48,7 +48,7 @@ pub const Poller = struct {
     /// Calls std.posix.poll and returns the number of ready file descriptors.
     /// Does not call recv — that is the Receiver's job.
     /// Returns 0 if poll times out or encounters an error.
-    // LESSON(poller/zig): std.posix.poll blocks until timeout_ms or ≥1 fd has activity. No spinning; let OS scheduler wake us on I/O events.
+    // LESSON(transport/zig): std.posix.poll blocks until timeout_ms or ≥1 fd has activity. No spinning; let OS scheduler wake us on I/O events.
     pub fn poll(self: *Poller, timeout_ms: i32) i32 {
         if (self.fds.items.len == 0) return 0;
 

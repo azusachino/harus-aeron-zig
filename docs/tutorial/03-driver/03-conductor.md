@@ -1,163 +1,88 @@
-# 3.3 The Conductor
+# Chapter 3.3: The Conductor and CnC.dat
 
-The Conductor is the command/control centre of the media driver. It does not touch UDP sockets. Instead it reads client commands from a ring buffer, allocates or releases driver resources, and posts responses to a broadcast channel that all connected clients can read.
+The Conductor is the "brain" of the Media Driver. It doesn't touch the data path (sending or receiving packets); instead, it manages the lifecycle of resources and coordinates between clients and the other driver agents.
 
-## Role and Responsibilities
+## The Problem
 
-- Drain client commands from `ManyToOneRingBuffer`.
-- For `ADD_PUBLICATION`: allocate a log buffer, assign a session ID, record a `PublicationEntry`, respond with `ON_PUBLICATION_READY`.
-- For `ADD_SUBSCRIPTION`: record a `SubscriptionEntry`, respond with `ON_SUBSCRIPTION_READY`.
-- For `REMOVE_*`: release the entry and free heap allocations.
-- For `CLIENT_KEEPALIVE`: reset the liveness timer for that client.
-- For `ADD_COUNTER` / `REMOVE_COUNTER`: manage the shared counters slab.
-- Detect client liveness timeouts and disconnect idle clients.
+How do multiple independent processes (the Driver and many Clients) coordinate without a central broker or heavy RPC? How does a client "connect" to a driver that might have started at any time?
 
-## Command Lifecycle: ADD_PUBLICATION
+---
 
-```
-Client                     Ring Buffer            Conductor
-  │                             │                     │
-  │── write ADD_PUBLICATION ──>│                     │
-  │   [correlation_id: i64,    │                     │
-  │    stream_id: i32,         │                     │
-  │    channel_len: i32,       │                     │
-  │    channel: []u8]          │                     │
-  │                             │── read message ───>│
-  │                             │                    │── allocate PublicationEntry
-  │                             │                    │── assign next_session_id
-  │                             │                    │── store channel copy
-  │                             │                    │
-  │<──────── Broadcast ON_PUBLICATION_READY ─────────│
-  │          [correlation_id, session_id, stream_id]  │
-```
+## Zig Track: Shared Memory via `mmap`
 
-The conductor increments `next_session_id` for each new publication. The client matches the response to its request via `correlation_id`.
+Aeron uses the file system as a rendezvous point. Processes communicate by mapping the same file into their respective virtual address spaces.
 
-### handleAddPublication
+### The `std.posix.mmap` API
+
+In Zig, we use `std.posix.mmap` to request the OS to map a file descriptor to a memory address.
 
 ```zig
-fn handleAddPublication(self: *DriverConductor, data: []const u8) void {
-    const correlation_id = std.mem.readInt(i64, data[0..8], .little);
-    const stream_id      = std.mem.readInt(i32, data[8..12], .little);
-    const channel_len    = std.mem.readInt(i32, data[12..16], .little);
-    const channel_data   = data[16..16 + @as(usize, @intCast(channel_len))];
+// LESSON(conductor/zig): We mmap a file and cast a pointer to our header struct.
+const ptr = try std.posix.mmap(
+    null,
+    total_size,
+    std.posix.PROT.READ | std.posix.PROT.WRITE,
+    .{ .TYPE = .SHARED },
+    file.handle,
+    0,
+);
+const mapped = @as([*]align(std.heap.page_size_min) u8, @ptrCast(ptr))[0..total_size];
+```
 
-    const channel_copy = self.allocator.dupe(u8, channel_data) catch return;
-    const session_id   = self.next_session_id;
-    self.next_session_id += 1;
+The `.TYPE = .SHARED` flag is critical: it ensures that writes to this memory are visible to other processes mapping the same file.
 
-    self.publications.append(self.allocator, .{
-        .registration_id = correlation_id,
-        .session_id      = session_id,
-        .stream_id       = stream_id,
-        .channel         = channel_copy,
-        .ref_count       = 1,
-    }) catch { self.allocator.free(channel_copy); return; };
+### Pointer Arithmetic in Mapped Memory
 
-    self.sendPublicationReady(correlation_id, session_id, stream_id);
+Once mapped, we treat the file as a large byte array. We use offsets to locate specific buffers (ring buffers, broadcast buffers, counters) within the single `CnC.dat` file.
+
+```zig
+pub fn toDriverBuffer(self: *CncFile) []u8 {
+    const len = @as(usize, @intCast(self.toDriverBufferLength()));
+    return self.mapped[CNC_HEADER_SIZE..][0..len];
 }
 ```
 
-Key points: every allocation has an error path. The channel string is heap-owned and freed in `deinit` or `handleRemovePublication`. The response is written to the broadcast buffer synchronously before `doWork` returns.
+Zig's slice syntax `mapped[start..][0..len]` provides a safe way to create views into the shared memory without manual pointer incrementing.
 
-## The Publication and Subscription Maps
+---
 
-Publications and subscriptions are stored as `std.ArrayList` of entry structs:
+## Aeron Track: Driver Discovery and Resource Lifecycle
 
-```zig
-pub const PublicationEntry = struct {
-    registration_id: i64,
-    session_id:      i32,
-    stream_id:       i32,
-    channel:         []u8,   // heap-owned
-    ref_count:       i32,
-};
+### CnC.dat: The Command and Control File
 
-pub const SubscriptionEntry = struct {
-    registration_id: i64,
-    stream_id:       i32,
-    channel:         []u8,   // heap-owned
-};
-```
+The `CnC.dat` file is the first thing an Aeron client looks for. It lives in the `aeron.dir` (often `/dev/shm/aeron` on Linux for maximum speed).
 
-Removal scans the list linearly and uses `swapRemove` for O(1) deletion. The conductor holds exclusive access to these lists — only one conductor thread runs, so no synchronisation is needed.
+The file contains:
+1. **The Header**: Version, magic number, and lengths of all following buffers.
+2. **To-Driver Ring Buffer**: Clients write commands here (e.g., "Add Publication").
+3. **To-Clients Broadcast Buffer**: Driver writes events here (e.g., "Publication Ready").
+4. **Counters Metadata & Values**: Shared statistics and positions.
 
-## Tagged Unions and Exhaustive Switch
+### Client Handshake
 
-The command dispatch function is `handleMessage`, which the ring buffer calls for each message:
+When you call `Aeron.connect()`, the client:
+1. Finds `CnC.dat` in the configured directory.
+2. Maps it into memory.
+3. Reads the versions to ensure compatibility.
+4. Starts a "Keepalive" heartbeat so the driver knows the client is still alive.
 
-```zig
-fn handleMessage(msg_type_id: i32, data: []const u8, ctx: *anyopaque) void {
-    const self: *DriverConductor = @ptrCast(@alignCast(ctx));
-    switch (msg_type_id) {
-        CMD_ADD_PUBLICATION    => self.handleAddPublication(data),
-        CMD_REMOVE_PUBLICATION => self.handleRemovePublication(data),
-        CMD_ADD_SUBSCRIPTION   => self.handleAddSubscription(data),
-        CMD_REMOVE_SUBSCRIPTION => self.handleRemoveSubscription(data),
-        CMD_CLIENT_KEEPALIVE   => self.handleClientKeepalive(data),
-        CMD_ADD_COUNTER        => self.handleAddCounter(data),
-        CMD_REMOVE_COUNTER     => self.handleRemoveCounter(data),
-        else => {},
-    }
-}
-```
+### Resource Lifecycle
 
-Because `msg_type_id` is a raw `i32` from IPC, the `else` branch is required for unknown commands. If the commands were encoded as a Zig `enum`, you could use a **tagged union** instead:
+The Conductor manages the lifecycle of Publications and Subscriptions. 
+- When a client asks for a **Publication**, the Conductor allocates a new `session_id`, creates the log buffer files on disk, and notifies the client via the broadcast buffer.
+- If a client crashes, its keepalive will stop. The Conductor detects this and eventually cleans up the associated resources (closing log buffers, reclaiming session IDs).
 
-```zig
-const Command = union(enum) {
-    add_publication:    AddPublicationCmd,
-    remove_publication: RemovePublicationCmd,
-    add_subscription:   AddSubscriptionCmd,
-    // ...
-};
+---
 
-switch (cmd) {
-    .add_publication    => |c| self.handleAddPublication(c),
-    .remove_publication => |c| self.handleRemovePublication(c),
-    // compiler error if any variant is missing and no else branch
-}
-```
+## Implementation Walkthrough
 
-Exhaustive switch means the compiler refuses to compile if a new command variant is added without a handler. This is a strong invariant for command dispatch — no runtime default, no silent drop.
+- **`src/driver/cnc.zig`**: Implements the driver-side creation and layout of the `CnC.dat` file.
+- **`src/cnc.zig`**: Implements the client-side mapping and reading of `CnC.dat`.
+- **`src/driver/conductor.zig`**: The main agent loop. It polls the `to-driver` ring buffer for commands and dispatches them to handlers like `handleAddPublication`.
 
-## Response Functions
+## Exercise
 
-Each response is serialised into a small stack buffer and written to the broadcast transmitter:
+1. Open `tutorial/driver/conductor.zig` and implement the `handleMessage` dispatcher.
+2. Verify that the conductor can process an `ADD_PUBLICATION` command.
 
-```zig
-fn sendPublicationReady(self: *DriverConductor, correlation_id: i64,
-                        session_id: i32, stream_id: i32) void {
-    var buf: [16]u8 = undefined;
-    std.mem.writeInt(i64, buf[0..8],  correlation_id, .little);
-    std.mem.writeInt(i32, buf[8..12], session_id,     .little);
-    std.mem.writeInt(i32, buf[12..16], stream_id,     .little);
-    self.broadcaster.transmit(RESPONSE_ON_PUBLICATION_READY, &buf);
-}
-```
-
-Broadcast transmit is a lock-free append to a circular buffer. Clients poll that buffer independently.
-
-## Client Liveness
-
-`handleClientKeepalive` resets a per-client timestamp. A background scan in `doWork` would evict any client whose last keepalive is older than `client_liveness_timeout_ns` (default 5 seconds). The current implementation records the intent in `handleClientKeepalive`; production would close all publications and subscriptions owned by the dead client.
-
-## Function Reference
-
-| Function | Purpose |
-|---|---|
-| `init` | Initialise publication and subscription lists |
-| `deinit` | Free all heap-owned channel strings and lists |
-| `doWork` | Read up to 10 commands from the ring buffer |
-| `handleMessage` | Dispatch by command type ID (ring buffer callback) |
-| `handleAddPublication` | Allocate entry, assign session ID, send ready |
-| `handleRemovePublication` | Find and remove entry, free channel string |
-| `handleAddSubscription` | Allocate entry, send ready |
-| `handleRemoveSubscription` | Find and remove entry, free channel string |
-| `handleClientKeepalive` | Reset liveness timestamp for client |
-| `handleAddCounter` | Allocate a slot in the counters map |
-| `handleRemoveCounter` | Free a counter slot |
-| `sendPublicationReady` | Broadcast ON_PUBLICATION_READY |
-| `sendSubscriptionReady` | Broadcast ON_SUBSCRIPTION_READY |
-| `sendError` | Broadcast ON_ERROR with code and message |
-| `sendCounterReady` | Broadcast ON_COUNTER_READY |
+Further reading: [Aeron CnC File Descriptor](https://github.com/aeron-io/aeron/blob/master/aeron-client/src/main/java/io/aeron/CncFileDescriptor.java)

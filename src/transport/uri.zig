@@ -1,5 +1,6 @@
 const std = @import("std");
 
+// LESSON(transport/aeron): Aeron URIs define the channel medium and parameters (e.g. aeron:udp?endpoint=...).
 pub const AeronUri = struct {
     media_type: MediaType,
     params: std.StringHashMap([]const u8),
@@ -28,6 +29,7 @@ pub const AeronUri = struct {
         InvalidMediaType,
     };
 
+    // LESSON(transport/zig): String parsing using std.mem.tokenizeScalar and manual ownership transfer.
     pub fn parse(allocator: std.mem.Allocator, uri_str: []const u8) (ParseError || std.mem.Allocator.Error)!AeronUri {
         if (!std.mem.startsWith(u8, uri_str, "aeron:")) {
             return ParseError.InvalidUri;

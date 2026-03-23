@@ -1,60 +1,72 @@
 // Basic Publisher Example
-// Publishes 100 numbered messages to an IPC channel
+// Publishes 100 numbered messages to an IPC channel using the high-level Aeron API
 const std = @import("std");
 const aeron = @import("aeron");
+const Aeron = aeron.Aeron;
 const MediaDriver = aeron.driver.MediaDriver;
-const MediaDriverContext = aeron.driver.MediaDriverContext;
-const LogBuffer = aeron.logbuffer.LogBuffer;
-const ExclusivePublication = aeron.ExclusivePublication;
 
 pub fn main() !void {
+    // ZIG: GeneralPurposeAllocator tracks memory allocations and detects leaks on deinit.
+    // AERON: Clients need an allocator for CnC.dat mapping and internal Publication/Subscription handles.
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     std.debug.print("\n=== Basic Publisher ===\n\n", .{});
 
-    // Create and start MediaDriver
-    const driver = try MediaDriver.create(allocator, .{});
+    // ZIG: MediaDriver.create spawns the driver agents (Conductor, Sender, Receiver).
+    // AERON: The driver is the "server" that manages shared memory and network I/O.
+    // Usually it runs as a separate process, but here we run it embedded for simplicity.
+    const driver = try MediaDriver.create(allocator, .{ .aeron_dir = "/tmp/aeron-basic-example" });
     defer driver.destroy();
-    std.debug.print("MediaDriver created\n", .{});
+    std.debug.print("MediaDriver created at /tmp/aeron-basic-example\n", .{});
 
-    // Create a log buffer for the publication
-    const term_length = 64 * 1024;
-    const lb = try allocator.create(LogBuffer);
-    defer allocator.destroy(lb);
-    lb.* = try LogBuffer.init(allocator, term_length);
-    defer lb.deinit();
+    // ZIG: Aeron.init mmaps CnC.dat and resolves the shared-memory ring buffers.
+    // AERON: This is the client "connecting" to the driver. No TCP handshake — just mapping a file.
+    var client = try Aeron.init(allocator, .{ .aeron_dir = "/tmp/aeron-basic-example" });
+    defer client.deinit();
+    client.embedded_driver = driver; // ZIG: Link to embedded driver so doWork can resolve log buffers.
 
-    // Initialize metadata
-    const initial_term_id = 100;
-    var meta = lb.metaData();
-    meta.setRawTailVolatile(0, @as(i64, initial_term_id) << 32);
-    meta.setActiveTermCount(0);
+    // ZIG: addPublication writes a CMD_ADD_PUBLICATION message to the to-driver ring buffer.
+    // AERON: The Conductor will see this and allocate a session ID and log buffer file.
+    const registration_id = try client.addPublication("aeron:ipc", 1001);
+    std.debug.print("Publication requested (stream=1001, reg_id={d})\n", .{registration_id});
 
-    // Create exclusive publication on stream 1001
-    var publication = ExclusivePublication.init(1, 1001, initial_term_id, term_length, 1408, lb);
-    publication.publisher_limit = 10 * 1024 * 1024; // Allow 10MB of data
+    // ZIG: Wait for the Conductor to respond via the broadcast buffer.
+    // AERON: We must poll doWork() to see the RESPONSE_ON_PUBLICATION_READY event.
+    var publication: ?*aeron.ExclusivePublication = null;
+    while (publication == null) {
+        _ = client.doWork();
+        publication = client.getPublication(registration_id);
+        std.Thread.sleep(1 * std.time.ns_per_ms);
+    }
+    std.debug.print("Publication ready!\n\n", .{});
 
-    std.debug.print("Publication created (stream=1001)\n\n", .{});
+    const pub_instance = publication.?;
 
     // Publish 100 messages
     var buffer: [256]u8 = undefined;
     for (0..100) |i| {
-        // Format message as "Hello Aeron #N"
+        // ZIG: bufPrint formats strings into a fixed-size stack buffer to avoid allocation.
+        // AERON: Aeron messages are just byte slices; the protocol doesn't care about content.
         const msg = try std.fmt.bufPrint(&buffer, "Hello Aeron #{d}", .{i});
 
-        // Offer to publication
-        const result = publication.offer(msg);
+        // ZIG: offer() checks the volatile tail position and writes to the log buffer.
+        // AERON: This is a non-blocking operation. It returns .back_pressure if the log is full.
+        var result = pub_instance.offer(msg);
+        while (result == .back_pressure) {
+            std.Thread.sleep(1 * std.time.ns_per_ms);
+            result = pub_instance.offer(msg);
+        }
+
         switch (result) {
             .ok => |pos| {
                 std.debug.print("Published #{d}: \"{s}\" at position {d}\n", .{ i, msg, pos });
             },
-            .back_pressure => std.debug.print("Back pressure on message {d}\n", .{i}),
-            .not_connected => std.debug.print("No subscribers connected for message {d}\n", .{i}),
-            .admin_action => std.debug.print("Admin action on message {d}\n", .{i}),
-            .closed => return error.PublicationClosed,
-            .max_position_exceeded => return error.MaxPositionExceeded,
+            else => |r| {
+                std.debug.print("Error publishing message {d}: {any}\n", .{ i, r });
+                return;
+            },
         }
     }
 
