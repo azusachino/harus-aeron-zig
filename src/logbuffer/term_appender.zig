@@ -26,11 +26,15 @@ pub const TermAppender = struct {
 
     /// Pack term_id and term_offset into a 64-bit value: high 32 = term_id, low 32 = offset.
     pub fn packTail(term_id: i32, term_offset: i32) i64 {
+        // LESSON(term-appender/zig): Packing two signed i32 values into one i64 requires careful bitwise handling.
+        // We cast term_offset to u32 first to preserve bit patterns, then shift and OR. See docs/tutorial/02-data-path/01-term-appender.md
         return (@as(i64, term_id) << 32) | @as(i64, @as(u32, @bitCast(term_offset)));
     }
 
     /// Load raw_tail atomically with acquire semantics.
     pub fn rawTailVolatile(self: *const TermAppender) i64 {
+        // LESSON(term-appender/zig): @atomicLoad with .acquire ensures we see all writes by the appender thread
+        // before the load returns. This pairs with .acq_rel on the CAS to enforce happens-before. See docs/tutorial/02-data-path/01-term-appender.md
         const ptr: *const i64 = @ptrCast(&self.raw_tail);
         return @atomicLoad(i64, ptr, .acquire);
     }
@@ -61,6 +65,8 @@ pub const TermAppender = struct {
         }
 
         // 5. CAS raw_tail to advance by aligned_len
+        // LESSON(term-appender/aeron): Atomic CAS atomically reserves a byte range and publishes the term_id+offset pair.
+        // Multiple publishers race here; losers return .admin_action so the caller retries from the new tail. See docs/tutorial/02-data-path/01-term-appender.md
         const new_raw_tail = packTail(current_term_id, current_offset +% aligned_len_i32);
         const cas_result = @cmpxchgStrong(i64, ptr, current_raw_tail, new_raw_tail, .acq_rel, .acquire);
 
@@ -69,6 +75,8 @@ pub const TermAppender = struct {
         }
 
         // 6. Write header and payload to buffer at current_offset
+        // LESSON(term-appender/zig): After CAS succeeds, we own [current_offset, current_offset+aligned_len).
+        // Conversion from slice index to pointer uses @ptrCast + @alignCast; the slice points to aligned buffer. See docs/tutorial/02-data-path/01-term-appender.md
         const frame_offset = @as(usize, @intCast(current_offset));
 
         // Write header fields
@@ -118,6 +126,8 @@ pub const TermAppender = struct {
         }
 
         // CAS to advance raw_tail to term_length
+        // LESSON(term-appender/aeron): Padding frame marks end of term and triggers rotation.
+        // Publisher writes padding when next append would exceed term_length, signaling subscribers to rotate to next partition. See docs/tutorial/02-data-path/01-term-appender.md
         const new_raw_tail = packTail(current_term_id, self.term_length);
         const cas_result = @cmpxchgStrong(i64, ptr, current_raw_tail, new_raw_tail, .acq_rel, .acquire);
 
