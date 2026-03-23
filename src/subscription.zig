@@ -2,6 +2,7 @@ const std = @import("std");
 const image_mod = @import("image.zig");
 const term_reader = @import("logbuffer/term_reader.zig");
 
+// LESSON(subscription/zig): Image list is []*Image (pointers, not values) because Images are large and have identity; use pointer indirection for stability. See docs/tutorial/04-client/02-subscriptions.md
 pub const Subscription = struct {
     stream_id: i32,
     channel: []const u8,
@@ -27,6 +28,7 @@ pub const Subscription = struct {
         self.image_list.deinit(self.allocator);
     }
 
+    // LESSON(subscription/zig): poll() iterates all Images, invoking handler on each frame until fragment budget exhausted; handler receives unpacked DataHeader + payload. See docs/tutorial/04-client/02-subscriptions.md
     pub fn poll(
         self: *Subscription,
         handler: term_reader.FragmentHandler,
@@ -43,6 +45,7 @@ pub const Subscription = struct {
         return total_fragments_read;
     }
 
+    // LESSON(subscription/aeron): Image lifecycle: driver creates Image from SETUP frame (session_id, initial_term_id, log buffer); subscriber removes by session_id when sender closes. See docs/tutorial/04-client/02-subscriptions.md
     pub fn addImage(self: *Subscription, img: *image_mod.Image) !void {
         try self.image_list.append(self.allocator, img);
     }
@@ -56,6 +59,7 @@ pub const Subscription = struct {
         }
     }
 
+    // LESSON(subscription/aeron): Fragment reassembly is held in Image state; TermReader detects BEGIN/END flags and buffers intermediate frames before handler invocation. See docs/tutorial/04-client/02-subscriptions.md
     pub fn images(self: *const Subscription) []*image_mod.Image {
         return self.image_list.items;
     }
