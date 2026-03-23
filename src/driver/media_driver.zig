@@ -1,5 +1,6 @@
 // Media Driver Orchestrator — owns and coordinates Conductor, Sender, Receiver
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-driver/src/main/java/io/aeron/driver/MediaDriver.java
+// LESSON(media-driver/zig): MediaDriver is the top-level facade that allocates and wires three agents (Conductor, Sender, Receiver), shared IPC buffers (ring buffer, broadcast, counters), and endpoints. It can run standalone (thread-per-agent) or embedded (doWork loop). See docs/tutorial/03-driver/04-media-driver.md
 
 const std = @import("std");
 pub const conductor = @import("conductor.zig");
@@ -18,6 +19,7 @@ const ManyToOneRingBuffer = ring_buffer.ManyToOneRingBuffer;
 const BroadcastTransmitter = broadcast.BroadcastTransmitter;
 const CountersMap = counters.CountersMap;
 
+// LESSON(media-driver/aeron): MediaDriverContext holds all tunable driver parameters (buffer sizes, timeouts, MTU, port). Callers pass this struct to create/init; Zig's partial-field initialisation makes overriding a single setting clean: .{ .mtu_length = 8192 }. See docs/tutorial/03-driver/04-media-driver.md
 pub const MediaDriverContext = struct {
     aeron_dir: []const u8 = "/tmp/aeron",
     term_buffer_length: i32 = 16 * 1024 * 1024,
@@ -77,6 +79,7 @@ pub const MediaDriver = struct {
         const cnc_path = try std.fmt.allocPrint(allocator, "{s}/CnC.dat", .{ctx_.aeron_dir});
         defer allocator.free(cnc_path);
 
+        // LESSON(media-driver/zig): CnC.dat is the shared-memory gateway between driver and all clients. It mmap's a single file containing to-driver ring buffer, to-clients broadcast buffer, counters metadata and values. All agents and external client processes read/write via this single file—true zero-copy IPC. See docs/tutorial/03-driver/04-media-driver.md
         const cnc_cfg = @import("cnc.zig").CncConfig{
             .to_driver_buffer_length = 1024 * 1024,
             .to_clients_buffer_length = 1024 * 1024,
@@ -235,6 +238,7 @@ pub const MediaDriver = struct {
     }
 
     // Embedded mode: call this repeatedly to drive all agents one cycle
+    // LESSON(media-driver/aeron): doWork is the driver's main I/O loop when running embedded (not threaded). One call cycles Conductor (process commands, manage publications/subscriptions), Sender (send buffered datagrams), and Receiver (receive datagrams, populate log buffers). Non-zero work_count signals progress. See docs/tutorial/03-driver/04-media-driver.md
     pub fn doWork(self: *MediaDriver) i32 {
         var work_count: i32 = 0;
         work_count += self.conductor_agent.doWork();
@@ -244,6 +248,7 @@ pub const MediaDriver = struct {
     }
 
     // Standalone mode: spawn OS threads for each agent
+    // LESSON(media-driver/zig): start() launches three OS threads, each looping on a single agent's doWork: Conductor processes client commands, Sender sends buffered frames (with flow-control via shared counters), Receiver polls socket and stores datagrams in log buffers. The running flag (atomically checked by each thread) is the shutdown signal. See docs/tutorial/03-driver/04-media-driver.md
     pub fn start(self: *MediaDriver) !void {
         self.running.store(true, .release);
 
@@ -253,6 +258,7 @@ pub const MediaDriver = struct {
     }
 
     // Signal threads to stop and wait for them
+    // LESSON(media-driver/aeron): close() initiates graceful shutdown: store(false) in the running flag is observed by all agent threads, they exit their loops, then join() waits for each thread to finish. This ordered sequence ensures all in-flight data is flushed before driver teardown. See docs/tutorial/03-driver/04-media-driver.md
     pub fn close(self: *MediaDriver) void {
         self.running.store(false, .release);
 

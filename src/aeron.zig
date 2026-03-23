@@ -39,6 +39,7 @@ pub const AeronContext = struct {
     aeron_dir: []const u8 = "/tmp/aeron",
 };
 
+// LESSON(aeron/zig): Aeron is a factory and lifecycle container for the client-side API. It holds the CnC.dat file handle, ring buffer and broadcast receiver for driver communication, and hash maps of owned Publication and Subscription instances. The embedded_driver field is optional—clients can spawn their own driver or connect to an existing one via CnC.dat. See docs/tutorial/04-client/01-publications.md
 pub const Aeron = struct {
     ctx: AeronContext,
     allocator: std.mem.Allocator,
@@ -52,6 +53,7 @@ pub const Aeron = struct {
     subscriptions: std.AutoHashMapUnmanaged(i64, *Subscription),
     embedded_driver: ?*driver.MediaDriver = null,
 
+    // LESSON(aeron/aeron): Aeron.init opens the CnC.dat file, extracts the shared to-driver ring buffer and to-clients broadcast receiver. The client writes commands (add_publication, add_subscription) to the ring buffer; the driver writes responses (session_id, stream_id) to the broadcast. All subsequent publications and subscriptions reference log buffers allocated by the driver and discoverable via the shared broadcast. See docs/tutorial/04-client/01-publications.md
     pub fn init(allocator: std.mem.Allocator, ctx: AeronContext) !Aeron {
         const cnc_path = try std.fmt.allocPrint(allocator, "{s}/CnC.dat", .{ctx.aeron_dir});
         defer allocator.free(cnc_path);
@@ -90,6 +92,7 @@ pub const Aeron = struct {
         self.subscriptions.deinit(self.allocator);
     }
 
+    // LESSON(aeron/zig): doWork is the client's polling loop. It drains all pending messages from the driver's broadcast buffer: RESPONSE_ON_PUBLICATION_READY (allocates ExclusivePublication with log buffer), RESPONSE_ON_SUBSCRIPTION_READY (allocates Subscription), RESPONSE_ON_IMAGE_READY (adds Image to subscription for a new publisher session). Call this in your application's main loop to discover new publications and subscriptions. See docs/tutorial/04-client/01-publications.md
     pub fn doWork(self: *Aeron) i32 {
         var work: i32 = 0;
         while (self.to_clients_broadcast_receiver.receiveNext()) {
@@ -169,6 +172,7 @@ pub const Aeron = struct {
         return 0;
     }
 
+    // LESSON(aeron/aeron): addSubscription encodes a CMD_ADD_SUBSCRIPTION message (correlation_id, stream_id, channel) into the to-driver ring buffer. The driver's Conductor reads this message, allocates a log buffer for this (channel, stream_id) pair, and sends RESPONSE_ON_SUBSCRIPTION_READY back on the broadcast. The correlation_id lets the client match request to response. See docs/tutorial/04-client/02-subscriptions.md
     pub fn addSubscription(self: *Aeron, channel: []const u8, stream_id: i32) !i64 {
         const correlation_id = self.next_correlation_id.fetchAdd(1, .monotonic);
 
@@ -186,6 +190,7 @@ pub const Aeron = struct {
         return correlation_id;
     }
 
+    // LESSON(aeron/zig): addPublication is the complementary client-to-driver handshake for writers. It packs CMD_ADD_PUBLICATION (correlation_id, stream_id, channel) and sends it to the driver. The Conductor allocates an ExclusivePublication with a log buffer, and responds with RESPONSE_ON_PUBLICATION_READY. The client polls doWork() to see the response and creates a local ExclusivePublication handle. See docs/tutorial/04-client/01-publications.md
     pub fn addPublication(self: *Aeron, channel: []const u8, stream_id: i32) !i64 {
         const correlation_id = self.next_correlation_id.fetchAdd(1, .monotonic);
 
