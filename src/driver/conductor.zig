@@ -109,6 +109,7 @@ pub const DriverConductor = struct {
     }
 
     pub fn doWork(self: *DriverConductor) i32 {
+        // LESSON(conductor/zig): Command dispatch via ring buffer polling + SETUP signal processing in one work cycle. See docs/tutorial/03-driver/03-conductor.md
         var work: i32 = 0;
         work += self.ring_buffer.read(handleMessage, @ptrCast(self), 10);
 
@@ -121,6 +122,7 @@ pub const DriverConductor = struct {
         }
 
         for (setups) |sig| {
+            // LESSON(conductor/aeron): On SETUP signal, create Image with log buffer + counters, attach to Receiver. See docs/tutorial/03-driver/03-conductor.md
             // Find matching subscription
             var found = false;
             for (self.subscriptions.items) |sub| {
@@ -176,6 +178,7 @@ pub const DriverConductor = struct {
     }
 
     fn handleAddPublication(self: *DriverConductor, data: []const u8) void {
+        // LESSON(conductor/aeron): Publication lifecycle—allocate session ID, create log buffer + counters, register with Sender. See docs/tutorial/03-driver/03-conductor.md
         if (data.len < 24) return;
 
         const correlation_id = std.mem.readInt(i64, data[0..8], .little);
@@ -297,6 +300,7 @@ pub const DriverConductor = struct {
     }
 
     fn handleAddSubscription(self: *DriverConductor, data: []const u8) void {
+        // LESSON(conductor/aeron): Subscription lifecycle—store channel + stream_id, wait for publisher SETUP to create Image. See docs/tutorial/03-driver/03-conductor.md
         if (data.len < 12) return;
 
         const correlation_id = std.mem.readInt(i64, data[0..8], .little);
@@ -376,6 +380,7 @@ pub const DriverConductor = struct {
     }
 
     fn handleAddCounter(self: *DriverConductor, data: []const u8) void {
+        // LESSON(conductor/aeron): Counter allocation—assign shared-memory slots for sender_position, publisher_limit, receiver_hwm, etc. See docs/tutorial/03-driver/03-conductor.md
         if (data.len < 16) return;
 
         const correlation_id = std.mem.readInt(i64, data[0..8], .little);
@@ -409,6 +414,7 @@ pub const DriverConductor = struct {
     }
 
     fn sendPublicationReady(self: *DriverConductor, correlation_id: i64, session_id: i32, stream_id: i32) void {
+        // LESSON(conductor/zig): Broadcast response to clients via shared-memory broadcast buffer—clients poll for readiness. See docs/tutorial/03-driver/03-conductor.md
         var buf: [16]u8 = undefined;
         std.mem.writeInt(i64, buf[0..8], correlation_id, .little);
         std.mem.writeInt(i32, buf[8..12], session_id, .little);

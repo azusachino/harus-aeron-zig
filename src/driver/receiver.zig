@@ -55,6 +55,7 @@ pub const Image = struct {
     // Write an incoming DATA frame into the log buffer at the correct partition+offset
     // Returns true if written, false if out-of-bounds or duplicate
     pub fn insertFrame(self: *Image, counters_map: *counters.CountersMap, header: *const protocol.DataHeader, payload: []const u8) bool {
+        // LESSON(receiver/zig): Write header then payload to term buffer, then write frame_length last (atomic commit signal). See docs/tutorial/03-driver/02-receiver.md
         // Compute active partition for header.term_id
         const term_count = header.term_id - self.initial_term_id;
         const partition = @as(usize, @intCast(@mod(term_count, 3)));
@@ -232,6 +233,7 @@ pub const Receiver = struct {
 
     // Single duty cycle: recv one frame, dispatch, return work count (0 or 1)
     pub fn doWork(self: *Receiver) i32 {
+        // LESSON(receiver/zig): Non-blocking UDP receive loop—read up to 4096 bytes, parse frame type, dispatch. See docs/tutorial/03-driver/02-receiver.md
         // 1. Call recv_endpoint.recv(&recv_buf, &src_addr)
         var src_addr: std.net.Address = undefined;
         const bytes_read = self.recv_endpoint.recv(&self.recv_buf, &src_addr) catch |err| {
@@ -263,6 +265,7 @@ pub const Receiver = struct {
 
         // 3. Dispatch based on frame type
         if (frame_type_raw == @intFromEnum(protocol.FrameType.data)) {
+            // LESSON(receiver/aeron): DATA frame insertion into Image log buffer—detects gaps and records loss observations. See docs/tutorial/03-driver/02-receiver.md
             const header = @as(*const protocol.DataHeader, @ptrCast(@alignCast(&self.recv_buf[0])));
             // std.debug.print("[RECEIVER] DATA frame: session={d} stream={d} len={d}\n", .{ header.session_id, header.stream_id, header.frame_length });
 
@@ -324,6 +327,7 @@ pub const Receiver = struct {
             // Unknown session/stream — log/ignore (conductor handles creation)
             return 1;
         } else if (frame_type_raw == @intFromEnum(protocol.FrameType.setup)) {
+            // LESSON(receiver/aeron): SETUP frame handshake—queue for conductor to attach Image to log buffer. See docs/tutorial/03-driver/02-receiver.md
             // FrameType.setup
             if (bytes_read < protocol.SetupHeader.LENGTH) {
                 return 1;
@@ -375,6 +379,7 @@ pub const Receiver = struct {
 
     // Send a NAK frame back to source_address for the given image's gaps
     pub fn sendNak(self: *Receiver, image: *Image) !void {
+        // LESSON(receiver/aeron): NAK generation coalesces gaps then sends one NAK per gap after 1ms delay. See docs/tutorial/03-driver/02-receiver.md
         for (image.nak_state.gaps()) |gap| {
             var nak_header: protocol.NakHeader = undefined;
             nak_header.frame_length = protocol.NakHeader.LENGTH;
