@@ -8,10 +8,10 @@ pub const FRAME_ALIGNMENT: usize = 32;
 pub const FrameType = enum(u16) {
     padding = 0x00,
     data = 0x01,
-    setup = 0x03,
-    status = 0x04,
-    nak = 0x05,
-    rtt_measurement = 0x0B,
+    nak = 0x02,
+    status = 0x03,
+    setup = 0x05,
+    rtt_measurement = 0x06,
     resolution_entry = 0x0E,
 };
 

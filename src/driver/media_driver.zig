@@ -25,6 +25,7 @@ pub const MediaDriverContext = struct {
     mtu_length: i32 = 1408,
     client_liveness_timeout_ns: i64 = 5_000_000_000,
     publication_connection_timeout_ns: i64 = 5_000_000_000,
+    listen_port: u16 = 0, // 0 = ephemeral, non-zero = bind to specific port
 };
 
 pub const MediaDriver = struct {
@@ -119,9 +120,20 @@ pub const MediaDriver = struct {
         const fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
         errdefer std.posix.close(fd);
 
+        // Bind socket to configured port (if non-zero)
+        const bound = if (ctx_.listen_port != 0) blk: {
+            const bind_addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, ctx_.listen_port);
+            std.posix.bind(fd, &bind_addr.any, bind_addr.getOsSockLen()) catch |err| {
+                std.debug.print("[DRIVER] Failed to bind to port {d}: {any}\n", .{ ctx_.listen_port, err });
+                return err;
+            };
+            std.debug.print("[DRIVER] Bound to 0.0.0.0:{d} (fd={d})\n", .{ ctx_.listen_port, fd });
+            break :blk true;
+        } else false;
+
         self.recv_endpoint = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
             .socket = fd,
-            .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+            .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, if (bound) ctx_.listen_port else 0),
         };
         self.send_endpoint = @import("../transport/endpoint.zig").SendChannelEndpoint{
             .socket = fd,
@@ -136,7 +148,16 @@ pub const MediaDriver = struct {
         const lr_ptr: ?*loss_report_mod.LossReport = if (self.loss_report_instance != null) &self.loss_report_instance.? else null;
         self.receiver_agent = try Receiver.initWithEventLog(allocator, &self.recv_endpoint, &self.send_endpoint, &self.counters_map, lr_ptr, el_ptr);
 
-        self.conductor_agent = try DriverConductor.init(allocator, &self.ring_buf, &self.broadcaster, &self.counters_map, &self.receiver_agent);
+        self.conductor_agent = try DriverConductor.init(
+            allocator,
+            &self.ring_buf,
+            &self.broadcaster,
+            &self.counters_map,
+            &self.receiver_agent,
+            &self.sender_agent,
+            &self.recv_endpoint,
+            bound,
+        );
         errdefer self.conductor_agent.deinit();
 
         return self;
@@ -245,6 +266,24 @@ pub const MediaDriver = struct {
             thread.join();
         }
     }
+
+    pub fn getPublicationLogBuffer(self: *MediaDriver, session_id: i32, stream_id: i32) ?*@import("../logbuffer/log_buffer.zig").LogBuffer {
+        for (self.conductor_agent.publications.items) |*entry| {
+            if (entry.session_id == session_id and entry.stream_id == stream_id) {
+                return entry.log_buffer;
+            }
+        }
+        return null;
+    }
+
+    pub fn getImageLogBuffer(self: *MediaDriver, session_id: i32, stream_id: i32) ?*@import("../logbuffer/log_buffer.zig").LogBuffer {
+        for (self.receiver_agent.images.items) |image| {
+            if (image.session_id == session_id and image.stream_id == stream_id) {
+                return image.log_buffer;
+            }
+        }
+        return null;
+    }
 };
 
 // Thread function for conductor agent
@@ -257,6 +296,7 @@ fn conductorThreadFunc(md: *MediaDriver) void {
 // Thread function for sender agent
 fn senderThreadFunc(md: *MediaDriver) void {
     while (md.running.load(.acquire)) {
+        md.sender_agent.setCurrentTimeMs(std.time.milliTimestamp());
         _ = md.sender_agent.doWork();
     }
 }

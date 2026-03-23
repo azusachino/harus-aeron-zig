@@ -6,7 +6,7 @@ import java.nio.ByteBuffer;
 
 public class BasicPublisher {
     public static void main(String[] args) throws Exception {
-        final String channel = "aeron:udp?endpoint=localhost:40123";
+        final String channel = "aeron:udp?endpoint=localhost:40124";
         final int streamId = 1001;
 
         System.out.println("Launching Java Media Driver...");
@@ -15,19 +15,19 @@ public class BasicPublisher {
              Publication pub = aeron.addPublication(channel, streamId)) {
 
             System.out.println("Java Publisher connected to " + channel);
-            UnsafeBuffer buf = new UnsafeBuffer(ByteBuffer.allocateDirect(256));
+            UnsafeBuffer buf = new UnsafeBuffer(ByteBuffer.allocateDirect(128));
             
-            for (int i = 0; i < 10; i++) {
-                String msg = "message-" + i;
-                buf.putStringWithoutLengthAscii(0, msg);
+            for (int i = 0; i < 100; i++) {
+                String msg = "Hello Aeron " + i;
+                buf.putStringWithoutLengthUtf8(0, msg);
                 
-                System.out.println("Offering: " + msg);
                 while (pub.offer(buf, 0, msg.length()) < 0) {
                     Thread.onSpinWait();
                 }
-                Thread.sleep(100);
+                if (i % 10 == 0) System.out.println("Sent: " + i);
             }
-            System.out.println("Java Publisher finished sending 10 messages.");
+            System.out.println("Java Publisher finished sending 100 messages.");
+            Thread.sleep(1000);
         }
     }
 }

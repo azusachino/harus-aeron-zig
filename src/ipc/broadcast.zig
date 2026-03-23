@@ -56,15 +56,17 @@ pub const BroadcastTransmitter = struct {
         var tail = self.tail.load(.seq_cst);
 
         while (true) {
-            const next_tail = (tail + aligned_length) % self.capacity;
-            if (next_tail + aligned_length > self.capacity) {
-                // Would wrap in an awkward way; skip to next aligned boundary or wrap around
+            // Check if we need to wrap around
+            if (tail + aligned_length > self.capacity) {
+                // Would overflow; skip to next aligned boundary or wrap around
                 tail = std.mem.alignForward(usize, tail, 64); // align to cache line
                 if (tail >= self.capacity) {
                     tail = 0;
                 }
                 continue;
             }
+
+            const next_tail = tail + aligned_length;
 
             // Write record header at current tail
             const offset = tail;
@@ -82,8 +84,7 @@ pub const BroadcastTransmitter = struct {
             }
 
             // Atomically advance tail
-            const new_tail = (tail + aligned_length) % self.capacity;
-            if (self.tail.cmpxchgStrong(tail, new_tail, .seq_cst, .seq_cst) == null) {
+            if (self.tail.cmpxchgStrong(tail, next_tail, .seq_cst, .seq_cst) == null) {
                 return; // Success
             }
 

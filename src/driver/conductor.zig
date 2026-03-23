@@ -477,7 +477,7 @@ test "DriverConductor init and deinit" {
     var ring_buf: [4096]u8 = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
 
-    var bcast = try broadcast.BroadcastTransmitter.init(allocator, 4096);
+    var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
 
     var meta_buf: [4096]u8 = undefined;
@@ -514,7 +514,7 @@ test "DriverConductor ADD_PUBLICATION creates entry and sends ready response" {
     var ring_buf: [4096]u8 = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
 
-    var bcast = try broadcast.BroadcastTransmitter.init(allocator, 4096);
+    var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
 
     var meta_buf: [4096]u8 = undefined;
@@ -564,7 +564,7 @@ test "DriverConductor ADD_SUBSCRIPTION creates entry and sends ready response" {
     var ring_buf: [4096]u8 = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
 
-    var bcast = try broadcast.BroadcastTransmitter.init(allocator, 4096);
+    var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
 
     var meta_buf: [4096]u8 = undefined;
@@ -617,7 +617,7 @@ test "DriverConductor REMOVE_PUBLICATION cleans up entry" {
     var ring_buf: [4096]u8 = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
 
-    var bcast = try broadcast.BroadcastTransmitter.init(allocator, 4096);
+    var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
 
     var meta_buf: [4096]u8 = undefined;

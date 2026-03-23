@@ -21,6 +21,7 @@ services:
       - /dev/shm:/dev/shm
     environment:
       - AERON_DIR=/dev/shm/aeron
+      - LISTEN_PORT=40124
     command: ["basic-subscriber-interop"]
     network_mode: host
     depends_on:

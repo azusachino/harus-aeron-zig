@@ -168,7 +168,7 @@ pub const NakState = struct {
 };
 
 pub const Receiver = struct {
-    images: std.ArrayList(*Image),
+    images: std.ArrayListUnmanaged(*Image),
     pending_setups: std.ArrayListUnmanaged(SetupSignal) = .{},
     recv_endpoint: *transport.ReceiveChannelEndpoint,
     send_endpoint: *transport.SendChannelEndpoint,
@@ -177,6 +177,7 @@ pub const Receiver = struct {
     event_log: ?*event_log_mod.EventLog,
     allocator: std.mem.Allocator,
     recv_buf: [4096]u8,
+    mutex: std.Thread.Mutex = .{},
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -206,10 +207,13 @@ pub const Receiver = struct {
             .event_log = el,
             .allocator = allocator,
             .recv_buf = undefined,
+            .mutex = .{},
         };
     }
 
     pub fn deinit(self: *Receiver) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         for (self.images.items) |image| {
             image.log_buffer.deinit();
             self.allocator.destroy(image.log_buffer);
@@ -220,6 +224,8 @@ pub const Receiver = struct {
     }
 
     pub fn drainPendingSetups(self: *Receiver) []SetupSignal {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         const slice = self.pending_setups.toOwnedSlice(self.allocator) catch return &.{};
         return slice;
     }
@@ -232,6 +238,7 @@ pub const Receiver = struct {
             if (err == error.WouldBlock) {
                 return 0;
             }
+            std.debug.print("[RECEIVER] recv error: {any}\n", .{err});
             return 0;
         };
 
@@ -239,21 +246,28 @@ pub const Receiver = struct {
             return 0;
         }
 
+        std.debug.print("[RECEIVER] Received {d} bytes (fd={d})\n", .{ bytes_read, self.recv_endpoint.socket });
+
         // 2. Read frame type from buf[6..8] as little-endian u16
         if (bytes_read < 8) {
+            std.debug.print("[RECEIVER] Packet too small: {d} bytes\n", .{bytes_read});
             return 0;
         }
 
         const frame_type_raw = std.mem.readInt(u16, self.recv_buf[6..8], .little);
+        std.debug.print("[RECEIVER] Hex: {X:0>2} {X:0>2} {X:0>2} {X:0>2} | {X:0>2} {X:0>2} | {X:0>2} {X:0>2} | {X:0>2} {X:0>2} {X:0>2} {X:0>2}\n", .{
+            self.recv_buf[0], self.recv_buf[1], self.recv_buf[2],  self.recv_buf[3],
+            self.recv_buf[4], self.recv_buf[5], self.recv_buf[6],  self.recv_buf[7],
+            self.recv_buf[8], self.recv_buf[9], self.recv_buf[10], self.recv_buf[11],
+        });
 
         // 3. Dispatch based on frame type
         if (frame_type_raw == @intFromEnum(protocol.FrameType.data)) {
-            // FrameType.data (0x01)
-            if (bytes_read < protocol.DataHeader.LENGTH) {
-                return 0;
-            }
-
             const header = @as(*const protocol.DataHeader, @ptrCast(@alignCast(&self.recv_buf[0])));
+            // std.debug.print("[RECEIVER] DATA frame: session={d} stream={d} len={d}\n", .{ header.session_id, header.stream_id, header.frame_length });
+
+            self.mutex.lock();
+            defer self.mutex.unlock();
 
             // Find image by (session_id, stream_id)
             for (self.images.items) |image| {
@@ -310,11 +324,16 @@ pub const Receiver = struct {
             // Unknown session/stream — log/ignore (conductor handles creation)
             return 1;
         } else if (frame_type_raw == @intFromEnum(protocol.FrameType.setup)) {
-            // FrameType.setup (0x03)
+            // FrameType.setup
             if (bytes_read < protocol.SetupHeader.LENGTH) {
                 return 1;
             }
             const setup = @as(*const protocol.SetupHeader, @ptrCast(@alignCast(&self.recv_buf[0])));
+            std.debug.print("[RECEIVER] SETUP frame: session={d} stream={d} term_length={d}\n", .{ setup.session_id, setup.stream_id, setup.term_length });
+
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
             self.pending_setups.append(self.allocator, .{
                 .session_id = setup.session_id,
                 .stream_id = setup.stream_id,
@@ -336,10 +355,14 @@ pub const Receiver = struct {
     }
 
     pub fn onAddSubscription(self: *Receiver, image: *Image) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         try self.images.append(self.allocator, image);
     }
 
     pub fn onRemoveSubscription(self: *Receiver, session_id: i32, stream_id: i32) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         var i: usize = 0;
         while (i < self.images.items.len) {
             if (self.images.items[i].session_id == session_id and self.images.items[i].stream_id == stream_id) {

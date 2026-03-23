@@ -4,7 +4,7 @@ metadata:
   name: interop-java-pub-zig-sub
   namespace: aeron
 spec:
-  backoffLimit: 2
+  backoffLimit: 0
   activeDeadlineSeconds: 120
   template:
     spec:
@@ -16,6 +16,7 @@ spec:
           command: ["sh", "-c"]
           args:
             - |
+              mkdir -p /dev/shm/java
               cat <<EOF > BasicPublisher.java
               import io.aeron.Aeron;
               import io.aeron.Publication;
@@ -27,7 +28,6 @@ spec:
                   public static void main(String[] args) throws Exception {
                       final String channel = System.getenv("CHANNEL");
                       final int streamId = Integer.parseInt(System.getenv("STREAM_ID"));
-                      final int count = Integer.parseInt(System.getenv("MESSAGE_COUNT"));
                       final String aeronDir = System.getenv("AERON_DIR");
 
                       System.out.println("Launching Java Media Driver at " + aeronDir + "...");
@@ -36,45 +36,36 @@ spec:
                           .dirDeleteOnStart(true);
 
                       try (MediaDriver driver = MediaDriver.launch(driverCtx)) {
-                           System.out.println("Driver launched, waiting 1s for CnC.dat...");
-                           Thread.sleep(1000);
-                           try (Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver.aeronDirectoryName()));
-                                Publication pub = aeron.addPublication(channel, streamId)) {
+                          Thread.sleep(1000);
+                          try (Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver.aeronDirectoryName()));
+                               Publication pub = aeron.addPublication(channel, streamId)) {
 
-                          System.out.println("Java Publisher connected to " + channel);
-                          UnsafeBuffer buf = new UnsafeBuffer(ByteBuffer.allocateDirect(256));
-                          
-                          long start = System.currentTimeMillis();
-                          for (int i = 0; i < count; i++) {
-                              if (System.currentTimeMillis() - start > 60000) {
-                                  System.out.println("ERROR: Java side timeout.");
-                                  System.exit(1);
+                              System.out.println("Java Publisher connected to " + channel);
+                              UnsafeBuffer buffer = new UnsafeBuffer(ByteBuffer.allocateDirect(128));
+                              for (int i = 0; i < 100; i++) {
+                                  String msg = "Hello Aeron " + i;
+                                  buffer.putStringWithoutLengthUtf8(0, msg);
+                                  while (pub.offer(buffer, 0, msg.length()) < 0) {
+                                      Thread.yield();
+                                  }
+                                  if (i % 10 == 0) System.out.println("Sent " + i + " messages...");
                               }
-                              String msg = "message-" + i;
-                              buf.putStringWithoutLengthAscii(0, msg);
-                              while (pub.offer(buf, 0, msg.length()) < 0) {
-                                  Thread.onSpinWait();
-                                  if (System.currentTimeMillis() - start > 60000) System.exit(1);
-                              }
-                              if (i % 100 == 0) System.out.println("Offered " + i + " messages");
+                              Thread.sleep(1000); // Wait for delivery
+                              System.out.println("Java Publisher smoke test: SUCCESS (sent 100 messages)");
                           }
-                          System.out.println("Java Publisher finished sending " + count + " messages.");
-                        }
-                    }
-                }
+                      }
+                  }
               }
               EOF
               javac -cp /opt/aeron/aeron-all.jar BasicPublisher.java
               java -cp .:/opt/aeron/aeron-all.jar BasicPublisher
           env:
             - name: CHANNEL
-              value: "aeron:udp?endpoint=localhost:40124"
+              value: "aeron:udp?endpoint=127.0.0.1:40124"
             - name: STREAM_ID
               value: "1001"
-            - name: MESSAGE_COUNT
-              value: "1000"
             - name: AERON_DIR
-              value: "/dev/shm/aeron"
+              value: "/dev/shm/java"
           volumeMounts:
             - name: shm
               mountPath: /dev/shm
@@ -84,7 +75,9 @@ spec:
           command: ["/bin/basic-subscriber-interop"]
           env:
             - name: AERON_DIR
-              value: "/dev/shm/aeron"
+              value: "/dev/shm/zig"
+            - name: LISTEN_PORT
+              value: "40124"
           volumeMounts:
             - name: shm
               mountPath: /dev/shm

@@ -46,7 +46,11 @@ pub const Aeron = struct {
     to_driver_ring_buffer: ipc.ring_buffer.ManyToOneRingBuffer,
     to_clients_broadcast_receiver: ipc.broadcast.BroadcastReceiver,
     next_correlation_id: std.atomic.Value(i64),
-    subscriptions: std.ArrayListUnmanaged(*Subscription),
+
+    // Tracking
+    publications: std.AutoHashMapUnmanaged(i64, *ExclusivePublication),
+    subscriptions: std.AutoHashMapUnmanaged(i64, *Subscription),
+    embedded_driver: ?*driver.MediaDriver = null,
 
     pub fn init(allocator: std.mem.Allocator, ctx: AeronContext) !Aeron {
         const cnc_path = try std.fmt.allocPrint(allocator, "{s}/CnC.dat", .{ctx.aeron_dir});
@@ -63,6 +67,7 @@ pub const Aeron = struct {
             .to_driver_ring_buffer = ipc.ring_buffer.ManyToOneRingBuffer.init(to_driver),
             .to_clients_broadcast_receiver = ipc.broadcast.BroadcastReceiver.wrap(to_clients),
             .next_correlation_id = std.atomic.Value(i64).init(1),
+            .publications = .{},
             .subscriptions = .{},
         };
     }
@@ -70,6 +75,18 @@ pub const Aeron = struct {
     pub fn deinit(self: *Aeron) void {
         var mutable_cnc = self.cnc_file;
         mutable_cnc.deinit();
+
+        var pub_it = self.publications.iterator();
+        while (pub_it.next()) |entry| {
+            self.allocator.destroy(entry.value_ptr.*);
+        }
+        self.publications.deinit(self.allocator);
+
+        var sub_it = self.subscriptions.iterator();
+        while (sub_it.next()) |entry| {
+            entry.value_ptr.*.deinit();
+            self.allocator.destroy(entry.value_ptr.*);
+        }
         self.subscriptions.deinit(self.allocator);
     }
 
@@ -84,22 +101,72 @@ pub const Aeron = struct {
                 const session_id = std.mem.readInt(i32, buffer[8..12], .little);
                 const stream_id = std.mem.readInt(i32, buffer[12..16], .little);
 
-                std.debug.print("[AERON] Image Ready: reg={d} session={d} stream={d}\n", .{ registration_id, session_id, stream_id });
+                if (self.subscriptions.get(registration_id)) |sub| {
+                    if (self.embedded_driver) |md| {
+                        if (md.getImageLogBuffer(session_id, stream_id)) |lb| {
+                            const img = self.allocator.create(Image) catch continue;
+                            img.* = Image.init(session_id, stream_id, 0, lb);
+                            sub.addImage(img) catch self.allocator.destroy(img);
+                        }
+                    }
+                }
                 work += 1;
             } else if (msg_type_id == driver.conductor.RESPONSE_ON_SUBSCRIPTION_READY) {
                 const correlation_id = std.mem.readInt(i64, buffer[0..8], .little);
                 const stream_id = std.mem.readInt(i32, buffer[8..12], .little);
-                std.debug.print("[AERON] Subscription Ready: correlation={d} stream={d}\n", .{ correlation_id, stream_id });
+
+                const sub = self.allocator.create(Subscription) catch continue;
+                sub.* = Subscription.init(self.allocator, stream_id, "") catch {
+                    self.allocator.destroy(sub);
+                    continue;
+                };
+                self.subscriptions.put(self.allocator, correlation_id, sub) catch {
+                    sub.deinit();
+                    self.allocator.destroy(sub);
+                    continue;
+                };
                 work += 1;
             } else if (msg_type_id == driver.conductor.RESPONSE_ON_PUBLICATION_READY) {
                 const correlation_id = std.mem.readInt(i64, buffer[0..8], .little);
                 const session_id = std.mem.readInt(i32, buffer[8..12], .little);
                 const stream_id = std.mem.readInt(i32, buffer[12..16], .little);
-                std.debug.print("[AERON] Publication Ready: correlation={d} session={d} stream={d}\n", .{ correlation_id, session_id, stream_id });
+
+                if (self.embedded_driver) |md| {
+                    if (md.getPublicationLogBuffer(session_id, stream_id)) |lb| {
+                        const pub_instance = self.allocator.create(ExclusivePublication) catch continue;
+                        pub_instance.* = ExclusivePublication.init(session_id, stream_id, 0, lb.term_length, 1408, lb);
+                        self.publications.put(self.allocator, correlation_id, pub_instance) catch {
+                            self.allocator.destroy(pub_instance);
+                            continue;
+                        };
+                    }
+                }
                 work += 1;
             }
         }
         return work;
+    }
+
+    pub fn getPublication(self: *Aeron, registration_id: i64) ?*ExclusivePublication {
+        return self.publications.get(registration_id);
+    }
+
+    pub fn getSubscription(self: *Aeron, registration_id: i64) ?*Subscription {
+        return self.subscriptions.get(registration_id);
+    }
+
+    pub fn offer(self: *Aeron, registration_id: i64, data: []const u8) @import("publication.zig").OfferResult {
+        if (self.publications.get(registration_id)) |pub_instance| {
+            return pub_instance.offer(data);
+        }
+        return .not_connected;
+    }
+
+    pub fn poll(self: *Aeron, registration_id: i64, handler: @import("logbuffer/term_reader.zig").FragmentHandler, ctx: *anyopaque, fragment_limit: i32) i32 {
+        if (self.subscriptions.get(registration_id)) |sub| {
+            return sub.poll(handler, ctx, fragment_limit);
+        }
+        return 0;
     }
 
     pub fn addSubscription(self: *Aeron, channel: []const u8, stream_id: i32) !i64 {
