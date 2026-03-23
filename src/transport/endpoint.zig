@@ -1,6 +1,7 @@
 const std = @import("std");
 const UdpChannel = @import("udp_channel.zig").UdpChannel;
 
+// LESSON(endpoint/aeron): Endpoints abstract send/receive channel pairs. Media driver assigns one endpoint per port to reduce syscall overhead.
 // POSIX multicast structs not exposed in std.posix on all targets
 const IpMreq = extern struct {
     imr_multiaddr: u32,
@@ -24,6 +25,7 @@ const IPV6_JOIN_GROUP: u32 = switch (builtin.os.tag) {
     else => 20,
 };
 
+// LESSON(endpoint/zig): SOCK_NONBLOCK avoids a separate fcntl() call. On Linux this is more efficient than setting O_NONBLOCK after creation.
 pub const SendChannelEndpoint = struct {
     socket: std.posix.socket_t,
 
@@ -66,7 +68,7 @@ pub const ReceiveChannelEndpoint = struct {
         errdefer std.posix.close(sock);
 
         if (channel.is_multicast) {
-            // SO_REUSEPORT allows multiple sockets to bind to the same port, which is required for multicast
+            // LESSON(endpoint/aeron): SO_REUSEPORT allows multiple sockets to bind to the same mcast group; needed for multi-subscriber scenarios.
             try std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEPORT, &std.mem.toBytes(@as(i32, 1)));
         }
 

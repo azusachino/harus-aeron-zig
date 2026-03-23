@@ -2,6 +2,7 @@ const std = @import("std");
 const uri_mod = @import("uri.zig");
 const AeronUri = uri_mod.AeronUri;
 
+// LESSON(udp-channel/aeron): Channel configuration encodes transport mode (unicast/multicast), endpoints, and MTU. See docs/tutorial/02-data-path/03-udp-transport.md
 pub const UdpChannel = struct {
     uri: []const u8,
     endpoint: ?std.net.Address, // remote address (unicast dest or mcast group)
@@ -14,6 +15,7 @@ pub const UdpChannel = struct {
     session_id: ?i32,
     term_length: ?u32,
 
+    // LESSON(udp-channel/zig): String parsing with error propagation via !T return type. Allocator ownership is caller's responsibility.
     pub fn parse(allocator: std.mem.Allocator, uri_str: []const u8) !UdpChannel {
         var aeron_uri = try AeronUri.parse(allocator, uri_str);
         defer aeron_uri.deinit();
@@ -86,6 +88,7 @@ pub const UdpChannel = struct {
         }
     }
 
+    // LESSON(udp-channel/aeron): Multicast detection relies on IPv4 class D (224.0.0.0/4) and IPv6 ff00::/8. MDC needs no mcast join.
     fn isMulticastAddress(address: std.net.Address) bool {
         switch (address.any.family) {
             std.posix.AF.INET => {
