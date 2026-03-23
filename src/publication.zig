@@ -45,7 +45,7 @@ pub const ExclusivePublication = struct {
             .term_length = term_length,
             .mtu = mtu,
             .log_buffer = log_buffer,
-            .publisher_limit = 0,
+            .publisher_limit = @as(i64, term_length),
             .is_closed = false,
             .appender = term_appender.TermAppender.init(term_buffer, term_id),
         };
@@ -130,4 +130,14 @@ test "ExclusivePublication offer writes to log buffer" {
     const expected_aligned_len = std.mem.alignForward(i32, @as(i32, @intCast(frame.DataHeader.LENGTH + test_payload.len)), frame.FRAME_ALIGNMENT);
     try std.testing.expectEqual(expected_aligned_len, frame_length);
     try std.testing.expectEqualSlices(u8, test_payload, term0[frame.DataHeader.LENGTH .. frame.DataHeader.LENGTH + test_payload.len]);
+}
+
+test "offer: first message succeeds when publisher_limit equals term_length" {
+    const allocator = std.testing.allocator;
+    var log_buf = try logbuffer.LogBuffer.init(allocator, 64 * 1024);
+    defer log_buf.deinit();
+
+    var pub_instance = ExclusivePublication.init(1, 1001, 0, 64 * 1024, 1408, &log_buf);
+    const result = pub_instance.offer("hello");
+    try std.testing.expect(result == .ok);
 }
