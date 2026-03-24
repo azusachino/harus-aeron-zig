@@ -172,6 +172,19 @@ pub const DriverConductor = struct {
             }
         }
 
+        const status_messages = self.receiver.drainPendingStatusMessages();
+        defer if (status_messages.len > 0) self.allocator.free(status_messages);
+        for (status_messages) |status| {
+            self.sender.onStatusMessage(
+                status.session_id,
+                status.stream_id,
+                status.consumption_term_id,
+                status.consumption_term_offset,
+                status.receiver_window,
+            );
+            work += 1;
+        }
+
         return work;
     }
 
@@ -226,12 +239,13 @@ pub const DriverConductor = struct {
         };
 
         // Allocate counters
-        const sp_label = "sender-pos";
-        const pl_label = "pub-limit";
+        const sp_label = std.fmt.allocPrint(self.allocator, "sender-pos: {d}:{d}", .{ session_id, stream_id }) catch "sender-pos";
+        defer if (!std.mem.eql(u8, sp_label, "sender-pos")) self.allocator.free(sp_label);
+        const pl_label = std.fmt.allocPrint(self.allocator, "pub-limit: {d}:{d}", .{ session_id, stream_id }) catch "pub-limit";
+        defer if (!std.mem.eql(u8, pl_label, "pub-limit")) self.allocator.free(pl_label);
         const sender_pos_handle = self.counters_map.allocate(counters.SENDER_POSITION, sp_label);
         const pub_limit_handle = self.counters_map.allocate(counters.PUBLISHER_LIMIT, pl_label);
-        // Set publisher_limit to term_length so first offer succeeds
-        self.counters_map.set(pub_limit_handle.counter_id, term_len);
+        self.counters_map.set(pub_limit_handle.counter_id, 0);
 
         // Create NetworkPublication
         const net_pub = self.allocator.create(sender_mod.NetworkPublication) catch {
@@ -253,7 +267,14 @@ pub const DriverConductor = struct {
             .mtu = 1408,
             .last_setup_time_ms = 0,
         };
-        self.sender.onAddPublication(net_pub);
+        self.sender.onAddPublication(net_pub) catch {
+            self.allocator.destroy(net_pub);
+            lb.deinit();
+            self.allocator.destroy(lb);
+            self.allocator.free(channel_copy);
+            self.sendError(correlation_id, 2, "Out of memory");
+            return;
+        };
 
         const entry = PublicationEntry{
             .registration_id = correlation_id,
@@ -275,7 +296,7 @@ pub const DriverConductor = struct {
             return;
         };
 
-        self.sendPublicationReady(correlation_id, session_id, stream_id);
+        self.sendPublicationReady(correlation_id, session_id, stream_id, pub_limit_handle.counter_id);
     }
 
     fn handleRemovePublication(self: *DriverConductor, data: []const u8) void {
@@ -420,12 +441,13 @@ pub const DriverConductor = struct {
         _ = correlation_id;
     }
 
-    fn sendPublicationReady(self: *DriverConductor, correlation_id: i64, session_id: i32, stream_id: i32) void {
+    fn sendPublicationReady(self: *DriverConductor, correlation_id: i64, session_id: i32, stream_id: i32, pub_limit_counter_id: i32) void {
         // LESSON(conductor/zig): Broadcast response to clients via shared-memory broadcast buffer—clients poll for readiness. See docs/tutorial/03-driver/03-conductor.md
-        var buf: [16]u8 = undefined;
+        var buf: [20]u8 = undefined;
         std.mem.writeInt(i64, buf[0..8], correlation_id, .little);
         std.mem.writeInt(i32, buf[8..12], session_id, .little);
         std.mem.writeInt(i32, buf[12..16], stream_id, .little);
+        std.mem.writeInt(i32, buf[16..20], pub_limit_counter_id, .little);
         self.broadcaster.transmit(RESPONSE_ON_PUBLICATION_READY, &buf);
     }
 

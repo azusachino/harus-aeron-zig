@@ -52,6 +52,11 @@ pub const Image = struct {
         // log_buffer owned externally — no-op
     }
 
+    fn positionFor(self: *const Image, term_id: i32, term_offset: i32) i64 {
+        const term_count = term_id - self.initial_term_id;
+        return @as(i64, term_count) * self.term_length + term_offset;
+    }
+
     // Write an incoming DATA frame into the log buffer at the correct partition+offset
     // Returns true if written, false if out-of-bounds or duplicate
     pub fn insertFrame(self: *Image, counters_map: *counters.CountersMap, header: *const protocol.DataHeader, payload: []const u8) bool {
@@ -84,14 +89,41 @@ pub const Image = struct {
         const len_ptr = @as(*i32, @ptrCast(@alignCast(&term_buffer[frame_offset])));
         len_ptr.* = aligned_len;
 
-        // Update receiver_hwm counter
-        const new_hwm = @as(i64, @intCast(header.term_offset)) + aligned_len;
+        // Update receiver_hwm counter using absolute stream position.
+        const new_hwm = self.positionFor(header.term_id, header.term_offset + aligned_len);
         const current_hwm = counters_map.get(self.receiver_hwm.counter_id);
         if (new_hwm > current_hwm) {
             counters_map.set(self.receiver_hwm.counter_id, new_hwm);
         }
 
+        self.advanceRebuildPosition(counters_map);
+
         return true;
+    }
+
+    fn advanceRebuildPosition(self: *Image, counters_map: *counters.CountersMap) void {
+        var position = self.rebuild_position;
+
+        while (true) {
+            const term_count = @divTrunc(position, @as(i64, @intCast(self.term_length)));
+            const partition = @as(usize, @intCast(@mod(term_count, metadata.PARTITION_COUNT)));
+            const term_offset = @as(usize, @intCast(@mod(position, @as(i64, @intCast(self.term_length)))));
+            const term_buffer = self.log_buffer.termBuffer(partition);
+
+            if (term_offset + 4 > term_buffer.len) break;
+
+            const frame_length = std.mem.readInt(i32, term_buffer[term_offset..][0..4], .little);
+            if (frame_length <= 0) break;
+
+            const aligned_length = std.mem.alignForward(i32, frame_length, @as(i32, @intCast(protocol.FRAME_ALIGNMENT)));
+            if (aligned_length <= 0) break;
+            if (term_offset + @as(usize, @intCast(aligned_length)) > term_buffer.len) break;
+
+            position += aligned_length;
+        }
+
+        self.rebuild_position = position;
+        counters_map.set(self.subscriber_position.counter_id, position);
     }
 
     // Check if there is a gap between rebuild_position and receiver_hwm
@@ -114,6 +146,15 @@ pub const SetupSignal = struct {
     term_length: i32,
     mtu: i32,
     source_address: std.net.Address,
+};
+
+pub const StatusSignal = struct {
+    session_id: i32,
+    stream_id: i32,
+    consumption_term_id: i32,
+    consumption_term_offset: i32,
+    receiver_window: i32,
+    receiver_id: i64,
 };
 
 const NAK_DELAY_NS: i64 = 1_000_000; // 1ms
@@ -171,6 +212,7 @@ pub const NakState = struct {
 pub const Receiver = struct {
     images: std.ArrayListUnmanaged(*Image),
     pending_setups: std.ArrayListUnmanaged(SetupSignal) = .{},
+    pending_status_messages: std.ArrayListUnmanaged(StatusSignal) = .{},
     recv_endpoint: *transport.ReceiveChannelEndpoint,
     send_endpoint: *transport.SendChannelEndpoint,
     counters_map: *counters.CountersMap,
@@ -222,12 +264,20 @@ pub const Receiver = struct {
         }
         self.images.deinit(self.allocator);
         self.pending_setups.deinit(self.allocator);
+        self.pending_status_messages.deinit(self.allocator);
     }
 
     pub fn drainPendingSetups(self: *Receiver) []SetupSignal {
         self.mutex.lock();
         defer self.mutex.unlock();
         const slice = self.pending_setups.toOwnedSlice(self.allocator) catch return &.{};
+        return slice;
+    }
+
+    pub fn drainPendingStatusMessages(self: *Receiver) []StatusSignal {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const slice = self.pending_status_messages.toOwnedSlice(self.allocator) catch return &.{};
         return slice;
     }
 
@@ -334,6 +384,27 @@ pub const Receiver = struct {
                 .term_length = setup.term_length,
                 .mtu = setup.mtu,
                 .source_address = src_addr,
+            }) catch return 1;
+            return 1;
+        } else if (frame_type_raw == @intFromEnum(protocol.FrameType.status)) {
+            if (data.len < protocol.StatusMessage.LENGTH) {
+                return 1;
+            }
+            const status = @as(*const protocol.StatusMessage, @ptrCast(@alignCast(&data[0])));
+
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            // STATUS frames are control-plane feedback for publications, not data for Images.
+            // Queue them for the conductor/sender path so publisher-limit updates stay serialized
+            // with the rest of the driver state transitions.
+            self.pending_status_messages.append(self.allocator, .{
+                .session_id = status.session_id,
+                .stream_id = status.stream_id,
+                .consumption_term_id = status.consumption_term_id,
+                .consumption_term_offset = status.consumption_term_offset,
+                .receiver_window = status.receiver_window,
+                .receiver_id = status.receiver_id,
             }) catch return 1;
             return 1;
         } else if (frame_type_raw == @intFromEnum(protocol.FrameType.nak)) {
@@ -589,6 +660,8 @@ test "Image insertFrame writes data at correct offset" {
     // Verify HWM was updated
     const hwm = counters_map.get(hwm_handle.counter_id);
     try std.testing.expect(hwm > 0);
+    try std.testing.expectEqual(hwm, image.rebuild_position);
+    try std.testing.expectEqual(hwm, counters_map.get(sub_pos_handle.counter_id));
 }
 
 test "Image hasGap detects missing frame" {
@@ -625,4 +698,94 @@ test "Image hasGap detects missing frame" {
 
     // Now there should be a gap
     try std.testing.expect(image.hasGap(&counters_map));
+}
+
+test "Image insertFrame keeps gap until missing prefix arrives" {
+    const allocator = std.testing.allocator;
+
+    var meta_buffer align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
+    var values_buffer align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
+    var counters_map = counters.CountersMap.init(&meta_buffer, &values_buffer);
+
+    var log_buf = try logbuffer.LogBuffer.init(allocator, 64 * 1024);
+    defer log_buf.deinit();
+
+    const hwm_handle = counters_map.allocate(counters.RECEIVER_HWM, "test-hwm");
+    const sub_pos_handle = counters_map.allocate(counters.SUBSCRIBER_POSITION, "test-sub");
+
+    var image = Image.init(
+        1,
+        2,
+        64 * 1024,
+        1500,
+        0,
+        &log_buf,
+        hwm_handle,
+        sub_pos_handle,
+        undefined,
+    );
+
+    var first: protocol.DataHeader = undefined;
+    first.frame_length = 43;
+    first.version = protocol.VERSION;
+    first.flags = 0;
+    first.type = @intFromEnum(protocol.FrameType.data);
+    first.term_offset = 64;
+    first.session_id = 1;
+    first.stream_id = 2;
+    first.term_id = 0;
+    first.reserved_value = 0;
+
+    try std.testing.expect(image.insertFrame(&counters_map, &first, "late-frame"));
+    try std.testing.expectEqual(@as(i64, 0), image.rebuild_position);
+    try std.testing.expect(image.hasGap(&counters_map));
+
+    var prefix: protocol.DataHeader = first;
+    prefix.term_offset = 0;
+    try std.testing.expect(image.insertFrame(&counters_map, &prefix, "first-frame"));
+    try std.testing.expect(!image.hasGap(&counters_map));
+    try std.testing.expect(image.rebuild_position > 64);
+    try std.testing.expectEqual(image.rebuild_position, counters_map.get(sub_pos_handle.counter_id));
+}
+
+test "Receiver queues STATUS messages for sender flow control" {
+    const allocator = std.testing.allocator;
+    var meta_buffer align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
+    var values_buffer align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
+    var counters_map = counters.CountersMap.init(&meta_buffer, &values_buffer);
+
+    const dummy_socket: std.posix.socket_t = undefined;
+    var recv_endpoint = transport.ReceiveChannelEndpoint{
+        .socket = dummy_socket,
+        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+    };
+    var send_endpoint = transport.SendChannelEndpoint{
+        .socket = dummy_socket,
+    };
+
+    var receiver = try Receiver.init(allocator, &recv_endpoint, &send_endpoint, &counters_map, null);
+    defer receiver.deinit();
+
+    var status: protocol.StatusMessage = undefined;
+    status.frame_length = protocol.StatusMessage.LENGTH;
+    status.version = protocol.VERSION;
+    status.flags = 0;
+    status.type = @intFromEnum(protocol.FrameType.status);
+    status.session_id = 9;
+    status.stream_id = 1001;
+    status.consumption_term_id = 3;
+    status.consumption_term_offset = 2048;
+    status.receiver_window = 4096;
+    status.receiver_id = 77;
+
+    const bytes = @as([*]const u8, @ptrCast(&status))[0..protocol.StatusMessage.LENGTH];
+    try std.testing.expectEqual(@as(i32, 1), receiver.processDatagram(bytes, std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123)));
+
+    const pending = receiver.drainPendingStatusMessages();
+    defer allocator.free(pending);
+    try std.testing.expectEqual(@as(usize, 1), pending.len);
+    try std.testing.expectEqual(@as(i32, 9), pending[0].session_id);
+    try std.testing.expectEqual(@as(i32, 1001), pending[0].stream_id);
+    try std.testing.expectEqual(@as(i32, 2048), pending[0].consumption_term_offset);
+    try std.testing.expectEqual(@as(i32, 4096), pending[0].receiver_window);
 }
