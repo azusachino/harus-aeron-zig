@@ -3,6 +3,7 @@ export ZIG_GLOBAL_CACHE_DIR := $(CURDIR)/.zig-global-cache
 export ZIG_LOCAL_CACHE_DIR := $(CURDIR)/.zig-cache
 AERON_VERSION := 1.46.7
 AERON_ALL_JAR_URL := https://repo1.maven.org/maven2/io/aeron/aeron-all/$(AERON_VERSION)/aeron-all-$(AERON_VERSION).jar
+AERON_ALL_JAR_SHA256 := ded2ed3c5b73991e31c439a7562a294e5d5566f955c3a9e81089a28a6b5b9d55
 
 .PHONY: fmt fmt-check build test lint check clean run tutorial-check \
        fuzz bench stress \
@@ -60,7 +61,18 @@ setup-interop:
 	if [ -n "$$std_dir" ]; then \
 		ln -sfn "$$std_dir" vendor/zig-std; \
 	fi
-	@curl -fsSL "$(AERON_ALL_JAR_URL)" -o test/interop/aeron-all.jar
+	@tmp="$$(mktemp)"; \
+	curl -fsSL "$(AERON_ALL_JAR_URL)" -o "$$tmp"; \
+	if command -v shasum >/dev/null 2>&1; then \
+		printf '%s  %s\n' "$(AERON_ALL_JAR_SHA256)" "$$tmp" | shasum -a 256 -c - >/dev/null; \
+	elif command -v sha256sum >/dev/null 2>&1; then \
+		printf '%s  %s\n' "$(AERON_ALL_JAR_SHA256)" "$$tmp" | sha256sum -c - >/dev/null; \
+	else \
+		echo "No sha256 checker found (need shasum or sha256sum)" >&2; \
+		rm -f "$$tmp"; \
+		exit 1; \
+	fi; \
+	mv "$$tmp" test/interop/aeron-all.jar
 	@if [ ! -s throughput ]; then \
 		printf '%s\n' \
 			'#!/usr/bin/env sh' \
@@ -135,7 +147,10 @@ interop:  ## Run full interop test suite
 test-interop: interop  ## Backward-compatible alias for interop
 
 interop-build: nix-image  ## Build interop test images
-	docker build -t java-aeron:latest -f deploy/interop/Dockerfile.java-aeron deploy/interop/
+	docker build -t java-aeron:latest \
+		--build-arg AERON_VERSION=$(AERON_VERSION) \
+		--build-arg AERON_ALL_JAR_SHA256=$(AERON_ALL_JAR_SHA256) \
+		-f deploy/interop/Dockerfile.java-aeron deploy/interop/
 	nerdctl -n k8s.io image import $$(docker save java-aeron:latest | nerdctl -n k8s.io image load 2>&1 | grep -oP 'sha256:\S+') || \
 		docker save java-aeron:latest | nerdctl -n k8s.io image load
 
