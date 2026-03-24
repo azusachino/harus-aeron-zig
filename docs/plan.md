@@ -746,7 +746,7 @@ Format as a text table readable via `make counters`.
 
 ---
 
-## Phase 5 — Parity Completion
+## Phase 8 — Parity Completion
 
 Goal: close the remaining gap to upstream Aeron by tightening protocol breadth, cluster recovery, archive fidelity, and benchmark/interop automation.
 
@@ -758,7 +758,7 @@ Key reference files in the upstream repo:
 
 ---
 
-### Task P5-1: Protocol Breadth and Codec Parity
+### Task P8-1: Protocol Breadth and Codec Parity
 
 **File**: `src/protocol/`, `src/transport/`
 
@@ -778,7 +778,7 @@ Dependencies:
 
 ---
 
-### Task P5-2: Cluster Failure and Rejoin Correctness
+### Task P8-2: Cluster Failure and Rejoin Correctness
 
 **File**: `src/cluster/`, `test/integration/`
 
@@ -795,11 +795,11 @@ Acceptance criteria:
 - `make check`
 
 Dependencies:
-- Task P5-1
+- Task P8-1
 
 ---
 
-### Task P5-3: Archive Restart and Catalog Fidelity
+### Task P8-3: Archive Restart and Catalog Fidelity
 
 **File**: `src/archive/`, `docs/tutorial/05-archive/`
 
@@ -816,11 +816,11 @@ Acceptance criteria:
 - `make check`
 
 Dependencies:
-- Task P5-1
+- Task P8-1
 
 ---
 
-### Task P5-4: Interop Matrix Automation
+### Task P8-4: Interop Matrix Automation
 
 **File**: `Makefile`, `deploy/interop/`, `test/interop/`
 
@@ -836,11 +836,11 @@ Acceptance criteria:
 - `make interop`
 
 Dependencies:
-- Task P5-1
+- Task P8-1
 
 ---
 
-### Task P5-5: Throughput Baseline and Perf Hygiene
+### Task P8-5: Throughput Baseline and Perf Hygiene
 
 **File**: `examples/throughput.zig`, `src/bench/throughput.zig`, `Makefile`
 
@@ -856,17 +856,17 @@ Acceptance criteria:
 - `make check`
 
 Dependencies:
-- Task P5-1
+- Task P8-1
 
 ---
 
 ### Suggested Sequence
 
-1. P5-1 protocol breadth and codec parity.
-2. P5-4 interop matrix automation.
-3. P5-3 archive restart and catalog fidelity.
-4. P5-2 cluster failure and rejoin correctness.
-5. P5-5 throughput baseline and perf hygiene.
+1. P8-1 protocol breadth and codec parity.
+2. P8-4 interop matrix automation.
+3. P8-3 archive restart and catalog fidelity.
+4. P8-2 cluster failure and rejoin correctness.
+5. P8-5 throughput baseline and perf hygiene.
 
 This order removes the broad compatibility blockers first, then uses interop and archive coverage to validate the transport path before the more stateful cluster recovery work.
 
