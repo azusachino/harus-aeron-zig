@@ -82,6 +82,8 @@ Two parallel code trees — agents must maintain both:
 - Phase 7 follow-on work now includes cluster follower catch-up / restart continuity, a 3-node leader-death integration scenario, and archive descriptor metadata persistence through restart.
 - `make check` is green after the current cluster and archive fidelity work.
 - The project is still not at true upstream Aeron fidelity; the explicit long-range roadmap now lives in `docs/plan.md` under `Phase 8 — Upstream Fidelity`.
-- Current local Phase 8 work on `feat/phase8-uri-fidelity` is uncommitted and includes stricter URI parsing, receiver rebuild/HWM tracking, STATUS-driven publication connectivity via shared publisher-limit counters, and live `CnC.dat`-backed `stat` / `streams` tooling.
-- `make check` and `make stress` pass with the current local changes, but `make interop` still needs a fresh-session rerun and debugging against a clean Colima cluster.
-- Next session should start by checking the clean cluster state, running `make interop`, and investigating the remaining live Java<->Zig pub/sub failure with the new STATUS-driven runtime in place.
+- PR #11 open on `feat/phase8-uri-fidelity` with Phase 8 core (URI, receiver, CnC) + interop bug fixes.
+- **zig-pub→java-sub: PASSES** (100/100) after fixing Sender SETUP chicken-and-egg.
+- **java-pub→zig-sub: STUCK at 2/100** — see `.agents/INTEROP_INVESTIGATION.md` for full analysis.
+- Diagnostic logging is in place (`[RECEIVER]`, `[IMAGE]` prints) — run `make interop` and check `kubectl logs` to continue.
+- Fail-fast timeouts reduced: k8s 60s, Zig subscriber 30s.
