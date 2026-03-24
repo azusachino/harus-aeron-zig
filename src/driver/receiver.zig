@@ -28,11 +28,17 @@ pub const Image = struct {
         term_length: i32,
         mtu: i32,
         initial_term_id: i32,
+        active_term_id: i32,
         log_buffer: *logbuffer.LogBuffer,
         receiver_hwm: counters.CounterHandle,
         subscriber_position: counters.CounterHandle,
         source_address: std.net.Address,
     ) Image {
+        // H4 fix: start rebuild at the active term so advanceRebuildPosition
+        // doesn't stall waiting for data in an earlier (empty) partition.
+        const term_count = @as(i64, active_term_id - initial_term_id);
+        const initial_rebuild_position = term_count * @as(i64, term_length);
+        std.debug.print("[IMAGE] init: session={d} stream={d} initial_term_id={d} active_term_id={d} rebuild_start={d}\n", .{ session_id, stream_id, initial_term_id, active_term_id, initial_rebuild_position });
         return .{
             .session_id = session_id,
             .stream_id = stream_id,
@@ -42,7 +48,7 @@ pub const Image = struct {
             .log_buffer = log_buffer,
             .receiver_hwm = receiver_hwm,
             .subscriber_position = subscriber_position,
-            .rebuild_position = 0,
+            .rebuild_position = initial_rebuild_position,
             .source_address = source_address,
             .nak_state = NakState.init(stream_id),
         };
@@ -220,8 +226,11 @@ pub const Receiver = struct {
     loss_report_instance: ?*loss_report.LossReport,
     event_log: ?*event_log_mod.EventLog,
     allocator: std.mem.Allocator,
-    recv_buf: [4096]u8 align(8),
+    recv_buf: [65536]u8 align(8), // 64KB — fits any Aeron datagram incl. batched frames
     mutex: std.Thread.Mutex = .{},
+    // Diagnostic counters (atomic for cross-thread visibility)
+    data_frames_total: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    data_frames_before_image: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -283,143 +292,148 @@ pub const Receiver = struct {
     }
 
     pub fn processDatagram(self: *Receiver, data: []const u8, src_addr: std.net.Address) i32 {
-        if (data.len == 0) {
-            return 0;
-        }
+        if (data.len < 8) return 0;
 
-        // 2. Read frame type from buf[6..8] as little-endian u16
-        if (data.len < 8) {
-            return 0;
-        }
+        // H2 fix: walk ALL Aeron frames packed into this UDP datagram.
+        // Java Sender may coalesce multiple small frames into one MTU-sized packet.
+        // Each frame is padded to FRAME_ALIGNMENT (32 bytes); advance by aligned frame_length.
+        var offset: usize = 0;
+        var work: i32 = 0;
 
-        const frame_type_raw = std.mem.readInt(u16, data[6..8], .little);
+        while (offset + 8 <= data.len) {
+            const frame_data = data[offset..];
+            const raw_frame_len = std.mem.readInt(i32, frame_data[0..4], .little);
+            if (raw_frame_len <= 0) break; // zero or padding — end of batch
+            const frame_type_raw = std.mem.readInt(u16, frame_data[6..8], .little);
+            const aligned_advance = std.mem.alignForward(usize, @as(usize, @intCast(raw_frame_len)), protocol.FRAME_ALIGNMENT);
 
-        // 3. Dispatch based on frame type
-        if (frame_type_raw == @intFromEnum(protocol.FrameType.data)) {
-            // FrameType.data (0x01)
-            if (data.len < protocol.DataHeader.LENGTH) {
-                return 0;
-            }
-            const header = @as(*const protocol.DataHeader, @ptrCast(@alignCast(&data[0])));
-            if (header.frame_length < protocol.DataHeader.LENGTH) {
-                return 1;
-            }
-
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            // Find image by (session_id, stream_id)
-            for (self.images.items) |image| {
-                if (image.session_id == header.session_id and image.stream_id == header.stream_id) {
-                    // Extract payload
-                    const payload_offset = protocol.DataHeader.LENGTH;
-                    const payload_len = @as(usize, @intCast(header.frame_length)) - protocol.DataHeader.LENGTH;
-
-                    if (payload_offset + payload_len <= data.len) {
-                        const payload = data[payload_offset .. payload_offset + payload_len];
-
-                        // Write frame to log buffer
-                        const written = image.insertFrame(self.counters_map, header, payload);
-                        if (!written) {
-                            std.debug.print("[RECEIVER] insertFrame FAILED: session={d} stream={d} term_id={d} term_offset={d} frame_length={d}\n", .{ header.session_id, header.stream_id, header.term_id, header.term_offset, header.frame_length });
-                        }
-
-                        // Log frame_in event
-                        if (self.event_log) |el| {
-                            const evt_now: i64 = @intCast(@as(i128, std.time.nanoTimestamp()));
-                            el.log(.frame_in, evt_now, image.session_id, image.stream_id, payload);
-                        }
-
-                        // Check for gap and record loss observation
-                        if (image.hasGap(self.counters_map)) {
-                            const hwm = self.counters_map.get(image.receiver_hwm.counter_id);
-                            const gap_len = @as(i32, @intCast(hwm - image.rebuild_position));
-                            const gap_off = @as(i32, @intCast(@mod(image.rebuild_position, @as(i64, @intCast(image.term_length)))));
-                            image.nak_state.recordGap(gap_off, gap_len);
-
-                            if (self.loss_report_instance) |lr| {
-                                const now: i64 = @intCast(@as(i128, std.time.nanoTimestamp()));
-                                lr.recordObservation(
-                                    @as(i64, @intCast(payload.len)),
-                                    now,
-                                    image.session_id,
-                                    image.stream_id,
-                                    "aeron:udp",
-                                );
-                            }
-                        }
-
-                        const now = @as(i64, @intCast(@as(i128, std.time.nanoTimestamp())));
-                        if (image.nak_state.shouldSend(now)) {
-                            self.sendNak(image) catch {};
-                            image.nak_state.clear();
-                        }
-
-                        // Send status message
-                        self.sendStatus(image) catch |err| switch (err) {
-                            error.WouldBlock => {},
-                            else => std.log.err(
-                                "receiver status send failed session_id={} stream_id={} err={}",
-                                .{ image.session_id, image.stream_id, err },
-                            ),
-                        };
-                    }
-
-                    return 1;
+            if (frame_type_raw == @intFromEnum(protocol.FrameType.data)) {
+                if (frame_data.len < protocol.DataHeader.LENGTH) break;
+                const header = @as(*const protocol.DataHeader, @ptrCast(@alignCast(&frame_data[0])));
+                if (header.frame_length < @as(i32, @intCast(protocol.DataHeader.LENGTH))) {
+                    offset += aligned_advance;
+                    continue;
                 }
+
+                const total = self.data_frames_total.fetchAdd(1, .monotonic) + 1;
+                std.debug.print("[RECEIVER] DATA frame #{d}: pkt_len={d} term_id={d} term_offset={d} frame_len={d} session={d} stream={d}\n", .{
+                    total, data.len, header.term_id, header.term_offset, header.frame_length, header.session_id, header.stream_id,
+                });
+
+                const payload_len_raw = @as(i32, header.frame_length) - @as(i32, @intCast(protocol.DataHeader.LENGTH));
+                const payload_len: usize = if (payload_len_raw > 0) @intCast(payload_len_raw) else 0;
+                const payload_offset = protocol.DataHeader.LENGTH;
+
+                self.mutex.lock();
+
+                var image_for_status: ?*Image = null;
+                var found_image = false;
+                for (self.images.items) |image| {
+                    if (image.session_id == header.session_id and image.stream_id == header.stream_id) {
+                        found_image = true;
+                        if (payload_offset + payload_len <= frame_data.len) {
+                            const payload = frame_data[payload_offset .. payload_offset + payload_len];
+
+                            const written = image.insertFrame(self.counters_map, header, payload);
+                            if (!written) {
+                                std.debug.print("[RECEIVER] insertFrame FAILED: session={d} stream={d} term_id={d} term_offset={d}\n", .{
+                                    header.session_id, header.stream_id, header.term_id, header.term_offset,
+                                });
+                            }
+
+                            if (self.event_log) |el| {
+                                const evt_now: i64 = @intCast(@as(i128, std.time.nanoTimestamp()));
+                                el.log(.frame_in, evt_now, image.session_id, image.stream_id, payload);
+                            }
+
+                            if (image.hasGap(self.counters_map)) {
+                                const hwm = self.counters_map.get(image.receiver_hwm.counter_id);
+                                const gap_len = @as(i32, @intCast(hwm - image.rebuild_position));
+                                const gap_off = @as(i32, @intCast(@mod(image.rebuild_position, @as(i64, @intCast(image.term_length)))));
+                                image.nak_state.recordGap(gap_off, gap_len);
+                                if (self.loss_report_instance) |lr| {
+                                    const lnow: i64 = @intCast(@as(i128, std.time.nanoTimestamp()));
+                                    lr.recordObservation(@as(i64, @intCast(payload.len)), lnow, image.session_id, image.stream_id, "aeron:udp");
+                                }
+                            }
+
+                            const now = @as(i64, @intCast(@as(i128, std.time.nanoTimestamp())));
+                            if (image.nak_state.shouldSend(now)) {
+                                self.sendNak(image) catch {};
+                                image.nak_state.clear();
+                            }
+
+                            image_for_status = image;
+                        }
+                        break;
+                    }
+                }
+
+                if (!found_image) {
+                    _ = self.data_frames_before_image.fetchAdd(1, .monotonic);
+                    std.debug.print("[RECEIVER] DATA for unknown session={d} stream={d} (images={d}) term_id={d} term_offset={d}\n", .{
+                        header.session_id, header.stream_id, self.images.items.len, header.term_id, header.term_offset,
+                    });
+                }
+
+                self.mutex.unlock();
+
+                // Send STATUS outside the lock; image pointer is stable while driver is running
+                if (image_for_status) |img| {
+                    std.debug.print("[RECEIVER] sending STATUS to {any}\n", .{img.source_address});
+                    self.sendStatus(img) catch |err| switch (err) {
+                        error.WouldBlock => {},
+                        else => std.log.err("receiver STATUS send failed session_id={} stream_id={} err={}", .{ img.session_id, img.stream_id, err }),
+                    };
+                }
+
+                work += 1;
+            } else if (frame_type_raw == @intFromEnum(protocol.FrameType.setup)) {
+                if (frame_data.len < protocol.SetupHeader.LENGTH) {
+                    offset += aligned_advance;
+                    continue;
+                }
+                const setup = @as(*const protocol.SetupHeader, @ptrCast(@alignCast(&frame_data[0])));
+                std.debug.print("[RECEIVER] SETUP: session={d} stream={d} initial_term_id={d} active_term_id={d} src={any}\n", .{
+                    setup.session_id, setup.stream_id, setup.initial_term_id, setup.active_term_id, src_addr,
+                });
+                self.mutex.lock();
+                self.pending_setups.append(self.allocator, .{
+                    .session_id = setup.session_id,
+                    .stream_id = setup.stream_id,
+                    .initial_term_id = setup.initial_term_id,
+                    .active_term_id = setup.active_term_id,
+                    .term_length = setup.term_length,
+                    .mtu = setup.mtu,
+                    .source_address = src_addr,
+                }) catch {};
+                self.mutex.unlock();
+                work += 1;
+            } else if (frame_type_raw == @intFromEnum(protocol.FrameType.status)) {
+                if (frame_data.len < protocol.StatusMessage.LENGTH) {
+                    offset += aligned_advance;
+                    continue;
+                }
+                const status = @as(*const protocol.StatusMessage, @ptrCast(@alignCast(&frame_data[0])));
+                self.mutex.lock();
+                // STATUS frames are flow-control feedback for publications; queue for conductor/sender.
+                self.pending_status_messages.append(self.allocator, .{
+                    .session_id = status.session_id,
+                    .stream_id = status.stream_id,
+                    .consumption_term_id = status.consumption_term_id,
+                    .consumption_term_offset = status.consumption_term_offset,
+                    .receiver_window = status.receiver_window,
+                    .receiver_id = status.receiver_id,
+                }) catch {};
+                self.mutex.unlock();
+                work += 1;
             }
+            // nak and other types: skip
 
-            // Unknown session/stream — data arrived before image creation
-            std.debug.print("[RECEIVER] DATA for unknown session={d} stream={d} (images={d})\n", .{ header.session_id, header.stream_id, self.images.items.len });
-            return 1;
-        } else if (frame_type_raw == @intFromEnum(protocol.FrameType.setup)) {
-            if (data.len < protocol.SetupHeader.LENGTH) {
-                return 1;
-            }
-            const setup = @as(*const protocol.SetupHeader, @ptrCast(@alignCast(&data[0])));
-
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            self.pending_setups.append(self.allocator, .{
-                .session_id = setup.session_id,
-                .stream_id = setup.stream_id,
-                .initial_term_id = setup.initial_term_id,
-                .active_term_id = setup.active_term_id,
-                .term_length = setup.term_length,
-                .mtu = setup.mtu,
-                .source_address = src_addr,
-            }) catch return 1;
-            return 1;
-        } else if (frame_type_raw == @intFromEnum(protocol.FrameType.status)) {
-            if (data.len < protocol.StatusMessage.LENGTH) {
-                return 1;
-            }
-            const status = @as(*const protocol.StatusMessage, @ptrCast(@alignCast(&data[0])));
-
-            self.mutex.lock();
-            defer self.mutex.unlock();
-
-            // STATUS frames are control-plane feedback for publications, not data for Images.
-            // Queue them for the conductor/sender path so publisher-limit updates stay serialized
-            // with the rest of the driver state transitions.
-            self.pending_status_messages.append(self.allocator, .{
-                .session_id = status.session_id,
-                .stream_id = status.stream_id,
-                .consumption_term_id = status.consumption_term_id,
-                .consumption_term_offset = status.consumption_term_offset,
-                .receiver_window = status.receiver_window,
-                .receiver_id = status.receiver_id,
-            }) catch return 1;
-            return 1;
-        } else if (frame_type_raw == @intFromEnum(protocol.FrameType.nak)) {
-            // FrameType.nak (0x05)
-            // Ignore (we're the receiver, not sender)
-            return 1;
+            offset += aligned_advance;
         }
 
-        // Other frame types: ignore
-        return 1;
+        return work;
     }
 
     // Single duty cycle: recv one frame, dispatch, return work count (0 or 1)
@@ -601,6 +615,7 @@ test "Receiver onAddSubscription and onRemoveSubscription" {
         64 * 1024,
         1500,
         100,
+        100,
         &log_buf,
         hwm_handle,
         sub_pos_handle,
@@ -634,6 +649,7 @@ test "Image insertFrame writes data at correct offset" {
         2,
         64 * 1024,
         1500,
+        0,
         0,
         &log_buf,
         hwm_handle,
@@ -688,6 +704,7 @@ test "Image hasGap detects missing frame" {
         64 * 1024,
         1500,
         0,
+        0,
         &log_buf,
         hwm_handle,
         sub_pos_handle,
@@ -723,6 +740,7 @@ test "Image insertFrame keeps gap until missing prefix arrives" {
         2,
         64 * 1024,
         1500,
+        0,
         0,
         &log_buf,
         hwm_handle,

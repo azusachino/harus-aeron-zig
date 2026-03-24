@@ -153,6 +153,7 @@ pub const DriverConductor = struct {
                         sig.term_length,
                         sig.mtu,
                         sig.initial_term_id,
+                        sig.active_term_id,
                         lb,
                         hwm_handle,
                         sub_pos_handle,

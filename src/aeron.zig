@@ -90,6 +90,10 @@ pub const Aeron = struct {
 
         var sub_it = self.subscriptions.iterator();
         while (sub_it.next()) |entry| {
+            // Images are heap-allocated here (allocator.create in doWork); free before deinit.
+            for (entry.value_ptr.*.images()) |img| {
+                self.allocator.destroy(img);
+            }
             entry.value_ptr.*.deinit();
             self.allocator.destroy(entry.value_ptr.*);
         }
