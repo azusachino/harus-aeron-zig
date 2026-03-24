@@ -52,10 +52,12 @@ pub const Archive = struct {
     /// Initialize a new Archive with the given allocator and context.
     /// The conductor is created but not started; call start() to begin processing.
     pub fn init(allocator: std.mem.Allocator, ctx: ArchiveContext) !Archive {
+        var conductor = try conductor_mod.ArchiveConductor.initWithArchiveDir(allocator, ctx.archive_dir);
+        conductor.default_segment_file_length = @intCast(ctx.segment_file_length);
         return Archive{
             .allocator = allocator,
             .ctx = ctx,
-            .conductor = try conductor_mod.ArchiveConductor.initWithArchiveDir(allocator, ctx.archive_dir),
+            .conductor = conductor,
             .is_running = false,
         };
     }
@@ -339,6 +341,11 @@ test "Archive survives restart for listing and replay" {
                 .stream_id = 8,
                 .channel = channel,
                 .source_identity = source_identity,
+                .initial_term_id = 21,
+                .term_buffer_length = 256 * 1024,
+                .mtu_length = 4096,
+                .start_position = 64,
+                .start_timestamp = 999,
             },
         });
         _ = try archive.doWork();
@@ -387,7 +394,13 @@ test "Archive survives restart for listing and replay" {
         }.handle);
 
         try std.testing.expectEqual(@as(i64, 1), Capture.listed_count);
-        try std.testing.expect(archive.conductor.catalog.recordingDescriptor(1) != null);
+        const descriptor = archive.conductor.catalog.recordingDescriptor(1).?;
+        try std.testing.expectEqual(@as(i32, 21), descriptor.initial_term_id);
+        try std.testing.expectEqual(@as(i32, @intCast(ctx.segment_file_length)), descriptor.segment_file_length);
+        try std.testing.expectEqual(@as(i32, 256 * 1024), descriptor.term_buffer_length);
+        try std.testing.expectEqual(@as(i32, 4096), descriptor.mtu_length);
+        try std.testing.expectEqual(@as(i64, 64), descriptor.start_position);
+        try std.testing.expectEqual(@as(i64, 999), descriptor.start_timestamp);
 
         try archive.enqueueCommand(.{
             .replay = .{

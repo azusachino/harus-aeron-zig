@@ -42,6 +42,35 @@ pub const ClusterContext = struct {
     consensus_stream_id: i32 = 102,
 };
 
+/// ElectionSnapshot — owned copy of election state for restart continuity.
+pub const ElectionSnapshot = struct {
+    state: election_mod.ElectionState,
+    leader_member_id: i32,
+    candidate_term_id: i64,
+    leader_ship_term_id: i64,
+    log_position: i64,
+    election_deadline_ns: i64,
+    votes_received: u32,
+    cluster_members: []election_mod.MemberState,
+
+    pub fn deinit(self: *ElectionSnapshot, allocator: std.mem.Allocator) void {
+        allocator.free(self.cluster_members);
+        self.cluster_members = &.{};
+    }
+};
+
+/// ConsensusModuleState — durable cluster state for restart and failover tests.
+pub const ConsensusModuleState = struct {
+    is_running: bool,
+    election: ElectionSnapshot,
+    conductor: conductor_mod.ClusterConductorState,
+
+    pub fn deinit(self: *ConsensusModuleState, allocator: std.mem.Allocator) void {
+        self.election.deinit(allocator);
+        self.conductor.deinit(allocator);
+    }
+};
+
 // =============================================================================
 // ConsensusModule
 // =============================================================================
@@ -132,6 +161,56 @@ pub const ConsensusModule = struct {
     /// Poll and deliver all queued responses.
     pub fn pollResponses(self: *ConsensusModule, handler: *const fn (response: *const conductor_mod.Response) void) i32 {
         return self.conductor.pollResponses(handler);
+    }
+
+    /// Refresh follower state from the current leader without changing local member identity.
+    pub fn catchUpFromLeader(self: *ConsensusModule, leader: *const ConsensusModule, now_ns: i64) !void {
+        self.election.onLeaderHeartbeat(
+            leader.leaderShipTermId(),
+            leader.conductor.log.appendPosition(),
+            leader.leaderMemberId(),
+            now_ns,
+        );
+        try self.conductor.catchUpFromLeader(&leader.conductor);
+    }
+
+    /// Capture restart state for the consensus module.
+    pub fn captureState(self: *const ConsensusModule, allocator: std.mem.Allocator) !ConsensusModuleState {
+        const members = try allocator.dupe(election_mod.MemberState, self.election.cluster_members);
+        errdefer allocator.free(members);
+
+        return .{
+            .is_running = self.is_running,
+            .election = .{
+                .state = self.election.state,
+                .leader_member_id = self.election.leader_member_id,
+                .candidate_term_id = self.election.candidate_term_id,
+                .leader_ship_term_id = self.election.leader_ship_term_id,
+                .log_position = self.election.log_position,
+                .election_deadline_ns = self.election.election_deadline_ns,
+                .votes_received = self.election.votes_received,
+                .cluster_members = members,
+            },
+            .conductor = try self.conductor.captureState(allocator),
+        };
+    }
+
+    /// Restore a previously captured restart state.
+    pub fn restoreState(self: *ConsensusModule, state: *const ConsensusModuleState) !void {
+        if (state.election.cluster_members.len != self.election.cluster_members.len) {
+            return error.ClusterMembershipMismatch;
+        }
+
+        self.is_running = state.is_running;
+        self.election.state = state.election.state;
+        self.election.leader_member_id = state.election.leader_member_id;
+        self.election.candidate_term_id = state.election.candidate_term_id;
+        self.election.leader_ship_term_id = state.election.leader_ship_term_id;
+        self.election.log_position = state.election.log_position;
+        self.election.election_deadline_ns = state.election.election_deadline_ns;
+        self.election.votes_received = state.election.votes_received;
+        @memcpy(self.election.cluster_members, state.election.cluster_members);
+        try self.conductor.restoreState(&state.conductor);
     }
 
     /// Return the current cluster role.
@@ -427,4 +506,200 @@ test "ConsensusModule end-to-end: election, connect, message" {
     try std.testing.expectEqual(@as(i64, @intCast(data.len)), module.conductor.log.appendPosition());
     try std.testing.expectEqual(@as(i64, @intCast(data.len)), module.conductor.log.commitPosition());
     try std.testing.expectEqualSlices(u8, "hello cluster", module.conductor.log.entryAt(0).?.data);
+}
+
+test "ConsensusModule follower catch up preserves progress through failover" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const members = [_]MemberConfig{
+        .{ .member_id = 0 },
+        .{ .member_id = 1 },
+        .{ .member_id = 2 },
+    };
+
+    var leader = try ConsensusModule.init(allocator, .{
+        .member_id = 0,
+        .cluster_members = &members,
+    });
+    defer leader.deinit();
+    var follower = try ConsensusModule.init(allocator, .{
+        .member_id = 1,
+        .cluster_members = &members,
+    });
+    defer follower.deinit();
+    var voter = try ConsensusModule.init(allocator, .{
+        .member_id = 2,
+        .cluster_members = &members,
+    });
+    defer voter.deinit();
+
+    leader.start();
+    follower.start();
+    voter.start();
+
+    _ = try leader.doWork(1000);
+    const ballot_time = leader.election.election_deadline_ns + 1;
+    _ = try leader.doWork(ballot_time);
+    leader.election.onVote(leader.election.candidate_term_id, 0, 1, true);
+    _ = try leader.doWork(ballot_time + 100);
+    try std.testing.expectEqual(ClusterRole.leader, leader.role());
+
+    const response_channel = try allocator.dupe(u8, "aeron:udp://localhost:40125");
+    defer allocator.free(response_channel);
+    try leader.enqueueCommand(.{
+        .session_connect = .{
+            .correlation_id = 20,
+            .cluster_session_id = 1,
+            .response_stream_id = 9,
+            .response_channel = response_channel,
+        },
+    });
+    _ = try leader.doWork(ballot_time + 200);
+    _ = leader.pollResponses(&struct {
+        pub fn handle(_: *const conductor_mod.Response) void {}
+    }.handle);
+
+    const payload = try allocator.dupe(u8, "failover");
+    defer allocator.free(payload);
+    try leader.enqueueCommand(.{
+        .session_message = .{
+            .cluster_session_id = 1,
+            .timestamp = ballot_time + 300,
+            .data = payload,
+        },
+    });
+    _ = try leader.doWork(ballot_time + 300);
+    _ = leader.pollResponses(&struct {
+        pub fn handle(_: *const conductor_mod.Response) void {}
+    }.handle);
+
+    const catch_up_time = ballot_time + 310;
+    try follower.catchUpFromLeader(&leader, catch_up_time);
+    try std.testing.expectEqual(leader.conductor.log.appendPosition(), follower.conductor.log.appendPosition());
+    try std.testing.expectEqual(leader.conductor.commit_position, follower.conductor.commit_position);
+    try std.testing.expectEqual(@as(usize, 1), follower.conductor.sessionCount());
+
+    leader.stop();
+
+    const failover_time = catch_up_time + election_mod.LEADER_HEARTBEAT_TIMEOUT_NS + 1;
+    _ = try follower.doWork(failover_time);
+    try std.testing.expectEqual(ElectionState.canvass, follower.electionState());
+
+    const follower_ballot_time = follower.election.election_deadline_ns + 1;
+    _ = try follower.doWork(follower_ballot_time);
+    const granted = voter.election.onRequestVote(
+        follower.election.candidate_term_id,
+        follower.election.leaderShipTermId(),
+        follower.election.log_position,
+        1,
+    );
+    try std.testing.expect(granted);
+    follower.election.onVote(follower.election.candidate_term_id, 1, 2, true);
+    _ = try follower.doWork(follower_ballot_time + 100);
+    try std.testing.expectEqual(ClusterRole.leader, follower.role());
+
+    const payload_two = try allocator.dupe(u8, "resume");
+    defer allocator.free(payload_two);
+    try follower.enqueueCommand(.{
+        .session_message = .{
+            .cluster_session_id = 1,
+            .timestamp = follower_ballot_time + 200,
+            .data = payload_two,
+        },
+    });
+    _ = try follower.doWork(follower_ballot_time + 200);
+    _ = follower.pollResponses(&struct {
+        pub fn handle(_: *const conductor_mod.Response) void {}
+    }.handle);
+
+    try std.testing.expectEqualSlices(u8, "failover", follower.conductor.log.entryAt(0).?.data);
+    try std.testing.expectEqualSlices(u8, "resume", follower.conductor.log.entryAt(8).?.data);
+}
+
+test "ConsensusModule state round trip survives restart" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const members = [_]MemberConfig{
+        .{ .member_id = 0 },
+        .{ .member_id = 1 },
+        .{ .member_id = 2 },
+    };
+    var module = try ConsensusModule.init(allocator, .{
+        .member_id = 0,
+        .cluster_members = &members,
+    });
+    defer module.deinit();
+    module.start();
+
+    _ = try module.doWork(1000);
+    const ballot_time = module.election.election_deadline_ns + 1;
+    _ = try module.doWork(ballot_time);
+    module.election.onVote(module.election.candidate_term_id, 0, 1, true);
+    _ = try module.doWork(ballot_time + 100);
+
+    const response_channel = try allocator.dupe(u8, "aeron:udp://localhost:40126");
+    defer allocator.free(response_channel);
+    try module.enqueueCommand(.{
+        .session_connect = .{
+            .correlation_id = 30,
+            .cluster_session_id = 1,
+            .response_stream_id = 10,
+            .response_channel = response_channel,
+        },
+    });
+    _ = try module.doWork(ballot_time + 200);
+    _ = module.pollResponses(&struct {
+        pub fn handle(_: *const conductor_mod.Response) void {}
+    }.handle);
+
+    const first = try allocator.dupe(u8, "persist");
+    defer allocator.free(first);
+    try module.enqueueCommand(.{
+        .session_message = .{
+            .cluster_session_id = 1,
+            .timestamp = ballot_time + 300,
+            .data = first,
+        },
+    });
+    _ = try module.doWork(ballot_time + 300);
+    _ = module.pollResponses(&struct {
+        pub fn handle(_: *const conductor_mod.Response) void {}
+    }.handle);
+
+    var state = try module.captureState(allocator);
+    defer state.deinit(allocator);
+
+    var restored = try ConsensusModule.init(allocator, .{
+        .member_id = 0,
+        .cluster_members = &members,
+    });
+    defer restored.deinit();
+    try restored.restoreState(&state);
+
+    try std.testing.expect(restored.isRunning());
+    try std.testing.expectEqual(module.role(), restored.role());
+    try std.testing.expectEqual(module.leaderShipTermId(), restored.leaderShipTermId());
+    try std.testing.expectEqual(module.conductor.log.appendPosition(), restored.conductor.log.appendPosition());
+    try std.testing.expectEqual(@as(usize, 1), restored.conductor.sessionCount());
+
+    const second = try allocator.dupe(u8, "again");
+    defer allocator.free(second);
+    try restored.enqueueCommand(.{
+        .session_message = .{
+            .cluster_session_id = 1,
+            .timestamp = ballot_time + 400,
+            .data = second,
+        },
+    });
+    _ = try restored.doWork(ballot_time + 400);
+    _ = restored.pollResponses(&struct {
+        pub fn handle(_: *const conductor_mod.Response) void {}
+    }.handle);
+
+    try std.testing.expectEqualSlices(u8, "persist", restored.conductor.log.entryAt(0).?.data);
+    try std.testing.expectEqualSlices(u8, "again", restored.conductor.log.entryAt(7).?.data);
 }

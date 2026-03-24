@@ -910,3 +910,194 @@ Phase 4 tasks: P4-1 standalone; P4-2,3,4 need Phase 1
 - Use `make check` before marking any task done
 - Keep `docs/todo.md` updated as tasks complete
 - Cross-reference https://github.com/aeron-io/aeron for any protocol detail questions
+
+---
+
+## Phase 8 — Upstream Fidelity
+
+Goal: move from a green, simplified Aeron-compatible implementation to behavior that is meaningfully faithful to `aeron-io/aeron` across driver, archive, cluster, tooling, and interop.
+
+Exit criteria for the phase:
+- cross-language interop passes as a first-class CI-supported workflow, not a one-off local exercise
+- archive restart, replay, and catalog behavior match upstream expectations closely enough to preserve operational state without ad hoc fallbacks
+- cluster behavior covers the real recovery and leadership lifecycle instead of a reduced happy-path model
+- protocol and transport parsing accept the Aeron URI/message shapes used by upstream samples and tools
+- observable runtime outputs (`stat`, `errors`, `loss`, `streams`, `events`, cluster/archive tooling) reflect real state rather than placeholders
+- benchmark and soak runs establish a repeatable regression floor before claiming release parity
+
+Key references:
+- `aeron-driver/src/main/java/io/aeron/driver/`
+- `aeron-driver/src/main/c/protocol/aeron_udp_protocol.h`
+- `aeron-archive/src/main/java/io/aeron/archive/`
+- `aeron-cluster/src/main/java/io/aeron/cluster/`
+- `aeron-client/src/main/java/io/aeron/logbuffer/LogBufferDescriptor.java`
+- upstream sample apps and archive / cluster system tests
+
+### Task P8-1: Wire Protocol Completion
+
+**File**: `src/protocol/`, `src/transport/`
+
+Close the remaining driver/archive/cluster message-shape gaps so the code accepts the Aeron frames, control messages, and channel forms used by real clients and samples.
+
+Implement:
+- the remaining protocol frame variants and header semantics still treated as reduced or implicit
+- stricter Aeron URI parsing and normalization, including the forms exercised by upstream sample applications
+- validation and decode behavior that rejects malformed wire input without using optimistic assumptions
+- exhaustive unit coverage for each supported frame branch, URI branch, and parser edge case
+
+Acceptance criteria:
+- `make test-unit`
+- `make check`
+
+Dependencies:
+- existing Phase 7 protocol work
+
+---
+
+### Task P8-2: Driver Runtime Fidelity
+
+**File**: `src/driver/`, `src/logbuffer/`, `src/ipc/`
+
+Bring the media-driver behavior closer to upstream around setup, flow control, image lifecycle, counters, and recovery from untrusted input and timing churn.
+
+Implement:
+- publication / image lifecycle semantics that more closely follow upstream setup, status, NAK, and subscriber-position handling
+- stronger loss, retransmit, and flow-control behavior under reorder, gap, and reconnect conditions
+- more realistic conductor / sender / receiver coordination for resource cleanup and session lifecycle
+- stress and integration coverage for reconnect, gap fill, subscriber catch-up, and repeated setup / teardown
+
+Acceptance criteria:
+- `make test-unit`
+- `make test-integration`
+- `make stress`
+- `make check`
+
+Dependencies:
+- Task P8-1
+
+---
+
+### Task P8-3: Archive Operational Fidelity
+
+**File**: `src/archive/`, `docs/tutorial/05-archive/`
+
+Finish the shift from a persistent prototype archive to behavior that resembles the upstream archive’s operational model.
+
+Implement:
+- segment rotation and replay across multiple persisted segments
+- richer catalog fidelity, including descriptor fields, stop-state accuracy, and restart reconstruction
+- archive control paths that reflect upstream list / replay / stop / extend expectations more closely
+- tutorial material updates where the course must track the reference implementation
+
+Acceptance criteria:
+- `make test-unit`
+- `make check`
+
+Dependencies:
+- Task P8-1
+
+---
+
+### Task P8-4: Cluster Consensus Fidelity
+
+**File**: `src/cluster/`, `test/integration/`
+
+Replace the reduced in-memory cluster model with behavior that is meaningfully closer to upstream election, replication, replay, and recovery semantics.
+
+Implement:
+- follower catch-up and rejoin paths that distinguish replicated progress from leader-local convenience state
+- restart, election, and commit semantics that preserve cluster continuity through repeated failover cycles
+- more faithful session redirection, leadership-term handling, and replay / recovery coordination with archive state
+- multi-node integration and soak scenarios that repeatedly kill leaders, restart followers, and verify continued service
+
+Acceptance criteria:
+- `make test-unit`
+- `make test-integration`
+- `make check`
+
+Dependencies:
+- Task P8-1
+- Task P8-3
+
+---
+
+### Task P8-5: CnC and Tooling Fidelity
+
+**File**: `src/cnc.zig`, `src/tools/`, `src/counters_report.zig`, `src/event_log.zig`
+
+Make the operator-facing tools report real driver, archive, and cluster state instead of placeholder or partial state.
+
+Implement:
+- real CnC mapping and metadata reads compatible with the runtime files produced by this implementation
+- `stat`, `errors`, `loss`, `streams`, `events`, and `cluster-tool` outputs backed by actual counters and logs
+- event and counter coverage that exposes the runtime state needed for parity validation and debugging
+- tests that verify the tools against generated CnC / event-log fixtures
+
+Acceptance criteria:
+- `make test-unit`
+- `make check`
+
+Dependencies:
+- Task P8-2
+
+---
+
+### Task P8-6: Interop and System-Test Automation
+
+**File**: `Makefile`, `deploy/interop/`, `test/interop/`
+
+Turn external validation into a release gate rather than a manual sanity check.
+
+Implement:
+- a deterministic interop matrix covering Zig↔Java pub/sub, archive, and cluster-adjacent scenarios where feasible
+- a single documented entrypoint that fetches artifacts, builds images, deploys jobs, and reports pass/fail clearly
+- repeatable system-test scenarios derived from upstream expectations, not only local unit assumptions
+- CI-friendly smoke paths and heavier local paths
+
+Acceptance criteria:
+- `make setup`
+- `make interop`
+- documented reproducible workflow in `docs/setup.md`
+
+Dependencies:
+- Task P8-1
+- Task P8-3
+- Task P8-4
+
+---
+
+### Task P8-7: Performance and Soak Baseline
+
+**File**: `src/bench/`, `examples/throughput.zig`, `test/stress/`, `Makefile`
+
+Establish the throughput, latency, and long-running stability floor required before claiming fidelity and release readiness.
+
+Implement:
+- benchmark entrypoints that are useful for regression tracking, not just ad hoc local runs
+- baseline throughput and latency measurements with documented expectations and caveats
+- longer-running soak scenarios for reconnect, archive replay, and cluster failover
+- a lightweight smoke baseline in `make bench` plus heavier optional runs for manual validation
+
+Acceptance criteria:
+- `make bench`
+- `make stress`
+- `make check`
+
+Dependencies:
+- Task P8-2
+- Task P8-3
+- Task P8-4
+
+---
+
+### Suggested Sequence
+
+1. P8-1 wire protocol completion.
+2. P8-3 archive operational fidelity.
+3. P8-4 cluster consensus fidelity.
+4. P8-2 driver runtime fidelity.
+5. P8-5 CnC and tooling fidelity.
+6. P8-6 interop and system-test automation.
+7. P8-7 performance and soak baseline.
+
+This order front-loads the compatibility surface that every other subsystem depends on, then hardens the stateful archive and cluster layers before finishing operational tooling, external validation, and performance sign-off.

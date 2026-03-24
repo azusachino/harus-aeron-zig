@@ -87,6 +87,7 @@ pub const TestHarness = struct {
     }
 
     pub fn doWorkLoop(self: *TestHarness, sub: *Subscription, ctx: *anyopaque, handler: FragmentHandler, expected: i32, timeout_ms: u64) !void {
+        _ = self;
         var timer = try std.time.Timer.start();
         const timeout_ns = timeout_ms * std.time.ns_per_ms;
 
@@ -97,7 +98,6 @@ pub const TestHarness = struct {
                 return error.Timeout;
             }
 
-            _ = self.driver.doWork();
             const fragments = sub.poll(handler, ctx, 10);
 
             if (fragments == 0) {

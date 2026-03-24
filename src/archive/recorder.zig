@@ -6,6 +6,15 @@ const std = @import("std");
 const catalog_mod = @import("catalog.zig");
 const protocol = @import("protocol.zig");
 
+pub const RecordingMetadata = struct {
+    initial_term_id: i32 = 0,
+    segment_file_length: i32 = 128 * 1024 * 1024,
+    term_buffer_length: i32 = 64 * 1024,
+    mtu_length: i32 = 1408,
+    start_position: i64 = 0,
+    start_timestamp: i64 = 0,
+};
+
 /// RecordingWriter — buffers raw frame data for a single recording and mirrors it to disk.
 pub const RecordingWriter = struct {
     allocator: std.mem.Allocator,
@@ -248,8 +257,7 @@ pub const Recorder = struct {
         stream_id: i32,
         channel: []const u8,
         source_identity: []const u8,
-        start_position: i64,
-        start_timestamp: i64,
+        metadata: RecordingMetadata,
     ) !i64 {
         // Allocate catalog entry (next_recording_id is auto-incremented)
         const recording_id = try self.catalog.addNewRecording(
@@ -257,12 +265,12 @@ pub const Recorder = struct {
             stream_id,
             channel,
             source_identity,
-            0, // initial_term_id (TODO: capture from media)
-            0, // segment_file_length (TODO: configurable)
-            0, // term_buffer_length (TODO: from media)
-            0, // mtu_length (TODO: from media)
-            start_position,
-            start_timestamp,
+            metadata.initial_term_id,
+            metadata.segment_file_length,
+            metadata.term_buffer_length,
+            metadata.mtu_length,
+            metadata.start_position,
+            metadata.start_timestamp,
         );
 
         // Create and store the session
@@ -272,7 +280,7 @@ pub const Recorder = struct {
             session_id,
             stream_id,
             channel,
-            start_position,
+            metadata.start_position,
             self.archive_dir,
         );
         try self.sessions.append(self.allocator, session);
@@ -383,6 +391,41 @@ test "RecordingSession writes fragments and tracks state" {
     try std.testing.expectEqual(12, session.writer.bytesWritten());
 }
 
+test "Recorder start recording persists descriptor metadata" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var catalog = catalog_mod.Catalog.init(allocator);
+    defer catalog.deinit();
+
+    var recorder = Recorder.init(allocator, &catalog);
+    defer recorder.deinit();
+
+    const recording_id = try recorder.onStartRecording(
+        7,
+        8,
+        "aeron:udp?endpoint=localhost:40123",
+        "source-A",
+        .{
+            .initial_term_id = 42,
+            .segment_file_length = 64 * 1024 * 1024,
+            .term_buffer_length = 256 * 1024,
+            .mtu_length = 4096,
+            .start_position = 128,
+            .start_timestamp = 777,
+        },
+    );
+
+    const entry = catalog.recordingDescriptor(recording_id).?;
+    try std.testing.expectEqual(@as(i32, 42), entry.initial_term_id);
+    try std.testing.expectEqual(@as(i32, 64 * 1024 * 1024), entry.segment_file_length);
+    try std.testing.expectEqual(@as(i32, 256 * 1024), entry.term_buffer_length);
+    try std.testing.expectEqual(@as(i32, 4096), entry.mtu_length);
+    try std.testing.expectEqual(@as(i64, 128), entry.start_position);
+    try std.testing.expectEqual(@as(i64, 777), entry.start_timestamp);
+}
+
 test "Recorder onStartRecording creates session and catalog entry" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -399,8 +442,10 @@ test "Recorder onStartRecording creates session and catalog entry" {
         456,
         "aeron:udp://localhost:40123",
         "test-source",
-        0,
-        1000,
+        .{
+            .start_position = 0,
+            .start_timestamp = 1000,
+        },
     );
 
     try std.testing.expectEqual(1, recording_id);
@@ -452,8 +497,10 @@ test "Recorder onStopRecording closes session and updates catalog" {
         222,
         "ch1",
         "src1",
-        100,
-        5000,
+        .{
+            .start_position = 100,
+            .start_timestamp = 5000,
+        },
     );
 
     // Write some data
@@ -484,10 +531,16 @@ test "Recorder doWork returns active session count" {
 
     try std.testing.expectEqual(0, recorder.doWork());
 
-    _ = try recorder.onStartRecording(1, 1, "ch1", "src1", 0, 100);
+    _ = try recorder.onStartRecording(1, 1, "ch1", "src1", .{
+        .start_position = 0,
+        .start_timestamp = 100,
+    });
     try std.testing.expectEqual(1, recorder.doWork());
 
-    _ = try recorder.onStartRecording(2, 2, "ch2", "src2", 0, 100);
+    _ = try recorder.onStartRecording(2, 2, "ch2", "src2", .{
+        .start_position = 0,
+        .start_timestamp = 100,
+    });
     try std.testing.expectEqual(2, recorder.doWork());
 
     const id1 = 1;
@@ -510,9 +563,18 @@ test "Recorder findSession returns correct session" {
     var recorder = Recorder.init(allocator, &catalog);
     defer recorder.deinit();
 
-    const id1 = try recorder.onStartRecording(10, 20, "ch1", "src1", 0, 100);
-    const id2 = try recorder.onStartRecording(30, 40, "ch2", "src2", 0, 100);
-    const id3 = try recorder.onStartRecording(50, 60, "ch3", "src3", 0, 100);
+    const id1 = try recorder.onStartRecording(10, 20, "ch1", "src1", .{
+        .start_position = 0,
+        .start_timestamp = 100,
+    });
+    const id2 = try recorder.onStartRecording(30, 40, "ch2", "src2", .{
+        .start_position = 0,
+        .start_timestamp = 100,
+    });
+    const id3 = try recorder.onStartRecording(50, 60, "ch3", "src3", .{
+        .start_position = 0,
+        .start_timestamp = 100,
+    });
 
     const found1 = recorder.findSession(id1);
     try std.testing.expect(found1 != null);
