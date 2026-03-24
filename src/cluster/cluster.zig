@@ -280,13 +280,87 @@ test "ConsensusModule follower role on new leadership term" {
     module.start();
 
     // Receive notification of new leader (node 0)
-    module.election.onNewLeadershipTerm(1, 0, 0);
+    module.election.onNewLeadershipTerm(1, 0, 0, 1000);
 
     // Drive — conductor should sync to follower role
     _ = try module.doWork(1000);
     try std.testing.expectEqual(ElectionState.follower_ready, module.electionState());
     try std.testing.expectEqual(ClusterRole.follower, module.role());
     try std.testing.expectEqual(@as(i32, 0), module.leaderMemberId());
+}
+
+test "ConsensusModule follower heartbeat timeout triggers failover election" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const members = [_]MemberConfig{
+        .{ .member_id = 0 },
+        .{ .member_id = 1 },
+        .{ .member_id = 2 },
+    };
+
+    var node0 = try ConsensusModule.init(allocator, .{
+        .member_id = 0,
+        .cluster_members = &members,
+    });
+    defer node0.deinit();
+    var node1 = try ConsensusModule.init(allocator, .{
+        .member_id = 1,
+        .cluster_members = &members,
+    });
+    defer node1.deinit();
+    var node2 = try ConsensusModule.init(allocator, .{
+        .member_id = 2,
+        .cluster_members = &members,
+    });
+    defer node2.deinit();
+
+    node0.start();
+    node1.start();
+    node2.start();
+
+    _ = try node0.doWork(1000);
+    const election_deadline = node0.election.election_deadline_ns + 1;
+    _ = try node0.doWork(election_deadline);
+    node0.election.onVote(node0.election.candidate_term_id, 0, 1, true);
+    _ = try node0.doWork(election_deadline + 100);
+    try std.testing.expectEqual(ClusterRole.leader, node0.role());
+
+    const leader_term = node0.leaderShipTermId();
+    node1.election.onNewLeadershipTerm(leader_term, 0, 0, election_deadline + 100);
+    node2.election.onNewLeadershipTerm(leader_term, 0, 0, election_deadline + 100);
+    _ = try node1.doWork(election_deadline + 101);
+    _ = try node2.doWork(election_deadline + 101);
+    try std.testing.expectEqual(ClusterRole.follower, node1.role());
+    try std.testing.expectEqual(ClusterRole.follower, node2.role());
+
+    node0.stop();
+
+    const failover_time = election_deadline + 100 + election_mod.LEADER_HEARTBEAT_TIMEOUT_NS + 1;
+    _ = try node1.doWork(failover_time);
+    _ = try node2.doWork(failover_time);
+    try std.testing.expectEqual(ElectionState.canvass, node1.electionState());
+    try std.testing.expectEqual(ElectionState.canvass, node2.electionState());
+
+    const node1_ballot_time = node1.election.election_deadline_ns + 1;
+    _ = try node1.doWork(node1_ballot_time);
+    _ = try node2.doWork(node1_ballot_time);
+    try std.testing.expectEqual(ElectionState.candidate_ballot, node1.electionState());
+
+    const granted = node2.election.onRequestVote(
+        node1.election.candidate_term_id,
+        node1.election.leaderShipTermId(),
+        node1.election.log_position,
+        1,
+    );
+    try std.testing.expect(granted);
+
+    node1.election.onVote(node1.election.candidate_term_id, 1, 2, true);
+    _ = try node1.doWork(node1_ballot_time + 100);
+    try std.testing.expectEqual(ElectionState.leader_ready, node1.electionState());
+    try std.testing.expectEqual(ClusterRole.leader, node1.role());
+    try std.testing.expectEqual(@as(i32, 1), node1.leaderMemberId());
 }
 
 test "ConsensusModule end-to-end: election, connect, message" {
