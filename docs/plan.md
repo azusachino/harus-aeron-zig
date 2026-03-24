@@ -860,15 +860,23 @@ Dependencies:
 
 ---
 
+### Immediate Next Tasks
+
+1. P7-10 interop matrix automation.
+2. P7-9 archive restart and catalog fidelity.
+3. P7-8 cluster failure and rejoin correctness.
+
+These are the highest-payoff follow-ups after the 1.0.0 baseline because they turn the release into a reproducible external check, then tighten the archive and cluster behavior that still carries the most product risk.
+
 ### Suggested Sequence
 
-1. P7-7 protocol breadth and codec parity.
-2. P7-10 interop matrix automation.
-3. P7-9 archive restart and catalog fidelity.
-4. P7-8 cluster failure and rejoin correctness.
+1. P7-10 interop matrix automation.
+2. P7-9 archive restart and catalog fidelity.
+3. P7-8 cluster failure and rejoin correctness.
+4. P7-7 protocol breadth and codec parity.
 5. P7-11 throughput baseline and perf hygiene.
 
-This order removes the broad compatibility blockers first, then uses interop and archive coverage to validate the transport path before the more stateful cluster recovery work.
+This order uses the already-promising 1.0.0 transport baseline to lock in repeatable interop first, then closes the stateful gaps before broadening the protocol surface and perf work.
 
 ---
 
