@@ -82,12 +82,13 @@ pub const Image = struct {
         const payload_offset = frame_offset + protocol.DataHeader.LENGTH;
         @memcpy(term_buffer[payload_offset .. payload_offset + payload.len], payload);
 
-        // Align frame length to FRAME_ALIGNMENT boundary
+        // Align frame length to FRAME_ALIGNMENT boundary (for position tracking)
         const aligned_len = @as(i32, @intCast((total_frame_len + protocol.FRAME_ALIGNMENT - 1) / protocol.FRAME_ALIGNMENT * protocol.FRAME_ALIGNMENT));
 
-        // Write frame_length as little-endian i32 LAST (signals frame is committed)
+        // Write original frame_length as commit signal (NOT aligned — payload length must be exact)
+        // advanceRebuildPosition and TermReader both align at read time.
         const len_ptr = @as(*i32, @ptrCast(@alignCast(&term_buffer[frame_offset])));
-        len_ptr.* = aligned_len;
+        len_ptr.* = @as(i32, @intCast(total_frame_len));
 
         // Update receiver_hwm counter using absolute stream position.
         const new_hwm = self.positionFor(header.term_id, header.term_offset + aligned_len);

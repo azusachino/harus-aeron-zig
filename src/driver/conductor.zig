@@ -162,7 +162,7 @@ pub const DriverConductor = struct {
                     self.receiver.sendStatus(image) catch {};
 
                     // Send ON_IMAGE_READY to clients
-                    self.sendImageReady(sig.session_id, sig.stream_id, sub.registration_id);
+                    self.sendImageReady(sig.session_id, sig.stream_id, sub.registration_id, sig.initial_term_id);
                     work += 1;
                     break;
                 }
@@ -188,11 +188,12 @@ pub const DriverConductor = struct {
         return work;
     }
 
-    fn sendImageReady(self: *DriverConductor, session_id: i32, stream_id: i32, registration_id: i64) void {
-        var buf: [16]u8 = undefined;
+    fn sendImageReady(self: *DriverConductor, session_id: i32, stream_id: i32, registration_id: i64, initial_term_id: i32) void {
+        var buf: [20]u8 = undefined;
         std.mem.writeInt(i64, buf[0..8], registration_id, .little);
         std.mem.writeInt(i32, buf[8..12], session_id, .little);
         std.mem.writeInt(i32, buf[12..16], stream_id, .little);
+        std.mem.writeInt(i32, buf[16..20], initial_term_id, .little);
         self.broadcaster.transmit(RESPONSE_ON_IMAGE_READY, &buf);
     }
 

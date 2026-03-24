@@ -33,7 +33,7 @@ pub fn main() !void {
     std.debug.print("[ZIG] Subscription requested, registration_id={d}\n", .{registration_id});
 
     var timer = try std.time.Timer.start();
-    const timeout_ns = 60 * std.time.ns_per_s;
+    const timeout_ns = 30 * std.time.ns_per_s;
 
     std.debug.print("[ZIG] Waiting for subscription to be connected and receive messages...\n", .{});
     var messages_received: usize = 0;

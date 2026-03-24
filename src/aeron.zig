@@ -107,12 +107,13 @@ pub const Aeron = struct {
                 const registration_id = std.mem.readInt(i64, buffer[0..8], .little);
                 const session_id = std.mem.readInt(i32, buffer[8..12], .little);
                 const stream_id = std.mem.readInt(i32, buffer[12..16], .little);
+                const initial_term_id = if (buffer.len >= 20) std.mem.readInt(i32, buffer[16..20], .little) else 0;
 
                 if (self.subscriptions.get(registration_id)) |sub| {
                     if (self.embedded_driver) |md| {
                         if (md.getImageLogBuffer(session_id, stream_id)) |lb| {
                             const img = self.allocator.create(Image) catch continue;
-                            img.* = Image.init(session_id, stream_id, 0, lb);
+                            img.* = Image.init(session_id, stream_id, initial_term_id, lb);
                             sub.addImage(img) catch self.allocator.destroy(img);
                         }
                     }

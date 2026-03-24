@@ -5,7 +5,7 @@ set -euo pipefail
 # Configuration
 NAMESPACE="aeron"
 LABEL="app.kubernetes.io/part-of=interop"
-TIMEOUT=150
+TIMEOUT=60
 
 echo "=== [1/4] Building and Importing Images ==="
 # Nix build for Zig OCI

@@ -86,24 +86,25 @@ pub const Sender = struct {
     }
 
     fn processPublication(self: *Sender, publication: *NetworkPublication) i32 {
-        // LESSON(sender/aeron): Publisher_limit counter controls flow—only send up to limit. Sender position tracks progress. See docs/tutorial/03-driver/01-sender.md
+        // LESSON(sender/aeron): SETUP must be sent unconditionally to establish the connection.
+        // Only after a subscriber responds with STATUS does publisher_limit advance, enabling data flow.
         var work_count: i32 = 0;
 
-        // Get current positions from counters
-        const sender_pos = self.counters_map.get(publication.sender_position.counter_id);
-        const pub_limit = self.counters_map.get(publication.publisher_limit.counter_id);
-
-        if (sender_pos >= pub_limit) {
-            return 0;
-        }
-
-        // Send SETUP frame periodically (every 50ms)
+        // Always send SETUP periodically — required before any STATUS can arrive
         const now_ms = self.current_time_ms;
         if (now_ms - publication.last_setup_time_ms >= 50) {
             if (self.sendSetupFrame(publication)) {
                 publication.last_setup_time_ms = now_ms;
                 work_count += 1;
             }
+        }
+
+        // Get current positions from counters
+        const sender_pos = self.counters_map.get(publication.sender_position.counter_id);
+        const pub_limit = self.counters_map.get(publication.publisher_limit.counter_id);
+
+        if (sender_pos >= pub_limit) {
+            return work_count;
         }
 
         // Send DATA frames from log buffer
