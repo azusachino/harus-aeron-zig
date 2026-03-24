@@ -1,16 +1,27 @@
 // Aeron Archive Recorder — manages active recording sessions
-// Writes incoming media frames to in-memory buffers and catalogs metadata
+// Writes incoming media frames to on-disk recordings and catalogs metadata
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-archive/src/main/java/io/aeron/archive/Archive.java
 
 const std = @import("std");
 const catalog_mod = @import("catalog.zig");
 const protocol = @import("protocol.zig");
 
-/// RecordingWriter — buffers raw frame data for a single recording.
-/// In-memory implementation; future versions write to disk.
+pub const RecordingMetadata = struct {
+    initial_term_id: i32 = 0,
+    segment_file_length: i32 = 128 * 1024 * 1024,
+    term_buffer_length: i32 = 64 * 1024,
+    mtu_length: i32 = 1408,
+    start_position: i64 = 0,
+    start_timestamp: i64 = 0,
+};
+
+/// RecordingWriter — buffers raw frame data for a single recording and mirrors it to disk.
 pub const RecordingWriter = struct {
     allocator: std.mem.Allocator,
     recording_id: i64,
+    archive_dir: []const u8,
+    path: []u8,
+    file: ?std.fs.File,
     /// Position of first byte in this recording (from media context)
     start_position: i64,
     /// Current write position (start_position + bytes_written)
@@ -22,10 +33,34 @@ pub const RecordingWriter = struct {
     /// allocator: memory allocator for the buffer
     /// recording_id: unique identifier for this recording
     /// start_position: position of first frame in media context (usually 0 or from media state)
-    pub fn init(allocator: std.mem.Allocator, recording_id: i64, start_position: i64) RecordingWriter {
+    /// archive_dir: directory that stores recording segments
+    pub fn init(
+        allocator: std.mem.Allocator,
+        recording_id: i64,
+        start_position: i64,
+    ) !RecordingWriter {
+        return RecordingWriter.initWithArchiveDir(allocator, recording_id, start_position, "/tmp/aeron-archive");
+    }
+
+    pub fn initWithArchiveDir(
+        allocator: std.mem.Allocator,
+        recording_id: i64,
+        start_position: i64,
+        archive_dir: []const u8,
+    ) !RecordingWriter {
+        try std.fs.cwd().makePath(archive_dir);
+
+        const path = try std.fmt.allocPrint(allocator, "{s}/{d}.dat", .{ archive_dir, recording_id });
+        errdefer allocator.free(path);
+
+        const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+
         return RecordingWriter{
             .allocator = allocator,
             .recording_id = recording_id,
+            .archive_dir = archive_dir,
+            .path = path,
+            .file = file,
             .start_position = start_position,
             .stop_position = start_position,
             .buffer = .{},
@@ -34,6 +69,8 @@ pub const RecordingWriter = struct {
 
     /// Free recording writer resources.
     pub fn deinit(self: *RecordingWriter) void {
+        if (self.file) |file| file.close();
+        self.allocator.free(self.path);
         self.buffer.deinit(self.allocator);
     }
 
@@ -41,7 +78,18 @@ pub const RecordingWriter = struct {
     /// data: frame bytes to append (frame header + payload)
     pub fn write(self: *RecordingWriter, data: []const u8) !void {
         try self.buffer.appendSlice(self.allocator, data);
+        if (self.file) |*file| {
+            try file.writeAll(data);
+        }
         self.stop_position += @as(i64, @intCast(data.len));
+    }
+
+    /// Read the full recording payload back from disk.
+    pub fn readAll(self: *RecordingWriter, allocator: std.mem.Allocator) ![]u8 {
+        const file = try std.fs.cwd().openFile(self.path, .{});
+        defer file.close();
+
+        return file.readToEndAlloc(allocator, 1024 * 1024);
     }
 
     /// Return the recording's start position.
@@ -59,11 +107,11 @@ pub const RecordingWriter = struct {
         return self.buffer.items.len;
     }
 
-    /// Flush buffered data to disk (placeholder for future file I/O).
-    /// Currently a no-op for in-memory implementation.
+    /// Flush buffered data to disk.
     pub fn flush(self: *RecordingWriter) !void {
-        _ = self;
-        // Placeholder: will sync buffer to file when file I/O is implemented
+        if (self.file) |*file| {
+            try file.sync();
+        }
     }
 };
 
@@ -99,6 +147,18 @@ pub const RecordingSession = struct {
         channel: []const u8,
         start_position: i64,
     ) !RecordingSession {
+        return RecordingSession.initWithArchiveDir(allocator, recording_id, session_id, stream_id, channel, start_position, "/tmp/aeron-archive");
+    }
+
+    pub fn initWithArchiveDir(
+        allocator: std.mem.Allocator,
+        recording_id: i64,
+        session_id: i32,
+        stream_id: i32,
+        channel: []const u8,
+        start_position: i64,
+        archive_dir: []const u8,
+    ) !RecordingSession {
         return RecordingSession{
             .allocator = allocator,
             .recording_id = recording_id,
@@ -106,7 +166,7 @@ pub const RecordingSession = struct {
             .stream_id = stream_id,
             .channel = try allocator.dupe(u8, channel),
             .active = true,
-            .writer = RecordingWriter.init(allocator, recording_id, start_position),
+            .writer = try RecordingWriter.initWithArchiveDir(allocator, recording_id, start_position, archive_dir),
         };
     }
 
@@ -122,6 +182,11 @@ pub const RecordingSession = struct {
         if (self.active) {
             try self.writer.write(data);
         }
+    }
+
+    /// Read back the persisted recording payload for replay.
+    pub fn snapshot(self: *RecordingSession, allocator: std.mem.Allocator) ![]u8 {
+        return self.writer.readAll(allocator);
     }
 
     /// Mark this session as inactive and close it.
@@ -141,6 +206,7 @@ pub const RecordingSession = struct {
 /// - Catalogs all recordings
 pub const Recorder = struct {
     allocator: std.mem.Allocator,
+    archive_dir: []const u8,
     /// Active recording sessions
     sessions: std.ArrayList(RecordingSession),
     /// Shared catalog for metadata persistence
@@ -149,9 +215,21 @@ pub const Recorder = struct {
     /// Initialize the recorder duty agent.
     /// allocator: memory allocator for session list
     /// cat: reference to the shared catalog (not owned)
-    pub fn init(allocator: std.mem.Allocator, cat: *catalog_mod.Catalog) Recorder {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        cat: *catalog_mod.Catalog,
+    ) Recorder {
+        return Recorder.initWithArchiveDir(allocator, cat, "/tmp/aeron-archive");
+    }
+
+    pub fn initWithArchiveDir(
+        allocator: std.mem.Allocator,
+        cat: *catalog_mod.Catalog,
+        archive_dir: []const u8,
+    ) Recorder {
         return Recorder{
             .allocator = allocator,
+            .archive_dir = archive_dir,
             .sessions = .{},
             .catalog = cat,
         };
@@ -179,8 +257,7 @@ pub const Recorder = struct {
         stream_id: i32,
         channel: []const u8,
         source_identity: []const u8,
-        start_position: i64,
-        start_timestamp: i64,
+        metadata: RecordingMetadata,
     ) !i64 {
         // Allocate catalog entry (next_recording_id is auto-incremented)
         const recording_id = try self.catalog.addNewRecording(
@@ -188,22 +265,23 @@ pub const Recorder = struct {
             stream_id,
             channel,
             source_identity,
-            0, // initial_term_id (TODO: capture from media)
-            0, // segment_file_length (TODO: configurable)
-            0, // term_buffer_length (TODO: from media)
-            0, // mtu_length (TODO: from media)
-            start_position,
-            start_timestamp,
+            metadata.initial_term_id,
+            metadata.segment_file_length,
+            metadata.term_buffer_length,
+            metadata.mtu_length,
+            metadata.start_position,
+            metadata.start_timestamp,
         );
 
         // Create and store the session
-        const session = try RecordingSession.init(
+        const session = try RecordingSession.initWithArchiveDir(
             self.allocator,
             recording_id,
             session_id,
             stream_id,
             channel,
-            start_position,
+            metadata.start_position,
+            self.archive_dir,
         );
         try self.sessions.append(self.allocator, session);
 
@@ -214,14 +292,13 @@ pub const Recorder = struct {
     /// Closes the session and updates catalog with final position and timestamp.
     /// recording_id: ID of recording to stop
     /// stop_timestamp: wall-clock time when recording stopped
-    pub fn onStopRecording(self: *Recorder, recording_id: i64, stop_timestamp: i64) void {
+    pub fn onStopRecording(self: *Recorder, recording_id: i64, stop_timestamp: i64) !void {
         // Find and close the matching session
         for (self.sessions.items) |*session| {
             if (session.recording_id == recording_id) {
                 session.close();
                 // Update catalog with final state
-                self.catalog.updateStopPosition(recording_id, session.writer.stopPosition());
-                self.catalog.updateStopTimestamp(recording_id, stop_timestamp);
+                try self.catalog.updateStopState(recording_id, session.writer.stopPosition(), stop_timestamp);
                 return;
             }
         }
@@ -271,7 +348,7 @@ test "RecordingWriter tracks positions correctly" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var writer = RecordingWriter.init(allocator, 1, 1000);
+    var writer = try RecordingWriter.init(allocator, 1, 1000);
     defer writer.deinit();
 
     try std.testing.expectEqual(1000, writer.startPosition());
@@ -314,6 +391,41 @@ test "RecordingSession writes fragments and tracks state" {
     try std.testing.expectEqual(12, session.writer.bytesWritten());
 }
 
+test "Recorder start recording persists descriptor metadata" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var catalog = catalog_mod.Catalog.init(allocator);
+    defer catalog.deinit();
+
+    var recorder = Recorder.init(allocator, &catalog);
+    defer recorder.deinit();
+
+    const recording_id = try recorder.onStartRecording(
+        7,
+        8,
+        "aeron:udp?endpoint=localhost:40123",
+        "source-A",
+        .{
+            .initial_term_id = 42,
+            .segment_file_length = 64 * 1024 * 1024,
+            .term_buffer_length = 256 * 1024,
+            .mtu_length = 4096,
+            .start_position = 128,
+            .start_timestamp = 777,
+        },
+    );
+
+    const entry = catalog.recordingDescriptor(recording_id).?;
+    try std.testing.expectEqual(@as(i32, 42), entry.initial_term_id);
+    try std.testing.expectEqual(@as(i32, 64 * 1024 * 1024), entry.segment_file_length);
+    try std.testing.expectEqual(@as(i32, 256 * 1024), entry.term_buffer_length);
+    try std.testing.expectEqual(@as(i32, 4096), entry.mtu_length);
+    try std.testing.expectEqual(@as(i64, 128), entry.start_position);
+    try std.testing.expectEqual(@as(i64, 777), entry.start_timestamp);
+}
+
 test "Recorder onStartRecording creates session and catalog entry" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -330,8 +442,10 @@ test "Recorder onStartRecording creates session and catalog entry" {
         456,
         "aeron:udp://localhost:40123",
         "test-source",
-        0,
-        1000,
+        .{
+            .start_position = 0,
+            .start_timestamp = 1000,
+        },
     );
 
     try std.testing.expectEqual(1, recording_id);
@@ -347,6 +461,24 @@ test "Recorder onStartRecording creates session and catalog entry" {
     try std.testing.expectEqual(123, cat_entry.?.session_id);
     try std.testing.expectEqual(456, cat_entry.?.stream_id);
     try std.testing.expectEqual(1000, cat_entry.?.start_timestamp);
+}
+
+test "RecordingWriter persists payload to disk" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var writer = try RecordingWriter.init(allocator, 7, 0);
+    defer writer.deinit();
+
+    try writer.write("abc");
+    try writer.write("def");
+    try writer.flush();
+
+    const contents = try writer.readAll(allocator);
+    defer allocator.free(contents);
+
+    try std.testing.expectEqualSlices(u8, "abcdef", contents);
 }
 
 test "Recorder onStopRecording closes session and updates catalog" {
@@ -365,8 +497,10 @@ test "Recorder onStopRecording closes session and updates catalog" {
         222,
         "ch1",
         "src1",
-        100,
-        5000,
+        .{
+            .start_position = 100,
+            .start_timestamp = 5000,
+        },
     );
 
     // Write some data
@@ -375,7 +509,7 @@ test "Recorder onStopRecording closes session and updates catalog" {
     try session.onFragment("data2");
 
     // Stop recording
-    recorder.onStopRecording(recording_id, 6000);
+    try recorder.onStopRecording(recording_id, 6000);
 
     try std.testing.expect(!session.isActive());
 
@@ -397,18 +531,24 @@ test "Recorder doWork returns active session count" {
 
     try std.testing.expectEqual(0, recorder.doWork());
 
-    _ = try recorder.onStartRecording(1, 1, "ch1", "src1", 0, 100);
+    _ = try recorder.onStartRecording(1, 1, "ch1", "src1", .{
+        .start_position = 0,
+        .start_timestamp = 100,
+    });
     try std.testing.expectEqual(1, recorder.doWork());
 
-    _ = try recorder.onStartRecording(2, 2, "ch2", "src2", 0, 100);
+    _ = try recorder.onStartRecording(2, 2, "ch2", "src2", .{
+        .start_position = 0,
+        .start_timestamp = 100,
+    });
     try std.testing.expectEqual(2, recorder.doWork());
 
     const id1 = 1;
-    recorder.onStopRecording(id1, 200);
+    try recorder.onStopRecording(id1, 200);
     try std.testing.expectEqual(1, recorder.doWork());
 
     const id2 = 2;
-    recorder.onStopRecording(id2, 200);
+    try recorder.onStopRecording(id2, 200);
     try std.testing.expectEqual(0, recorder.doWork());
 }
 
@@ -423,9 +563,18 @@ test "Recorder findSession returns correct session" {
     var recorder = Recorder.init(allocator, &catalog);
     defer recorder.deinit();
 
-    const id1 = try recorder.onStartRecording(10, 20, "ch1", "src1", 0, 100);
-    const id2 = try recorder.onStartRecording(30, 40, "ch2", "src2", 0, 100);
-    const id3 = try recorder.onStartRecording(50, 60, "ch3", "src3", 0, 100);
+    const id1 = try recorder.onStartRecording(10, 20, "ch1", "src1", .{
+        .start_position = 0,
+        .start_timestamp = 100,
+    });
+    const id2 = try recorder.onStartRecording(30, 40, "ch2", "src2", .{
+        .start_position = 0,
+        .start_timestamp = 100,
+    });
+    const id3 = try recorder.onStartRecording(50, 60, "ch3", "src3", .{
+        .start_position = 0,
+        .start_timestamp = 100,
+    });
 
     const found1 = recorder.findSession(id1);
     try std.testing.expect(found1 != null);

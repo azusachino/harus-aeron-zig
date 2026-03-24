@@ -18,6 +18,29 @@ pub const LogEntry = struct {
     data: []const u8,
 };
 
+/// LogEntryState — owned snapshot form of a log entry for restart/catch-up flows.
+pub const LogEntryState = struct {
+    position: i64,
+    timestamp: i64,
+    data: []u8,
+};
+
+/// ClusterLogState — owned snapshot of a cluster log.
+pub const ClusterLogState = struct {
+    leader_ship_term_id: i64,
+    append_position: i64,
+    commit_position: i64,
+    entries: []LogEntryState,
+
+    pub fn deinit(self: *ClusterLogState, allocator: std.mem.Allocator) void {
+        for (self.entries) |entry| {
+            allocator.free(entry.data);
+        }
+        allocator.free(self.entries);
+        self.entries = &.{};
+    }
+};
+
 // =============================================================================
 // ClusterLog struct
 // =============================================================================
@@ -52,9 +75,7 @@ pub const ClusterLog = struct {
 
     /// Free all log entries and the entry list.
     pub fn deinit(self: *ClusterLog) void {
-        for (self.entries.items) |entry| {
-            self.allocator.free(entry.data);
-        }
+        self.clear();
         self.entries.deinit(self.allocator);
     }
 
@@ -76,6 +97,17 @@ pub const ClusterLog = struct {
         const prev_position = self.append_position;
         self.append_position += @intCast(data.len);
         return prev_position;
+    }
+
+    /// Remove all entries and reset positions.
+    pub fn clear(self: *ClusterLog) void {
+        for (self.entries.items) |entry| {
+            self.allocator.free(entry.data);
+        }
+        self.entries.clearRetainingCapacity();
+        self.append_position = 0;
+        self.commit_position = 0;
+        self.leader_ship_term_id = 0;
     }
 
     /// Get the current append position (next offset for new entries).
@@ -118,6 +150,60 @@ pub const ClusterLog = struct {
             }
         }
         return null;
+    }
+
+    /// Capture a deep-copy snapshot of the log for recovery and handoff.
+    pub fn captureState(self: *const ClusterLog, allocator: std.mem.Allocator) !ClusterLogState {
+        var entries = try allocator.alloc(LogEntryState, self.entries.items.len);
+        var copied: usize = 0;
+        errdefer {
+            for (entries[0..copied]) |entry| {
+                allocator.free(entry.data);
+            }
+            allocator.free(entries);
+        }
+
+        for (self.entries.items, 0..) |entry, idx| {
+            entries[idx] = .{
+                .position = entry.position,
+                .timestamp = entry.timestamp,
+                .data = try allocator.dupe(u8, entry.data),
+            };
+            copied += 1;
+        }
+
+        return .{
+            .leader_ship_term_id = self.leader_ship_term_id,
+            .append_position = self.append_position,
+            .commit_position = self.commit_position,
+            .entries = entries,
+        };
+    }
+
+    /// Restore the log from a previously captured snapshot.
+    pub fn restoreState(self: *ClusterLog, state: *const ClusterLogState) !void {
+        self.clear();
+        self.leader_ship_term_id = state.leader_ship_term_id;
+
+        for (state.entries) |entry| {
+            if (entry.position != self.append_position) {
+                return error.CorruptLogState;
+            }
+            _ = try self.append(entry.data, entry.timestamp);
+        }
+
+        if (self.append_position != state.append_position) {
+            return error.CorruptLogState;
+        }
+
+        self.advanceCommitPosition(state.commit_position);
+    }
+
+    /// Replace local log contents with the leader's committed view.
+    pub fn syncWithLeader(self: *ClusterLog, leader_log: *const ClusterLog) !void {
+        var state = try leader_log.captureState(self.allocator);
+        defer state.deinit(self.allocator);
+        try self.restoreState(&state);
     }
 };
 
@@ -271,6 +357,12 @@ pub const LogFollower = struct {
     /// Process a commit position update from the leader.
     pub fn onCommitPosition(self: *LogFollower, position: i64) void {
         self.log.advanceCommitPosition(position);
+    }
+
+    /// Replace the follower log with a fresh copy of the leader state.
+    pub fn catchUpFromLeader(self: *LogFollower, leader_member_id: i32, leader_log: *const ClusterLog) !void {
+        self.leader_member_id = leader_member_id;
+        try self.log.syncWithLeader(leader_log);
     }
 
     /// Get the current append position.
@@ -474,4 +566,49 @@ test "cluster log deinit frees all entries" {
     log.deinit();
 
     // If there are leaks, the test framework will detect them
+}
+
+test "cluster log state round trip preserves positions" {
+    var log = ClusterLog.init(std.testing.allocator);
+    defer log.deinit();
+
+    log.leader_ship_term_id = 7;
+    _ = try log.append("alpha", 1000);
+    _ = try log.append("beta", 2000);
+    log.advanceCommitPosition(9);
+
+    var state = try log.captureState(std.testing.allocator);
+    defer state.deinit(std.testing.allocator);
+
+    var restored = ClusterLog.init(std.testing.allocator);
+    defer restored.deinit();
+    try restored.restoreState(&state);
+
+    try std.testing.expectEqual(@as(i64, 7), restored.leader_ship_term_id);
+    try std.testing.expectEqual(log.appendPosition(), restored.appendPosition());
+    try std.testing.expectEqual(log.commitPosition(), restored.commitPosition());
+    try std.testing.expectEqualSlices(u8, "alpha", restored.entryAt(0).?.data);
+    try std.testing.expectEqualSlices(u8, "beta", restored.entryAt(5).?.data);
+}
+
+test "log follower catch up from leader replaces stale local state" {
+    var leader = ClusterLog.init(std.testing.allocator);
+    defer leader.deinit();
+    leader.leader_ship_term_id = 3;
+    _ = try leader.append("one", 1000);
+    _ = try leader.append("two", 1001);
+    leader.advanceCommitPosition(6);
+
+    var follower = LogFollower.init(std.testing.allocator, 1);
+    defer follower.deinit();
+    _ = try follower.onAppendRequest(1, "old", 900);
+    follower.onCommitPosition(3);
+
+    try follower.catchUpFromLeader(0, &leader);
+
+    try std.testing.expectEqual(@as(i32, 0), follower.leader_member_id);
+    try std.testing.expectEqual(leader.appendPosition(), follower.appendPosition());
+    try std.testing.expectEqual(leader.commitPosition(), follower.commitPosition());
+    try std.testing.expectEqualSlices(u8, "one", follower.log.entryAt(0).?.data);
+    try std.testing.expectEqualSlices(u8, "two", follower.log.entryAt(3).?.data);
 }

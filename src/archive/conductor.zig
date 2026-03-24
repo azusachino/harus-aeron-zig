@@ -20,6 +20,11 @@ pub const StartRecordingCmd = struct {
     stream_id: i32,
     channel: []const u8,
     source_identity: []const u8,
+    initial_term_id: i32 = 0,
+    term_buffer_length: i32 = 64 * 1024,
+    mtu_length: i32 = 1408,
+    start_position: i64 = 0,
+    start_timestamp: i64 = 0,
 };
 
 /// StopRecordingCmd — parameters for stopping an active recording.
@@ -91,6 +96,7 @@ pub const Response = struct {
 /// and collects responses for delivery back to clients.
 pub const ArchiveConductor = struct {
     allocator: std.mem.Allocator,
+    archive_dir: []const u8,
     /// Shared catalog for recording metadata
     catalog: catalog_mod.Catalog,
     /// Recorder managing active recording sessions
@@ -101,17 +107,33 @@ pub const ArchiveConductor = struct {
     pending_commands: std.ArrayList(Command),
     /// Queue of outgoing responses to clients
     responses: std.ArrayList(Response),
+    default_segment_file_length: i32,
 
     /// Initialize a new ArchiveConductor.
     /// Allocator is retained for all subsequent operations.
     pub fn init(allocator: std.mem.Allocator) ArchiveConductor {
         return ArchiveConductor{
             .allocator = allocator,
+            .archive_dir = "/tmp/aeron-archive",
             .catalog = catalog_mod.Catalog.init(allocator),
             .recorder = null,
             .replayer = replayer_mod.Replayer.init(allocator),
             .pending_commands = .{},
             .responses = .{},
+            .default_segment_file_length = 128 * 1024 * 1024,
+        };
+    }
+
+    pub fn initWithArchiveDir(allocator: std.mem.Allocator, archive_dir: []const u8) !ArchiveConductor {
+        return ArchiveConductor{
+            .allocator = allocator,
+            .archive_dir = archive_dir,
+            .catalog = try catalog_mod.Catalog.initWithArchiveDir(allocator, archive_dir),
+            .recorder = null,
+            .replayer = replayer_mod.Replayer.init(allocator),
+            .pending_commands = .{},
+            .responses = .{},
+            .default_segment_file_length = 128 * 1024 * 1024,
         };
     }
 
@@ -120,7 +142,7 @@ pub const ArchiveConductor = struct {
     fn initRecorder(self: *ArchiveConductor) !void {
         if (self.recorder == null) {
             const recorder = try self.allocator.create(recorder_mod.Recorder);
-            recorder.* = recorder_mod.Recorder.init(self.allocator, &self.catalog);
+            recorder.* = recorder_mod.Recorder.initWithArchiveDir(self.allocator, &self.catalog, self.archive_dir);
             self.recorder = recorder;
         }
     }
@@ -196,8 +218,14 @@ pub const ArchiveConductor = struct {
             cmd.stream_id,
             cmd.channel,
             cmd.source_identity,
-            0, // start_position: use 0 for now
-            0, // start_timestamp: use 0 for now
+            .{
+                .initial_term_id = cmd.initial_term_id,
+                .segment_file_length = self.default_segment_file_length,
+                .term_buffer_length = cmd.term_buffer_length,
+                .mtu_length = cmd.mtu_length,
+                .start_position = cmd.start_position,
+                .start_timestamp = cmd.start_timestamp,
+            },
         );
         try self.queueSuccessResponse(cmd.correlation_id, recording_id);
     }
@@ -205,7 +233,7 @@ pub const ArchiveConductor = struct {
     /// Handle stop_recording command.
     fn handleStopRecording(self: *ArchiveConductor, cmd: StopRecordingCmd) !void {
         const recorder = self.recorder orelse return error.RecorderNotInitialized;
-        recorder.onStopRecording(cmd.recording_id, 0); // stop_timestamp: use 0 for now
+        try recorder.onStopRecording(cmd.recording_id, 0); // stop_timestamp: use 0 for now
         try self.queueSuccessResponse(cmd.correlation_id, cmd.recording_id);
     }
 
@@ -221,20 +249,15 @@ pub const ArchiveConductor = struct {
             return;
         }
 
-        // Find the recorder session to get its writer's data
-        var source_data: []const u8 = "";
-        if (self.recorder) |recorder| {
-            if (recorder.findSession(cmd.recording_id)) |session| {
-                source_data = session.writer.buffer.items;
-            }
-        }
+        const replay_source = try self.readRecordingData(cmd.recording_id);
+        defer self.allocator.free(replay_source);
 
         // Start the replay session
         const replay_session_id = try self.replayer.onReplayRequest(
             cmd.recording_id,
             cmd.position,
             cmd.length,
-            source_data,
+            replay_source,
         );
         try self.queueSuccessResponse(cmd.correlation_id, replay_session_id);
     }
@@ -324,6 +347,23 @@ pub const ArchiveConductor = struct {
     pub fn replayerActiveSessions(self: *const ArchiveConductor) usize {
         return self.replayer.activeSessions();
     }
+
+    fn readRecordingData(self: *ArchiveConductor, recording_id: i64) ![]u8 {
+        if (self.recorder) |recorder| {
+            if (recorder.findSession(recording_id)) |session| {
+                try session.writer.flush();
+                return session.snapshot(self.allocator);
+            }
+        }
+
+        const recording_path = try std.fmt.allocPrint(self.allocator, "{s}/{d}.dat", .{ self.archive_dir, recording_id });
+        defer self.allocator.free(recording_path);
+
+        const file = try std.fs.cwd().openFile(recording_path, .{});
+        defer file.close();
+        const file_size = (try file.stat()).size;
+        return file.readToEndAlloc(self.allocator, file_size);
+    }
 };
 
 // =============================================================================
@@ -385,6 +425,49 @@ test "ArchiveConductor start_recording command creates recording" {
 
     _ = conductor.pollResponses(&handler);
     try std.testing.expect(Capture.response_received);
+
+    const descriptor = conductor.catalog.recordingDescriptor(1).?;
+    try std.testing.expectEqual(@as(i32, 128 * 1024 * 1024), descriptor.segment_file_length);
+    try std.testing.expectEqual(@as(i32, 64 * 1024), descriptor.term_buffer_length);
+    try std.testing.expectEqual(@as(i32, 1408), descriptor.mtu_length);
+}
+
+test "ArchiveConductor start_recording preserves provided descriptor metadata" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ArchiveConductor.init(allocator);
+    conductor.default_segment_file_length = 32 * 1024 * 1024;
+    try conductor.initRecorder();
+    defer conductor.deinit();
+
+    try conductor.enqueueCommand(.{
+        .start_recording = .{
+            .correlation_id = 200,
+            .session_id = 11,
+            .stream_id = 22,
+            .channel = "aeron:udp?endpoint=localhost:40123",
+            .source_identity = "metadata-source",
+            .initial_term_id = 5,
+            .term_buffer_length = 512 * 1024,
+            .mtu_length = 4096,
+            .start_position = 96,
+            .start_timestamp = 1234,
+        },
+    });
+    _ = try conductor.doWork();
+    _ = conductor.pollResponses(&struct {
+        pub fn handle(_: *const Response) void {}
+    }.handle);
+
+    const descriptor = conductor.catalog.recordingDescriptor(1).?;
+    try std.testing.expectEqual(@as(i32, 5), descriptor.initial_term_id);
+    try std.testing.expectEqual(@as(i32, 32 * 1024 * 1024), descriptor.segment_file_length);
+    try std.testing.expectEqual(@as(i32, 512 * 1024), descriptor.term_buffer_length);
+    try std.testing.expectEqual(@as(i32, 4096), descriptor.mtu_length);
+    try std.testing.expectEqual(@as(i64, 96), descriptor.start_position);
+    try std.testing.expectEqual(@as(i64, 1234), descriptor.start_timestamp);
 }
 
 test "ArchiveConductor stop_recording command stops recording" {

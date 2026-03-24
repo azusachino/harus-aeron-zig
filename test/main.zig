@@ -3,6 +3,7 @@
 const std = @import("std");
 
 pub const harness = @import("harness.zig");
+pub const cluster_integration = @import("cluster_integration.zig");
 pub const integration_test = @import("integration_test.zig");
 
 test {

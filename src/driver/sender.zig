@@ -139,12 +139,18 @@ pub const Sender = struct {
         header.mtu = publication.mtu;
         header.ttl = 0;
 
-        // Try to send (ignore errors in basic implementation)
-        _ = publication.send_channel.send(publication.dest_address, &frame_buffer) catch {
-            return false;
-        };
-
-        return true;
+        if (publication.send_channel.send(publication.dest_address, &frame_buffer)) |_| {
+            return true;
+        } else |err| switch (err) {
+            error.WouldBlock => return false,
+            else => {
+                std.log.err(
+                    "sender setup send failed session_id={} stream_id={} err={}",
+                    .{ publication.session_id, publication.stream_id, err },
+                );
+                return false;
+            },
+        }
     }
 
     fn sendDataFrames(self: *Sender, publication: *NetworkPublication, sender_pos: i64, pub_limit: i64) i32 {
@@ -184,9 +190,16 @@ pub const Sender = struct {
 
             // Send the frame as-is from the term buffer
             const frame_data = term_buffer[buffer_offset .. buffer_offset + @as(usize, @intCast(aligned_len))];
-            _ = publication.send_channel.send(publication.dest_address, frame_data) catch {
-                break;
-            };
+            if (publication.send_channel.send(publication.dest_address, frame_data)) |_| {} else |err| switch (err) {
+                error.WouldBlock => break,
+                else => {
+                    std.log.err(
+                        "sender data send failed session_id={} stream_id={} err={}",
+                        .{ publication.session_id, publication.stream_id, err },
+                    );
+                    break;
+                },
+            }
 
             // Log frame_out event
             if (self.event_log) |el| {
@@ -257,16 +270,23 @@ pub const Sender = struct {
 
         // Send the requested bytes
         const data = term_buffer[term_offset .. term_offset + length];
-        _ = publication.send_channel.send(publication.dest_address, data) catch {
-            return false;
-        };
-
-        return true;
+        if (publication.send_channel.send(publication.dest_address, data)) |_| {
+            return true;
+        } else |err| switch (err) {
+            error.WouldBlock => return false,
+            else => {
+                std.log.err(
+                    "sender retransmit send failed session_id={} stream_id={} term_id={} term_offset={} length={} err={}",
+                    .{ publication.session_id, publication.stream_id, req.term_id, req.term_offset, req.length, err },
+                );
+                return false;
+            },
+        }
     }
 
-    pub fn onAddPublication(self: *Sender, publication: *NetworkPublication) void {
+    pub fn onAddPublication(self: *Sender, publication: *NetworkPublication) !void {
         publication.last_setup_time_ms = self.current_time_ms;
-        self.publications.append(self.allocator, publication) catch {};
+        try self.publications.append(self.allocator, publication);
     }
 
     pub fn onRemovePublication(self: *Sender, session_id: i32, stream_id: i32) void {
@@ -289,7 +309,7 @@ pub const Sender = struct {
         term_id: i32,
         term_offset: i32,
         length: i32,
-    ) void {
+    ) !void {
         const req = RetransmitRequest{
             .session_id = session_id,
             .stream_id = stream_id,
@@ -298,7 +318,7 @@ pub const Sender = struct {
             .length = length,
             .timestamp_ms = self.current_time_ms,
         };
-        self.retransmit_queue.append(self.allocator, req) catch {};
+        try self.retransmit_queue.append(self.allocator, req);
     }
 
     pub fn setCurrentTimeMs(self: *Sender, time_ms: i64) void {
@@ -348,7 +368,7 @@ test "Sender: onAddPublication adds to list" {
         .last_setup_time_ms = 0,
     };
 
-    sender.onAddPublication(&publication);
+    try sender.onAddPublication(&publication);
     try std.testing.expectEqual(@as(usize, 1), sender.publications.items.len);
     try std.testing.expectEqual(@as(i32, 42), sender.publications.items[0].session_id);
 }
@@ -391,8 +411,8 @@ test "Sender: onRemovePublication removes from list" {
         .last_setup_time_ms = 0,
     };
 
-    sender.onAddPublication(&publication1);
-    sender.onAddPublication(&publication2);
+    try sender.onAddPublication(&publication1);
+    try sender.onAddPublication(&publication2);
     try std.testing.expectEqual(@as(usize, 2), sender.publications.items.len);
 
     sender.onRemovePublication(1, 10);
@@ -409,7 +429,7 @@ test "Sender: onRetransmit adds to queue" {
     var sender = try Sender.init(allocator, undefined, &counters_map);
     defer sender.deinit();
 
-    sender.onRetransmit(1, 10, 5, 100, 256);
+    try sender.onRetransmit(1, 10, 5, 100, 256);
     try std.testing.expectEqual(@as(usize, 1), sender.retransmit_queue.items.len);
     try std.testing.expectEqual(@as(i32, 1), sender.retransmit_queue.items[0].session_id);
     try std.testing.expectEqual(@as(i32, 10), sender.retransmit_queue.items[0].stream_id);

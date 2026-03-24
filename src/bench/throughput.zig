@@ -11,6 +11,18 @@ const Context = struct {
     count: i32 = 0,
 };
 
+fn resetLogBuffer(initial_term_id: i32, lb: *LogBuffer, publication: *ExclusivePublication, img: *Image) void {
+    @memset(lb.termBuffer(0), 0);
+
+    var meta = lb.metaData();
+    meta.setRawTailVolatile(0, @as(i64, initial_term_id) << 32);
+    meta.setActiveTermCount(0);
+
+    publication.* = ExclusivePublication.init(publication.session_id, publication.stream_id, initial_term_id, publication.term_length, publication.mtu, lb);
+    publication.publisher_limit = std.math.maxInt(i64);
+    img.* = Image.init(img.session_id, img.stream_id, initial_term_id, lb);
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -22,8 +34,9 @@ pub fn main() !void {
     });
     defer driver.destroy();
 
-    // Create log buffer and publication
-    const term_length = 64 * 1024;
+    // Create log buffer and publication. This is a simplified benchmark that reuses a single term.
+    // To avoid stalling when the term fills, we reset the term once all sent messages are drained.
+    const term_length = 16 * 1024 * 1024;
     const lb = try allocator.create(LogBuffer);
     defer {
         lb.deinit();
@@ -31,12 +44,13 @@ pub fn main() !void {
     }
     lb.* = try LogBuffer.init(allocator, term_length);
 
+    const initial_term_id: i32 = 100;
     var meta = lb.metaData();
-    meta.setRawTailVolatile(0, @as(i64, 100) << 32);
+    meta.setRawTailVolatile(0, @as(i64, initial_term_id) << 32);
     meta.setActiveTermCount(0);
 
-    var pub_instance = ExclusivePublication.init(1, 1, 100, term_length, 1408, lb);
-    pub_instance.publisher_limit = 1024 * 1024;
+    var pub_instance = ExclusivePublication.init(1, 1, initial_term_id, term_length, 1408, lb);
+    pub_instance.publisher_limit = std.math.maxInt(i64);
 
     // Create subscription and image
     var sub = try Subscription.init(allocator, 1, "aeron:ipc");
@@ -44,7 +58,7 @@ pub fn main() !void {
 
     const img = try allocator.create(Image);
     defer allocator.destroy(img);
-    img.* = Image.init(1, 1, 100, lb);
+    img.* = Image.init(1, 1, initial_term_id, lb);
     try sub.addImage(img);
 
     var context = Context{};
@@ -57,14 +71,26 @@ pub fn main() !void {
 
     // Warmup: send 1000 messages
     const warmup_msg = "warmup";
-    for (0..1000) |_| {
-        while (true) {
-            const result = pub_instance.offer(warmup_msg);
-            if (result == .ok) break;
-            _ = driver.doWork();
-        }
-    }
+    var warmup_sent: usize = 0;
     context.count = 0;
+    while (warmup_sent < 1000) {
+        switch (pub_instance.offer(warmup_msg)) {
+            .ok => |_| warmup_sent += 1,
+            .admin_action => {},
+            .back_pressure => {
+                while (context.count < @as(i32, @intCast(warmup_sent))) {
+                    _ = driver.doWork();
+                    _ = sub.poll(handler, &context, 100);
+                    std.Thread.sleep(1 * std.time.ns_per_ms);
+                }
+                resetLogBuffer(initial_term_id, lb, &pub_instance, img);
+            },
+            else => {},
+        }
+        _ = driver.doWork();
+        _ = sub.poll(handler, &context, 100);
+    }
+
     while (context.count < 1000) {
         _ = driver.doWork();
         _ = sub.poll(handler, &context, 100);
@@ -74,6 +100,7 @@ pub fn main() !void {
     // Test at different message sizes
     const sizes = [_]usize{ 64, 1024, 65536 };
     const message_count: usize = 100000;
+    const message_count_i32: i32 = @intCast(message_count);
 
     std.debug.print("| Size   | Msgs/sec  | MB/sec     |\n", .{});
     std.debug.print("|--------|-----------|------------|\n", .{});
@@ -83,24 +110,38 @@ pub fn main() !void {
         defer allocator.free(payload);
         @memset(payload, 0xAB);
 
+        resetLogBuffer(initial_term_id, lb, &pub_instance, img);
+        context.count = 0;
+
         // Send phase
+        var sent: usize = 0;
         var timer = try std.time.Timer.start();
-        for (0..message_count) |_| {
-            while (true) {
-                const result = pub_instance.offer(payload);
-                if (result == .ok) break;
-                _ = driver.doWork();
+        while (sent < message_count) {
+            switch (pub_instance.offer(payload)) {
+                .ok => |_| sent += 1,
+                .admin_action => {},
+                .back_pressure => {
+                    while (context.count < @as(i32, @intCast(sent))) {
+                        _ = driver.doWork();
+                        _ = sub.poll(handler, &context, 100);
+                        if (context.count < @as(i32, @intCast(sent))) {
+                            std.Thread.sleep(1 * std.time.ns_per_ms);
+                        }
+                    }
+                    resetLogBuffer(initial_term_id, lb, &pub_instance, img);
+                },
+                else => {},
             }
+            _ = driver.doWork();
         }
         const elapsed_ns = timer.read();
         const elapsed_sec = @as(f64, @floatFromInt(elapsed_ns)) / 1e9;
 
         // Receive phase
-        context.count = 0;
-        while (context.count < message_count) {
+        while (context.count < message_count_i32) {
             _ = driver.doWork();
             _ = sub.poll(handler, &context, 100);
-            if (context.count < message_count) {
+            if (context.count < message_count_i32) {
                 std.Thread.sleep(1 * std.time.ns_per_ms);
             }
         }

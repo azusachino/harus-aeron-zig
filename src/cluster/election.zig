@@ -195,7 +195,11 @@ pub const Election = struct {
             },
 
             ElectionState.follower_ready => {
-                // Stable state, no action
+                if (now_ns >= self.election_deadline_ns) {
+                    self.state = ElectionState.canvass;
+                    self.leader_member_id = -1;
+                    self.election_deadline_ns = now_ns + ELECTION_TIMEOUT_NS;
+                }
             },
 
             ElectionState.leader_log_replication => {
@@ -269,11 +273,30 @@ pub const Election = struct {
         leader_ship_term_id: i64,
         log_position: i64,
         leader_member_id: i32,
+        now_ns: i64,
     ) void {
         self.state = ElectionState.follower_ready;
         self.leader_ship_term_id = leader_ship_term_id;
         self.log_position = log_position;
         self.leader_member_id = leader_member_id;
+        self.election_deadline_ns = now_ns + LEADER_HEARTBEAT_TIMEOUT_NS;
+    }
+
+    /// Process a leader heartbeat and extend the follower timeout.
+    pub fn onLeaderHeartbeat(
+        self: *Election,
+        leader_ship_term_id: i64,
+        log_position: i64,
+        leader_member_id: i32,
+        now_ns: i64,
+    ) void {
+        if (leader_ship_term_id >= self.leader_ship_term_id) {
+            self.state = ElectionState.follower_ready;
+            self.leader_ship_term_id = leader_ship_term_id;
+            self.log_position = log_position;
+            self.leader_member_id = leader_member_id;
+            self.election_deadline_ns = now_ns + LEADER_HEARTBEAT_TIMEOUT_NS;
+        }
     }
 
     /// Update canvass position from a follower.
@@ -443,12 +466,47 @@ test "onNewLeadershipTerm transitions to follower_ready" {
     var election = try Election.init(allocator, 0, 3);
     defer election.deinit();
 
-    election.onNewLeadershipTerm(5, 1000, 1);
+    election.onNewLeadershipTerm(5, 1000, 1, 2000);
 
     try std.testing.expectEqual(ElectionState.follower_ready, election.state);
     try std.testing.expectEqual(@as(i64, 5), election.leader_ship_term_id);
     try std.testing.expectEqual(@as(i64, 1000), election.log_position);
     try std.testing.expectEqual(@as(i32, 1), election.leader_member_id);
+    try std.testing.expectEqual(@as(i64, 2000 + LEADER_HEARTBEAT_TIMEOUT_NS), election.election_deadline_ns);
+}
+
+test "follower times out leader heartbeat and restarts canvass" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var election = try Election.init(allocator, 1, 3);
+    defer election.deinit();
+
+    election.onNewLeadershipTerm(5, 1000, 0, 2000);
+    try std.testing.expectEqual(ElectionState.follower_ready, election.state);
+
+    const changed = election.doWork(2000 + LEADER_HEARTBEAT_TIMEOUT_NS + 1);
+    try std.testing.expectEqual(@as(i32, 1), changed);
+    try std.testing.expectEqual(ElectionState.canvass, election.state);
+    try std.testing.expectEqual(@as(i32, -1), election.leader_member_id);
+}
+
+test "leader heartbeat extends follower deadline" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var election = try Election.init(allocator, 1, 3);
+    defer election.deinit();
+
+    election.onNewLeadershipTerm(5, 1000, 0, 2000);
+    const original_deadline = election.election_deadline_ns;
+    election.onLeaderHeartbeat(5, 1004, 0, 2200);
+
+    try std.testing.expectEqual(ElectionState.follower_ready, election.state);
+    try std.testing.expectEqual(@as(i64, 1004), election.log_position);
+    try std.testing.expect(election.election_deadline_ns > original_deadline);
 }
 
 test "three node election full simulation" {

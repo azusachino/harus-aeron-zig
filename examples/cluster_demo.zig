@@ -85,11 +85,13 @@ pub fn main() !void {
         nodes[0].election.leaderShipTermId(),
         nodes[0].election.log_position,
         0,
+        now_ns,
     );
     nodes[2].election.onNewLeadershipTerm(
         nodes[0].election.leaderShipTermId(),
         nodes[0].election.log_position,
         0,
+        now_ns,
     );
     now_ns += 1000;
     for (&nodes) |*n| _ = try n.doWork(now_ns);
@@ -170,12 +172,13 @@ pub fn main() !void {
     // ZIG: stop() clears the running flag and shuts down background threads.
     nodes[0].stop();
 
-    // AERON: When the leader fails, followers time out and start a new election.
-    now_ns += election_mod.ELECTION_TIMEOUT_NS + 1;
+    // Followers time out waiting for leader heartbeat and return to canvass.
+    now_ns += election_mod.LEADER_HEARTBEAT_TIMEOUT_NS + 1;
+    _ = try nodes[1].doWork(now_ns);
+    _ = try nodes[2].doWork(now_ns);
 
-    // Reset node 1's election to canvass (simulating heartbeat timeout)
-    nodes[1].election.state = election_mod.ElectionState.canvass;
-    nodes[1].election.election_deadline_ns = now_ns - 1; // already expired
+    // Advance node 1 into candidate ballot.
+    now_ns = nodes[1].election.election_deadline_ns + 1;
     _ = try nodes[1].doWork(now_ns);
 
     std.debug.print("  Node 1 state: {s}\n", .{@tagName(nodes[1].electionState())});
@@ -197,6 +200,7 @@ pub fn main() !void {
         nodes[1].election.leaderShipTermId(),
         nodes[1].election.log_position,
         1,
+        now_ns,
     );
     _ = try nodes[2].doWork(now_ns);
 

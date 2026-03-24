@@ -1,11 +1,15 @@
 NIX_RUN := $(if $(filter $(IN_NIX_SHELL),),nix develop --command ,)
 export ZIG_GLOBAL_CACHE_DIR := $(CURDIR)/.zig-global-cache
 export ZIG_LOCAL_CACHE_DIR := $(CURDIR)/.zig-cache
+AERON_VERSION := 1.46.7
+AERON_ALL_JAR_URL := https://repo1.maven.org/maven2/io/aeron/aeron-all/$(AERON_VERSION)/aeron-all-$(AERON_VERSION).jar
+AERON_ALL_JAR_SHA256 := ded2ed3c5b73991e31c439a7562a294e5d5566f955c3a9e81089a28a6b5b9d55
 
 .PHONY: fmt fmt-check build test lint check clean run tutorial-check \
        fuzz bench stress \
        nix-image k8s-up k8s-down k8s-status k8s-logs colima-up colima-down \
-       interop interop-build interop-run
+       setup setup-interop \
+       interop test-interop interop-build interop-run
 
 fmt:
 	$(NIX_RUN) zig fmt .
@@ -48,6 +52,35 @@ tutorial-check:
 
 clean:
 	rm -rf zig-out .zig-cache .zig-global-cache
+
+setup: setup-interop  ## Prepare local helper artifacts for interop and benchmarks
+
+setup-interop:
+	@mkdir -p test/interop vendor
+	@std_dir="$$( $(NIX_RUN) zig env | sed -n 's/.*"std_dir": *"\([^"]*\)".*/\1/p' )"; \
+	if [ -n "$$std_dir" ]; then \
+		ln -sfn "$$std_dir" vendor/zig-std; \
+	fi
+	@tmp="$$(mktemp)"; \
+	curl -fsSL "$(AERON_ALL_JAR_URL)" -o "$$tmp"; \
+	if command -v shasum >/dev/null 2>&1; then \
+		printf '%s  %s\n' "$(AERON_ALL_JAR_SHA256)" "$$tmp" | shasum -a 256 -c - >/dev/null; \
+	elif command -v sha256sum >/dev/null 2>&1; then \
+		printf '%s  %s\n' "$(AERON_ALL_JAR_SHA256)" "$$tmp" | sha256sum -c - >/dev/null; \
+	else \
+		echo "No sha256 checker found (need shasum or sha256sum)" >&2; \
+		rm -f "$$tmp"; \
+		exit 1; \
+	fi; \
+	mv "$$tmp" test/interop/aeron-all.jar
+	@if [ ! -s throughput ]; then \
+		printf '%s\n' \
+			'#!/usr/bin/env sh' \
+			'set -e' \
+			'zig build >/dev/null' \
+			'exec zig-out/bin/throughput-example "$$@"' > throughput; \
+			chmod +x throughput; \
+		fi
 
 # =============================================================================
 # Kubernetes (k3s via colima)
@@ -111,3 +144,21 @@ stress:  ## Run stress tests
 interop:  ## Run full interop test suite
 	bash test/interop/k8s-verify.sh
 
+test-interop: interop  ## Backward-compatible alias for interop
+
+interop-build: nix-image  ## Build interop test images
+	docker build -t java-aeron:latest \
+		--build-arg AERON_VERSION=$(AERON_VERSION) \
+		--build-arg AERON_ALL_JAR_SHA256=$(AERON_ALL_JAR_SHA256) \
+		-f deploy/interop/Dockerfile.java-aeron deploy/interop/
+	nerdctl -n k8s.io image import $$(docker save java-aeron:latest | nerdctl -n k8s.io image load 2>&1 | grep -oP 'sha256:\S+') || \
+		docker save java-aeron:latest | nerdctl -n k8s.io image load
+
+interop-run:  ## Run interop test jobs in k3s
+	kubectl delete jobs -n aeron -l app.kubernetes.io/part-of=interop --ignore-not-found
+	kubectl apply -k deploy/interop/
+	@echo "Waiting for interop jobs to complete..."
+	kubectl wait --for=condition=complete --timeout=180s jobs -n aeron -l app.kubernetes.io/part-of=interop || \
+		{ kubectl get jobs -n aeron -l app.kubernetes.io/part-of=interop -o wide >&2; \
+		  echo "Interop jobs did not complete (timeout or failure)" >&2; exit 1; }
+	@echo "All interop tests passed!"

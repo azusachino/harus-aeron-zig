@@ -76,3 +76,9 @@ Two parallel code trees — agents must maintain both:
 - `src/config.zig` — reads env vars (`AERON_DIR`, `AERON_TERM_BUFFER_LENGTH`, `AERON_HEALTH_PORT`, etc.) with platform-aware defaults; `Config.validate()` must be called at startup
 - `src/signal.zig` — installs SIGTERM/SIGINT handlers; exposes `signal.isRunning()` atomic flag for graceful shutdown loops
 - `src/health.zig` — HTTP server on `AERON_HEALTH_PORT` (default 8080) serving `/healthz` (always 200) and `/readyz` (200 when ready flag set); must be started in `main.zig` and loop must check `signal.isRunning()`
+
+## Current Parity State
+
+- Phase 7 follow-on work now includes cluster follower catch-up / restart continuity, a 3-node leader-death integration scenario, and archive descriptor metadata persistence through restart.
+- `make check` is green after the current cluster and archive fidelity work.
+- The project is still not at true upstream Aeron fidelity; the explicit long-range roadmap now lives in `docs/plan.md` under `Phase 8 — Upstream Fidelity`.

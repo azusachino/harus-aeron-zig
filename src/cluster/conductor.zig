@@ -3,6 +3,7 @@
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-cluster/src/main/java/io/aeron/cluster/ClusterConductor.java
 
 const std = @import("std");
+const log_mod = @import("log.zig");
 
 // =============================================================================
 // Role Enum
@@ -23,8 +24,28 @@ pub const ClusterRole = enum {
 pub const SessionState = struct {
     cluster_session_id: i64,
     response_stream_id: i32,
-    response_channel: []const u8,
+    response_channel: []u8,
     is_open: bool = true,
+};
+
+/// ClusterConductorState — owned snapshot of conductor recovery state.
+pub const ClusterConductorState = struct {
+    role: ClusterRole,
+    leader_member_id: i32,
+    leader_ship_term_id: i64,
+    next_session_id: i64,
+    commit_position: i64,
+    sessions: []SessionState,
+    log_state: log_mod.ClusterLogState,
+
+    pub fn deinit(self: *ClusterConductorState, allocator: std.mem.Allocator) void {
+        for (self.sessions) |session| {
+            allocator.free(session.response_channel);
+        }
+        allocator.free(self.sessions);
+        self.sessions = &.{};
+        self.log_state.deinit(allocator);
+    }
 };
 
 // =============================================================================
@@ -123,6 +144,7 @@ pub const ClusterConductor = struct {
     member_id: i32,
     leader_member_id: i32,
     leader_ship_term_id: i64,
+    log: log_mod.ClusterLog,
     command_queue: std.ArrayList(Command),
     response_queue: std.ArrayList(Response),
     sessions: std.ArrayList(SessionState),
@@ -137,6 +159,7 @@ pub const ClusterConductor = struct {
             .member_id = member_id,
             .leader_member_id = -1,
             .leader_ship_term_id = 0,
+            .log = log_mod.ClusterLog.init(allocator),
             .command_queue = .{},
             .response_queue = .{},
             .sessions = .{},
@@ -147,9 +170,11 @@ pub const ClusterConductor = struct {
 
     /// Free all conductor resources.
     pub fn deinit(self: *ClusterConductor) void {
+        self.clearSessions();
         self.command_queue.deinit(self.allocator);
         self.response_queue.deinit(self.allocator);
         self.sessions.deinit(self.allocator);
+        self.log.deinit();
     }
 
     /// Enqueue a command for processing.
@@ -193,7 +218,7 @@ pub const ClusterConductor = struct {
         const session = SessionState{
             .cluster_session_id = self.next_session_id,
             .response_stream_id = cmd.response_stream_id,
-            .response_channel = cmd.response_channel,
+            .response_channel = try self.allocator.dupe(u8, cmd.response_channel),
             .is_open = true,
         };
         try self.sessions.append(self.allocator, session);
@@ -231,13 +256,14 @@ pub const ClusterConductor = struct {
 
     /// Handle session_message command.
     fn handleSessionMessage(self: *ClusterConductor, cmd: SessionMessageCmd) !void {
-        _ = cmd;
         if (self.role == .leader) {
-            // Leader: commit the message by advancing commit position
+            _ = try self.log.append(cmd.data, cmd.timestamp);
+            self.log.advanceCommitPosition(self.log.appendPosition());
+            self.commit_position = self.log.commitPosition();
             const response = Response{
                 .commit_position = CommitPositionResponse{
                     .leader_ship_term_id = self.leader_ship_term_id,
-                    .log_position = self.commit_position + 1,
+                    .log_position = self.commit_position,
                 },
             };
             try self.response_queue.append(self.allocator, response);
@@ -264,7 +290,8 @@ pub const ClusterConductor = struct {
 
     /// Handle commit_position command.
     fn handleCommitPosition(self: *ClusterConductor, cmd: CommitPositionCmd) !void {
-        self.commit_position = cmd.log_position;
+        self.log.advanceCommitPosition(cmd.log_position);
+        self.commit_position = self.log.commitPosition();
     }
 
     /// Drain and deliver all queued responses.
@@ -294,9 +321,88 @@ pub const ClusterConductor = struct {
         self.leader_ship_term_id = term_id;
     }
 
+    /// Replace local replicated state with a leader snapshot while preserving local identity.
+    pub fn catchUpFromLeader(self: *ClusterConductor, leader: *const ClusterConductor) !void {
+        var state = try leader.captureState(self.allocator);
+        defer state.deinit(self.allocator);
+
+        try self.restoreState(&state);
+        self.role = .follower;
+        self.leader_member_id = leader.member_id;
+        self.leader_ship_term_id = leader.leader_ship_term_id;
+    }
+
+    /// Capture all durable conductor state for restart or handoff.
+    pub fn captureState(self: *const ClusterConductor, allocator: std.mem.Allocator) !ClusterConductorState {
+        var sessions = try allocator.alloc(SessionState, self.sessions.items.len);
+        var copied: usize = 0;
+        errdefer {
+            for (sessions[0..copied]) |session| {
+                allocator.free(session.response_channel);
+            }
+            allocator.free(sessions);
+        }
+
+        for (self.sessions.items, 0..) |session, idx| {
+            sessions[idx] = .{
+                .cluster_session_id = session.cluster_session_id,
+                .response_stream_id = session.response_stream_id,
+                .response_channel = try allocator.dupe(u8, session.response_channel),
+                .is_open = session.is_open,
+            };
+            copied += 1;
+        }
+
+        const log_state = try self.log.captureState(allocator);
+        errdefer {
+            var mutable_log_state = log_state;
+            mutable_log_state.deinit(allocator);
+        }
+
+        return .{
+            .role = self.role,
+            .leader_member_id = self.leader_member_id,
+            .leader_ship_term_id = self.leader_ship_term_id,
+            .next_session_id = self.next_session_id,
+            .commit_position = self.commit_position,
+            .sessions = sessions,
+            .log_state = log_state,
+        };
+    }
+
+    /// Restore durable conductor state and clear transient queues.
+    pub fn restoreState(self: *ClusterConductor, state: *const ClusterConductorState) !void {
+        self.command_queue.clearRetainingCapacity();
+        self.response_queue.clearRetainingCapacity();
+        self.clearSessions();
+
+        self.role = state.role;
+        self.leader_member_id = state.leader_member_id;
+        self.leader_ship_term_id = state.leader_ship_term_id;
+        self.next_session_id = state.next_session_id;
+        self.commit_position = state.commit_position;
+        try self.log.restoreState(&state.log_state);
+
+        for (state.sessions) |session| {
+            try self.sessions.append(self.allocator, .{
+                .cluster_session_id = session.cluster_session_id,
+                .response_stream_id = session.response_stream_id,
+                .response_channel = try self.allocator.dupe(u8, session.response_channel),
+                .is_open = session.is_open,
+            });
+        }
+    }
+
     /// Return the number of open sessions.
     pub fn sessionCount(self: *const ClusterConductor) usize {
         return self.sessions.items.len;
+    }
+
+    fn clearSessions(self: *ClusterConductor) void {
+        for (self.sessions.items) |session| {
+            self.allocator.free(session.response_channel);
+        }
+        self.sessions.clearRetainingCapacity();
     }
 };
 
@@ -412,6 +518,9 @@ test "session message as leader" {
     };
     _ = conductor.pollResponses(&handler.handle);
     try std.testing.expect(CaptureCommit.commit_response_received);
+    try std.testing.expectEqual(@as(i64, 12), conductor.log.appendPosition());
+    try std.testing.expectEqual(@as(i64, 12), conductor.commit_position);
+    try std.testing.expectEqualSlices(u8, "test message", conductor.log.entryAt(0).?.data);
 }
 
 test "session message as follower rejects" {
@@ -485,16 +594,19 @@ test "commit position advance" {
 
     try std.testing.expectEqual(0, conductor.commit_position);
 
+    _ = try conductor.log.append("entry", 100);
+
     const commit_cmd = Command{
         .commit_position = CommitPositionCmd{
             .leader_ship_term_id = 1,
-            .log_position = 100,
+            .log_position = 5,
         },
     };
 
     try conductor.enqueueCommand(commit_cmd);
     _ = try conductor.doWork();
-    try std.testing.expectEqual(100, conductor.commit_position);
+    try std.testing.expectEqual(5, conductor.commit_position);
+    try std.testing.expectEqual(5, conductor.log.commitPosition());
 }
 
 test "multiple sessions" {
@@ -560,4 +672,102 @@ test "poll responses clears queue" {
         pub fn handle(_: *const Response) void {}
     }.handle);
     try std.testing.expectEqual(0, count);
+}
+
+test "conductor catch up from leader preserves replicated state" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var leader = ClusterConductor.init(allocator, 0);
+    defer leader.deinit();
+    leader.becomeLeader(3);
+
+    const response_channel = try allocator.dupe(u8, "aeron:udp://localhost:40123");
+    defer allocator.free(response_channel);
+    try leader.enqueueCommand(.{
+        .session_connect = .{
+            .correlation_id = 10,
+            .cluster_session_id = 1,
+            .response_stream_id = 7,
+            .response_channel = response_channel,
+        },
+    });
+    _ = try leader.doWork();
+    leader.response_queue.clearRetainingCapacity();
+
+    const data = try allocator.dupe(u8, "replicated");
+    defer allocator.free(data);
+    try leader.enqueueCommand(.{
+        .session_message = .{
+            .cluster_session_id = 1,
+            .timestamp = 1000,
+            .data = data,
+        },
+    });
+    _ = try leader.doWork();
+    leader.response_queue.clearRetainingCapacity();
+
+    var follower = ClusterConductor.init(allocator, 1);
+    defer follower.deinit();
+    follower.becomeFollower(0, 3);
+
+    try follower.catchUpFromLeader(&leader);
+
+    try std.testing.expectEqual(ClusterRole.follower, follower.role);
+    try std.testing.expectEqual(@as(i32, 0), follower.leader_member_id);
+    try std.testing.expectEqual(leader.commit_position, follower.commit_position);
+    try std.testing.expectEqual(leader.log.appendPosition(), follower.log.appendPosition());
+    try std.testing.expectEqual(@as(usize, 1), follower.sessionCount());
+    try std.testing.expectEqualSlices(u8, "replicated", follower.log.entryAt(0).?.data);
+}
+
+test "conductor state round trip restores leader progress" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ClusterConductor.init(allocator, 2);
+    defer conductor.deinit();
+    conductor.becomeLeader(5);
+
+    const response_channel = try allocator.dupe(u8, "aeron:udp://localhost:40124");
+    defer allocator.free(response_channel);
+    try conductor.enqueueCommand(.{
+        .session_connect = .{
+            .correlation_id = 11,
+            .cluster_session_id = 1,
+            .response_stream_id = 8,
+            .response_channel = response_channel,
+        },
+    });
+    _ = try conductor.doWork();
+    conductor.response_queue.clearRetainingCapacity();
+
+    const data = try allocator.dupe(u8, "resume");
+    defer allocator.free(data);
+    try conductor.enqueueCommand(.{
+        .session_message = .{
+            .cluster_session_id = 1,
+            .timestamp = 2000,
+            .data = data,
+        },
+    });
+    _ = try conductor.doWork();
+    conductor.response_queue.clearRetainingCapacity();
+
+    var state = try conductor.captureState(allocator);
+    defer state.deinit(allocator);
+
+    var restored = ClusterConductor.init(allocator, 2);
+    defer restored.deinit();
+    try restored.restoreState(&state);
+
+    try std.testing.expectEqual(ClusterRole.leader, restored.role);
+    try std.testing.expectEqual(@as(i64, 5), restored.leader_ship_term_id);
+    try std.testing.expectEqual(conductor.log.appendPosition(), restored.log.appendPosition());
+    try std.testing.expectEqual(conductor.commit_position, restored.commit_position);
+    try std.testing.expectEqual(conductor.next_session_id, restored.next_session_id);
+    try std.testing.expectEqual(@as(usize, 1), restored.sessionCount());
+    try std.testing.expectEqualSlices(u8, "resume", restored.log.entryAt(0).?.data);
 }

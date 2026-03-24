@@ -16,10 +16,12 @@ pub const AeronUri = struct {
     pub const ControlMode = enum {
         dynamic,
         manual,
+        response,
 
         pub fn fromString(s: []const u8) ?ControlMode {
             if (std.mem.eql(u8, s, "dynamic")) return .dynamic;
             if (std.mem.eql(u8, s, "manual")) return .manual;
+            if (std.mem.eql(u8, s, "response")) return .response;
             return null;
         }
     };
@@ -225,6 +227,15 @@ test "AeronUri: parse control channel with dynamic mode" {
 
     try std.testing.expectEqualStrings("192.168.1.1:40124", uri.controlEndpoint().?);
     try std.testing.expectEqual(AeronUri.ControlMode.dynamic, uri.controlMode().?);
+}
+
+test "AeronUri: parse control channel with response mode" {
+    const allocator = std.testing.allocator;
+    var uri = try AeronUri.parse(allocator, "aeron:udp?control=localhost:40456|control-mode=response");
+    defer uri.deinit();
+
+    try std.testing.expectEqualStrings("localhost:40456", uri.controlEndpoint().?);
+    try std.testing.expectEqual(AeronUri.ControlMode.response, uri.controlMode().?);
 }
 
 test "AeronUri: parse term-length and session-id" {
