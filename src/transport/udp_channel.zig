@@ -71,21 +71,47 @@ pub const UdpChannel = struct {
     }
 
     fn parseAddress(host_port: []const u8, default_port: u16) !std.net.Address {
-        if (std.mem.lastIndexOfScalar(u8, host_port, ':')) |last_colon| {
-            const host = host_port[0..last_colon];
-            const port_str = host_port[last_colon + 1 ..];
-            const port = try std.fmt.parseInt(u16, port_str, 10);
-
-            if (std.mem.eql(u8, host, "localhost")) {
-                return std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
-            }
-            return std.net.Address.parseIp(host, port);
-        } else {
-            if (std.mem.eql(u8, host_port, "localhost")) {
-                return std.net.Address.initIp4(.{ 127, 0, 0, 1 }, default_port);
-            }
-            return std.net.Address.parseIp(host_port, default_port);
+        const address_str = stripSubnetMask(host_port);
+        if (address_str.len == 0) {
+            return error.InvalidAddress;
         }
+
+        if (address_str[0] == '[') {
+            const close = std.mem.indexOfScalar(u8, address_str, ']') orelse return error.InvalidAddress;
+            const host = address_str[1..close];
+            var port = default_port;
+            if (close + 1 < address_str.len) {
+                if (address_str[close + 1] != ':') return error.InvalidAddress;
+                port = try std.fmt.parseInt(u16, address_str[close + 2 ..], 10);
+            }
+            return resolveHost(host, port);
+        }
+
+        if (std.mem.indexOfScalar(u8, address_str, ':')) |colon| {
+            if (std.mem.indexOfScalarPos(u8, address_str, colon + 1, ':')) |_| {
+                return resolveHost(address_str, default_port);
+            }
+
+            const host = address_str[0..colon];
+            const port = try std.fmt.parseInt(u16, address_str[colon + 1 ..], 10);
+            return resolveHost(host, port);
+        }
+
+        return resolveHost(address_str, default_port);
+    }
+
+    fn stripSubnetMask(address_str: []const u8) []const u8 {
+        if (std.mem.indexOfScalar(u8, address_str, '/')) |slash| {
+            return address_str[0..slash];
+        }
+        return address_str;
+    }
+
+    fn resolveHost(host: []const u8, port: u16) !std.net.Address {
+        if (std.mem.eql(u8, host, "localhost")) {
+            return std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
+        }
+        return std.net.Address.resolveIp(host, port);
     }
 
     // LESSON(transport/aeron): Multicast detection relies on IPv4 class D (224.0.0.0/4) and IPv6 ff00::/8. MDC needs no mcast join.
@@ -146,4 +172,21 @@ test "UdpChannel: parse with control and session-id" {
     try std.testing.expectEqual(AeronUri.ControlMode.dynamic, channel.control_mode.?);
     try std.testing.expectEqual(@as(i32, 42), channel.session_id.?);
     try std.testing.expectEqual(@as(u32, 131072), channel.term_length.?);
+}
+
+test "UdpChannel: parse IPv6 endpoint and subnet-qualified interface" {
+    const allocator = std.testing.allocator;
+    var channel = try UdpChannel.parse(
+        allocator,
+        "aeron:udp?endpoint=[ff02::1]:40456|interface=[fe80::60c:ceff:fee3]/88|ttl=16",
+    );
+    defer channel.deinit(allocator);
+
+    try std.testing.expect(channel.endpoint != null);
+    try std.testing.expect(channel.local_address != null);
+    try std.testing.expect(channel.isMulticast());
+    try std.testing.expectEqual(std.posix.AF.INET6, channel.endpoint.?.any.family);
+    try std.testing.expectEqual(std.posix.AF.INET6, channel.local_address.?.any.family);
+    try std.testing.expectEqual(@as(u16, 40456), channel.endpoint.?.getPort());
+    try std.testing.expectEqual(@as(u8, 16), channel.ttl.?);
 }

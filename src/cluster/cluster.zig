@@ -3,7 +3,6 @@
 
 const std = @import("std");
 const election_mod = @import("election.zig");
-const log_mod = @import("log.zig");
 const conductor_mod = @import("conductor.zig");
 
 // =============================================================================
@@ -53,7 +52,6 @@ pub const ConsensusModule = struct {
     allocator: std.mem.Allocator,
     ctx: ClusterContext,
     election: election_mod.Election,
-    log: log_mod.ClusterLog,
     conductor: conductor_mod.ClusterConductor,
     is_running: bool = false,
 
@@ -68,7 +66,6 @@ pub const ConsensusModule = struct {
             .allocator = allocator,
             .ctx = ctx,
             .election = try election_mod.Election.init(allocator, ctx.member_id, cluster_size),
-            .log = log_mod.ClusterLog.init(allocator),
             .conductor = conductor_mod.ClusterConductor.init(allocator, ctx.member_id),
             .is_running = false,
         };
@@ -77,7 +74,6 @@ pub const ConsensusModule = struct {
     /// Free all resources.
     pub fn deinit(self: *ConsensusModule) void {
         self.conductor.deinit();
-        self.log.deinit();
         self.election.deinit();
     }
 
@@ -354,4 +350,7 @@ test "ConsensusModule end-to-end: election, connect, message" {
 
     const msg_responses = module.pollResponses(&noop);
     try std.testing.expectEqual(@as(i32, 1), msg_responses);
+    try std.testing.expectEqual(@as(i64, @intCast(data.len)), module.conductor.log.appendPosition());
+    try std.testing.expectEqual(@as(i64, @intCast(data.len)), module.conductor.log.commitPosition());
+    try std.testing.expectEqualSlices(u8, "hello cluster", module.conductor.log.entryAt(0).?.data);
 }

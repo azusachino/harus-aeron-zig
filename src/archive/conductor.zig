@@ -91,6 +91,7 @@ pub const Response = struct {
 /// and collects responses for delivery back to clients.
 pub const ArchiveConductor = struct {
     allocator: std.mem.Allocator,
+    archive_dir: []const u8,
     /// Shared catalog for recording metadata
     catalog: catalog_mod.Catalog,
     /// Recorder managing active recording sessions
@@ -105,8 +106,13 @@ pub const ArchiveConductor = struct {
     /// Initialize a new ArchiveConductor.
     /// Allocator is retained for all subsequent operations.
     pub fn init(allocator: std.mem.Allocator) ArchiveConductor {
+        return ArchiveConductor.initWithArchiveDir(allocator, "/tmp/aeron-archive");
+    }
+
+    pub fn initWithArchiveDir(allocator: std.mem.Allocator, archive_dir: []const u8) ArchiveConductor {
         return ArchiveConductor{
             .allocator = allocator,
+            .archive_dir = archive_dir,
             .catalog = catalog_mod.Catalog.init(allocator),
             .recorder = null,
             .replayer = replayer_mod.Replayer.init(allocator),
@@ -120,7 +126,7 @@ pub const ArchiveConductor = struct {
     fn initRecorder(self: *ArchiveConductor) !void {
         if (self.recorder == null) {
             const recorder = try self.allocator.create(recorder_mod.Recorder);
-            recorder.* = recorder_mod.Recorder.init(self.allocator, &self.catalog);
+            recorder.* = recorder_mod.Recorder.initWithArchiveDir(self.allocator, &self.catalog, self.archive_dir);
             self.recorder = recorder;
         }
     }
@@ -225,7 +231,10 @@ pub const ArchiveConductor = struct {
         var source_data: []const u8 = "";
         if (self.recorder) |recorder| {
             if (recorder.findSession(cmd.recording_id)) |session| {
-                source_data = session.writer.buffer.items;
+                try session.writer.flush();
+                const replay_source = try session.snapshot(self.allocator);
+                defer self.allocator.free(replay_source);
+                source_data = replay_source;
             }
         }
 

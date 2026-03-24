@@ -3,6 +3,7 @@
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-cluster/src/main/java/io/aeron/cluster/ClusterConductor.java
 
 const std = @import("std");
+const log_mod = @import("log.zig");
 
 // =============================================================================
 // Role Enum
@@ -123,6 +124,7 @@ pub const ClusterConductor = struct {
     member_id: i32,
     leader_member_id: i32,
     leader_ship_term_id: i64,
+    log: log_mod.ClusterLog,
     command_queue: std.ArrayList(Command),
     response_queue: std.ArrayList(Response),
     sessions: std.ArrayList(SessionState),
@@ -137,6 +139,7 @@ pub const ClusterConductor = struct {
             .member_id = member_id,
             .leader_member_id = -1,
             .leader_ship_term_id = 0,
+            .log = log_mod.ClusterLog.init(allocator),
             .command_queue = .{},
             .response_queue = .{},
             .sessions = .{},
@@ -150,6 +153,7 @@ pub const ClusterConductor = struct {
         self.command_queue.deinit(self.allocator);
         self.response_queue.deinit(self.allocator);
         self.sessions.deinit(self.allocator);
+        self.log.deinit();
     }
 
     /// Enqueue a command for processing.
@@ -231,13 +235,14 @@ pub const ClusterConductor = struct {
 
     /// Handle session_message command.
     fn handleSessionMessage(self: *ClusterConductor, cmd: SessionMessageCmd) !void {
-        _ = cmd;
         if (self.role == .leader) {
-            // Leader: commit the message by advancing commit position
+            _ = try self.log.append(cmd.data, cmd.timestamp);
+            self.log.advanceCommitPosition(self.log.appendPosition());
+            self.commit_position = self.log.commitPosition();
             const response = Response{
                 .commit_position = CommitPositionResponse{
                     .leader_ship_term_id = self.leader_ship_term_id,
-                    .log_position = self.commit_position + 1,
+                    .log_position = self.commit_position,
                 },
             };
             try self.response_queue.append(self.allocator, response);
@@ -264,7 +269,8 @@ pub const ClusterConductor = struct {
 
     /// Handle commit_position command.
     fn handleCommitPosition(self: *ClusterConductor, cmd: CommitPositionCmd) !void {
-        self.commit_position = cmd.log_position;
+        self.log.advanceCommitPosition(cmd.log_position);
+        self.commit_position = self.log.commitPosition();
     }
 
     /// Drain and deliver all queued responses.
@@ -412,6 +418,9 @@ test "session message as leader" {
     };
     _ = conductor.pollResponses(&handler.handle);
     try std.testing.expect(CaptureCommit.commit_response_received);
+    try std.testing.expectEqual(@as(i64, 12), conductor.log.appendPosition());
+    try std.testing.expectEqual(@as(i64, 12), conductor.commit_position);
+    try std.testing.expectEqualSlices(u8, "test message", conductor.log.entryAt(0).?.data);
 }
 
 test "session message as follower rejects" {
@@ -485,16 +494,19 @@ test "commit position advance" {
 
     try std.testing.expectEqual(0, conductor.commit_position);
 
+    _ = try conductor.log.append("entry", 100);
+
     const commit_cmd = Command{
         .commit_position = CommitPositionCmd{
             .leader_ship_term_id = 1,
-            .log_position = 100,
+            .log_position = 5,
         },
     };
 
     try conductor.enqueueCommand(commit_cmd);
     _ = try conductor.doWork();
-    try std.testing.expectEqual(100, conductor.commit_position);
+    try std.testing.expectEqual(5, conductor.commit_position);
+    try std.testing.expectEqual(5, conductor.log.commitPosition());
 }
 
 test "multiple sessions" {

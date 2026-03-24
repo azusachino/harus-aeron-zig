@@ -211,6 +211,7 @@ pub const MediaDriver = struct {
     }
 
     pub fn deinit(self: *MediaDriver) void {
+        self.close();
         if (self.cnc) |*c| {
             c.deinit();
         } else {
@@ -264,12 +265,15 @@ pub const MediaDriver = struct {
 
         if (self.conductor_thread) |thread| {
             thread.join();
+            self.conductor_thread = null;
         }
         if (self.sender_thread) |thread| {
             thread.join();
+            self.sender_thread = null;
         }
         if (self.receiver_thread) |thread| {
             thread.join();
+            self.receiver_thread = null;
         }
     }
 

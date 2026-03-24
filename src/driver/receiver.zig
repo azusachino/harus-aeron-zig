@@ -231,46 +231,26 @@ pub const Receiver = struct {
         return slice;
     }
 
-    // Single duty cycle: recv one frame, dispatch, return work count (0 or 1)
-    pub fn doWork(self: *Receiver) i32 {
-        // LESSON(receiver/zig): Non-blocking UDP receive loop—read up to 4096 bytes, parse frame type, dispatch. See docs/tutorial/03-driver/02-receiver.md
-        // 1. Call recv_endpoint.recv(&recv_buf, &src_addr)
-        var src_addr: std.net.Address = undefined;
-        const bytes_read = self.recv_endpoint.recv(&self.recv_buf, &src_addr) catch |err| {
-            if (err == error.WouldBlock) {
-                return 0;
-            }
-            std.debug.print("[RECEIVER] recv error: {any}\n", .{err});
-            return 0;
-        };
-
-        if (bytes_read == 0) {
+    pub fn processDatagram(self: *Receiver, data: []const u8, src_addr: std.net.Address) i32 {
+        if (data.len == 0) {
             return 0;
         }
-
-        std.debug.print("[RECEIVER] Received {d} bytes (fd={d})\n", .{ bytes_read, self.recv_endpoint.socket });
 
         // 2. Read frame type from buf[6..8] as little-endian u16
-        if (bytes_read < 8) {
-            std.debug.print("[RECEIVER] Packet too small: {d} bytes\n", .{bytes_read});
+        if (data.len < 8) {
             return 0;
         }
 
-        const frame_type_raw = std.mem.readInt(u16, self.recv_buf[6..8], .little);
-        std.debug.print("[RECEIVER] Hex: {X:0>2} {X:0>2} {X:0>2} {X:0>2} | {X:0>2} {X:0>2} | {X:0>2} {X:0>2} | {X:0>2} {X:0>2} {X:0>2} {X:0>2}\n", .{
-            self.recv_buf[0], self.recv_buf[1], self.recv_buf[2],  self.recv_buf[3],
-            self.recv_buf[4], self.recv_buf[5], self.recv_buf[6],  self.recv_buf[7],
-            self.recv_buf[8], self.recv_buf[9], self.recv_buf[10], self.recv_buf[11],
-        });
+        const frame_type_raw = std.mem.readInt(u16, data[6..8], .little);
 
         // 3. Dispatch based on frame type
         if (frame_type_raw == @intFromEnum(protocol.FrameType.data)) {
-            // LESSON(receiver/aeron): DATA frame insertion into Image log buffer—detects gaps and records loss observations. See docs/tutorial/03-driver/02-receiver.md
-            const header = @as(*const protocol.DataHeader, @ptrCast(@alignCast(&self.recv_buf[0])));
-            // std.debug.print("[RECEIVER] DATA frame: session={d} stream={d} len={d}\n", .{ header.session_id, header.stream_id, header.frame_length });
-
+            // FrameType.data (0x01)
+            if (data.len < protocol.DataHeader.LENGTH) {
+                return 0;
+            }
+            const header = @as(*const protocol.DataHeader, @ptrCast(@alignCast(&data[0])));
             if (header.frame_length < protocol.DataHeader.LENGTH) {
-                std.debug.print("[RECEIVER] Ignoring invalid DATA frame_length={d}\n", .{header.frame_length});
                 return 1;
             }
 
@@ -284,8 +264,8 @@ pub const Receiver = struct {
                     const payload_offset = protocol.DataHeader.LENGTH;
                     const payload_len = @as(usize, @intCast(header.frame_length)) - protocol.DataHeader.LENGTH;
 
-                    if (payload_offset + payload_len <= bytes_read) {
-                        const payload = self.recv_buf[payload_offset .. payload_offset + payload_len];
+                    if (payload_offset + payload_len <= data.len) {
+                        const payload = data[payload_offset .. payload_offset + payload_len];
 
                         // Write frame to log buffer
                         _ = image.insertFrame(self.counters_map, header, payload);
@@ -322,7 +302,13 @@ pub const Receiver = struct {
                         }
 
                         // Send status message
-                        self.sendStatus(image) catch {};
+                        self.sendStatus(image) catch |err| switch (err) {
+                            error.WouldBlock => {},
+                            else => std.log.err(
+                                "receiver status send failed session_id={} stream_id={} err={}",
+                                .{ image.session_id, image.stream_id, err },
+                            ),
+                        };
                     }
 
                     return 1;
@@ -332,13 +318,10 @@ pub const Receiver = struct {
             // Unknown session/stream — log/ignore (conductor handles creation)
             return 1;
         } else if (frame_type_raw == @intFromEnum(protocol.FrameType.setup)) {
-            // LESSON(receiver/aeron): SETUP frame handshake—queue for conductor to attach Image to log buffer. See docs/tutorial/03-driver/02-receiver.md
-            // FrameType.setup
-            if (bytes_read < protocol.SetupHeader.LENGTH) {
+            if (data.len < protocol.SetupHeader.LENGTH) {
                 return 1;
             }
-            const setup = @as(*const protocol.SetupHeader, @ptrCast(@alignCast(&self.recv_buf[0])));
-            std.debug.print("[RECEIVER] SETUP frame: session={d} stream={d} term_length={d}\n", .{ setup.session_id, setup.stream_id, setup.term_length });
+            const setup = @as(*const protocol.SetupHeader, @ptrCast(@alignCast(&data[0])));
 
             self.mutex.lock();
             defer self.mutex.unlock();
@@ -361,6 +344,24 @@ pub const Receiver = struct {
 
         // Other frame types: ignore
         return 1;
+    }
+
+    // Single duty cycle: recv one frame, dispatch, return work count (0 or 1)
+    pub fn doWork(self: *Receiver) i32 {
+        var src_addr: std.net.Address = undefined;
+        const bytes_read = self.recv_endpoint.recv(&self.recv_buf, &src_addr) catch |err| {
+            if (err == error.WouldBlock) {
+                return 0;
+            }
+            std.debug.print("[RECEIVER] recv error: {any}\n", .{err});
+            return 0;
+        };
+
+        if (bytes_read == 0) {
+            return 0;
+        }
+
+        return self.processDatagram(self.recv_buf[0..bytes_read], src_addr);
     }
 
     pub fn onAddSubscription(self: *Receiver, image: *Image) !void {

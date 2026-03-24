@@ -1,5 +1,5 @@
 /// Aeron Archive Replayer — manages replay sessions that read from recorded data.
-/// A ReplaySession wraps a reference to recorded data and tracks playback progress.
+/// A ReplaySession owns a copy of the recorded bytes and tracks playback progress.
 /// The Replayer agent multiplexes multiple concurrent replay sessions, advancing
 /// them all on each call to doWork().
 ///
@@ -21,6 +21,7 @@ pub const RecordingProgressInfo = struct {
 /// Tracks where we are in the recorded data and offers a window to advance through it.
 /// Each session has a unique replay_session_id that clients use to stop/query it.
 pub const ReplaySession = struct {
+    allocator: std.mem.Allocator,
     /// Unique identifier for this replay session, used by client to reference it.
     replay_session_id: i64,
     /// Recording being replayed (for progress reporting and validation).
@@ -30,9 +31,8 @@ pub const ReplaySession = struct {
     /// Position at which to stop replay; 0 means replay to end of data.
     /// When current_position >= replay_limit and replay_limit != 0, session is complete.
     replay_limit: i64,
-    /// Reference to the recorded data buffer (caller retains ownership).
-    /// This is immutable and must remain valid for the lifetime of this session.
-    source_data: []const u8,
+    /// Owned copy of the recorded data buffer.
+    source_data: []u8,
     /// Whether this session is actively replaying (not closed by client).
     active: bool,
     /// Initial position where replay started (for progress tracking).
@@ -42,21 +42,29 @@ pub const ReplaySession = struct {
     /// `position` is the byte offset in the recording to begin replay from.
     /// `length` is the maximum bytes to replay; 0 means replay all remaining data.
     pub fn init(
+        allocator: std.mem.Allocator,
         replay_session_id: i64,
         recording_id: i64,
         position: i64,
         length: i64,
         source_data: []const u8,
-    ) ReplaySession {
+    ) !ReplaySession {
+        const owned_data = try allocator.dupe(u8, source_data);
         return ReplaySession{
+            .allocator = allocator,
             .replay_session_id = replay_session_id,
             .recording_id = recording_id,
             .current_position = position,
-            .replay_limit = if (length == 0) @intCast(source_data.len) else position + length,
-            .source_data = source_data,
+            .replay_limit = if (length == 0) @intCast(owned_data.len) else position + length,
+            .source_data = owned_data,
             .active = true,
             .start_position = position,
         };
+    }
+
+    /// Release owned replay data.
+    pub fn deinit(self: *ReplaySession) void {
+        self.allocator.free(self.source_data);
     }
 
     /// Read the next chunk of data from current position in the recording.
@@ -175,6 +183,9 @@ pub const Replayer = struct {
     /// Free all resources associated with the Replayer.
     /// Must be called before dropping the Replayer instance.
     pub fn deinit(self: *Replayer) void {
+        for (self.sessions.items) |*session| {
+            session.deinit();
+        }
         self.sessions.deinit(self.allocator);
     }
 
@@ -192,7 +203,7 @@ pub const Replayer = struct {
         const session_id = self.next_replay_session_id;
         self.next_replay_session_id += 1;
 
-        const session = ReplaySession.init(session_id, recording_id, position, length, source_data);
+        const session = try ReplaySession.init(self.allocator, session_id, recording_id, position, length, source_data);
         try self.sessions.append(self.allocator, session);
 
         return session_id;
@@ -246,7 +257,12 @@ pub const Replayer = struct {
 
 test "ReplaySession reads chunks sequentially" {
     const data = "Hello, World! This is test data.";
-    var session = ReplaySession.init(1, 1, 0, 0, data);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var session = try ReplaySession.init(allocator, 1, 1, 0, 0, data);
+    defer session.deinit();
 
     // Read first chunk
     const chunk1 = session.readChunk(5);
@@ -268,7 +284,12 @@ test "ReplaySession reads chunks sequentially" {
 
 test "ReplaySession respects replay_limit" {
     const data = "0123456789ABCDEFGHIJ";
-    var session = ReplaySession.init(1, 1, 0, 10, data);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var session = try ReplaySession.init(allocator, 1, 1, 0, 10, data);
+    defer session.deinit();
 
     const chunk1 = session.readChunk(20);
     try std.testing.expect(chunk1 != null);
@@ -282,7 +303,12 @@ test "ReplaySession respects replay_limit" {
 
 test "ReplaySession detects completion" {
     const data = "short";
-    var session = ReplaySession.init(1, 1, 0, 0, data);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var session = try ReplaySession.init(allocator, 1, 1, 0, 0, data);
+    defer session.deinit();
 
     try std.testing.expect(!session.isComplete());
     _ = session.readChunk(100);
@@ -291,7 +317,12 @@ test "ReplaySession detects completion" {
 
 test "ReplaySession close marks inactive" {
     const data = "test data";
-    var session = ReplaySession.init(1, 1, 0, 0, data);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var session = try ReplaySession.init(allocator, 1, 1, 0, 0, data);
+    defer session.deinit();
 
     try std.testing.expect(session.isActive());
     session.close();
@@ -304,7 +335,12 @@ test "ReplaySession close marks inactive" {
 
 test "ReplaySession doWork returns 1 when active" {
     const data = "data";
-    var session = ReplaySession.init(1, 1, 0, 0, data);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var session = try ReplaySession.init(allocator, 1, 1, 0, 0, data);
+    defer session.deinit();
 
     const work = session.doWork();
     try std.testing.expectEqual(@as(i32, 1), work);
@@ -312,7 +348,12 @@ test "ReplaySession doWork returns 1 when active" {
 
 test "ReplaySession doWork returns 0 when inactive" {
     const data = "data";
-    var session = ReplaySession.init(1, 1, 0, 0, data);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var session = try ReplaySession.init(allocator, 1, 1, 0, 0, data);
+    defer session.deinit();
     session.close();
 
     const work = session.doWork();
@@ -321,7 +362,12 @@ test "ReplaySession doWork returns 0 when inactive" {
 
 test "ReplaySession progress tracking" {
     const data = "0123456789";
-    var session = ReplaySession.init(1, 42, 2, 0, data);
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var session = try ReplaySession.init(allocator, 1, 42, 2, 0, data);
+    defer session.deinit();
 
     var prog = session.progress();
     try std.testing.expectEqual(@as(i64, 42), prog.recording_id);

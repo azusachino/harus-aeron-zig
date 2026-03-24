@@ -55,7 +55,7 @@ pub const Archive = struct {
         return Archive{
             .allocator = allocator,
             .ctx = ctx,
-            .conductor = conductor_mod.ArchiveConductor.init(allocator),
+            .conductor = conductor_mod.ArchiveConductor.initWithArchiveDir(allocator, ctx.archive_dir),
             .is_running = false,
         };
     }
@@ -227,7 +227,15 @@ test "Archive end-to-end: start recording, write data, replay" {
     const response_count = archive.pollResponses(&dummy_handler);
     try std.testing.expectEqual(@as(i32, 1), response_count);
 
-    // Use a fixed recording_id for the rest of the test
+    // Write a couple of fragments through the live recorder session.
+    try std.testing.expect(archive.conductor.recorder != null);
+    const recorder = archive.conductor.recorder.?;
+    const session = recorder.findSession(1) orelse unreachable;
+    try session.onFragment("frame-one");
+    try session.onFragment("frame-two");
+    try session.writer.flush();
+
+    // Use a fixed recording_id for the rest of the test.
     const recording_id: i64 = 1;
 
     // Enqueue stop_recording command
@@ -259,6 +267,9 @@ test "Archive end-to-end: start recording, write data, replay" {
 
     const replay_response_count = archive.pollResponses(&dummy_handler);
     try std.testing.expectEqual(@as(i32, 1), replay_response_count);
+
+    const replay_session = archive.conductor.replayer.findSession(1) orelse unreachable;
+    try std.testing.expectEqualSlices(u8, "frame-oneframe-two", replay_session.source_data);
 
     // Enqueue stop_replay command
     const stop_replay_cmd = Command{

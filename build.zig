@@ -187,8 +187,21 @@ pub fn build(b: *std.Build) void {
     });
     const run_stress_reconnect = b.addRunArtifact(stress_reconnect);
 
+    const stress_driver_resilience = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/stress/driver_resilience.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+            },
+        }),
+    });
+    const run_stress_driver_resilience = b.addRunArtifact(stress_driver_resilience);
+
     const stress_step = b.step("stress", "Run stress tests");
     stress_step.dependOn(&run_stress_term_rotation.step);
     stress_step.dependOn(&run_stress_concurrent_pubs.step);
     stress_step.dependOn(&run_stress_reconnect.step);
+    stress_step.dependOn(&run_stress_driver_resilience.step);
 }
