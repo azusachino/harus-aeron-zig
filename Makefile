@@ -1,6 +1,8 @@
 NIX_RUN := $(if $(filter $(IN_NIX_SHELL),),nix develop --command ,)
 export ZIG_GLOBAL_CACHE_DIR := $(CURDIR)/.zig-global-cache
 export ZIG_LOCAL_CACHE_DIR := $(CURDIR)/.zig-cache
+AERON_VERSION := 1.46.7
+AERON_ALL_JAR_URL := https://repo1.maven.org/maven2/io/aeron/aeron-all/$(AERON_VERSION)/aeron-all-$(AERON_VERSION).jar
 
 .PHONY: fmt fmt-check build test lint check clean run tutorial-check \
        fuzz bench stress \
@@ -58,17 +60,15 @@ setup-interop:
 	if [ -n "$$std_dir" ]; then \
 		ln -sfn "$$std_dir" vendor/zig-std; \
 	fi
+	@curl -fsSL "$(AERON_ALL_JAR_URL)" -o test/interop/aeron-all.jar
 	@if [ ! -s throughput ]; then \
 		printf '%s\n' \
 			'#!/usr/bin/env sh' \
 			'set -e' \
 			'zig build >/dev/null' \
 			'exec zig-out/bin/throughput-example "$$@"' > throughput; \
-		chmod +x throughput; \
-	fi
-	@if [ -n "$$AERON_ALL_JAR" ] && [ ! -e test/interop/aeron-all.jar ]; then \
-		ln -s "$$AERON_ALL_JAR" test/interop/aeron-all.jar; \
-	fi
+			chmod +x throughput; \
+		fi
 
 # =============================================================================
 # Kubernetes (k3s via colima)

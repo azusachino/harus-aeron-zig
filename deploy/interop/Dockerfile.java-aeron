@@ -1,9 +1,10 @@
 FROM amazoncorretto:21-alpine
+ARG AERON_VERSION=1.46.7
 
 # Download Aeron JAR from Maven Central
 RUN apk add --no-cache curl && \
-    curl -fsSL -o /tmp/aeron-all-1.46.7.jar \
-    https://repo1.maven.org/maven2/io/aeron/aeron-all/1.46.7/aeron-all-1.46.7.jar && \
+    curl -fsSL -o /tmp/aeron-all-${AERON_VERSION}.jar \
+    https://repo1.maven.org/maven2/io/aeron/aeron-all/${AERON_VERSION}/aeron-all-${AERON_VERSION}.jar && \
     apk del curl && \
     rm -rf /var/cache/apk/*
 
@@ -15,7 +16,7 @@ ENV AERON_DIR=/dev/shm/aeron
 
 # Set working directory and copy JAR
 WORKDIR /opt/aeron
-RUN mv /tmp/aeron-all-1.46.7.jar /opt/aeron/aeron-all.jar
+RUN mv /tmp/aeron-all-${AERON_VERSION}.jar /opt/aeron/aeron-all.jar
 
 # Default entrypoint
 ENTRYPOINT ["java", "-cp", "/opt/aeron/aeron-all.jar"]
