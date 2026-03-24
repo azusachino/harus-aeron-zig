@@ -14,6 +14,12 @@ const ThroughputContext = struct {
     bytes_received: i64 = 0,
 };
 
+const Options = struct {
+    duration_s: u64 = 10,
+    message_size: usize = 256,
+    term_length: i32 = 16 * 1024 * 1024,
+};
+
 // ZIG: FragmentHandler callback is called for each message in the log buffer.
 // AERON: Zero-copy delivery. The buffer slice points directly into the mmap'd term.
 fn fragmentHandler(header: *const frame.DataHeader, buffer: []const u8, ctx_ptr: *anyopaque) void {
@@ -23,23 +29,94 @@ fn fragmentHandler(header: *const frame.DataHeader, buffer: []const u8, ctx_ptr:
     ctx.bytes_received += @intCast(buffer.len);
 }
 
+fn printUsage() void {
+    std.debug.print(
+        \\Throughput example (IPC, embedded driver)
+        \\
+        \\Usage:
+        \\  throughput [--duration <seconds>] [--size <bytes>] [--term-length <bytes>]
+        \\
+        \\Defaults:
+        \\  --duration 10
+        \\  --size 256
+        \\  --term-length 16777216
+        \\
+        \\
+    , .{});
+}
+
+fn parseArgs(allocator: std.mem.Allocator) !Options {
+    var opts = Options{};
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            return error.InvalidArguments;
+        } else if (std.mem.eql(u8, arg, "--duration")) {
+            if (i + 1 >= args.len) return error.InvalidArguments;
+            i += 1;
+            opts.duration_s = try std.fmt.parseInt(u64, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--size")) {
+            if (i + 1 >= args.len) return error.InvalidArguments;
+            i += 1;
+            opts.message_size = try std.fmt.parseInt(usize, args[i], 10);
+        } else if (std.mem.eql(u8, arg, "--term-length")) {
+            if (i + 1 >= args.len) return error.InvalidArguments;
+            i += 1;
+            opts.term_length = try std.fmt.parseInt(i32, args[i], 10);
+        } else {
+            return error.InvalidArguments;
+        }
+    }
+
+    if (opts.duration_s == 0 or opts.message_size == 0 or opts.term_length <= 0) {
+        return error.InvalidArguments;
+    }
+
+    return opts;
+}
+
+fn resetIpcLogBuffer(initial_term_id: i32, lb: *LogBuffer, publication: *ExclusivePublication, img: *Image) void {
+    @memset(lb.termBuffer(0), 0);
+
+    var meta = lb.metaData();
+    meta.setRawTailVolatile(0, @as(i64, initial_term_id) << 32);
+    meta.setActiveTermCount(0);
+
+    publication.* = ExclusivePublication.init(publication.session_id, publication.stream_id, initial_term_id, publication.term_length, publication.mtu, lb);
+    publication.publisher_limit = std.math.maxInt(i64);
+
+    img.* = Image.init(img.session_id, img.stream_id, initial_term_id, lb);
+}
+
 pub fn main() !void {
     // ZIG: GPA for memory safety.
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    const opts = parseArgs(allocator) catch |err| switch (err) {
+        error.InvalidArguments => {
+            printUsage();
+            return;
+        },
+        else => return err,
+    };
+
     std.debug.print("\n=== Throughput Test ===\n", .{});
-    std.debug.print("Running for 10 seconds on IPC channel\n\n", .{});
+    std.debug.print("Running for {d} seconds on IPC channel\n\n", .{opts.duration_s});
 
     // ZIG: MediaDriver.create launches the Conductor, Sender, and Receiver agents.
     // AERON: Media driver manages shared memory buffers and network I/O.
     const driver = try MediaDriver.create(allocator, .{});
     defer driver.destroy();
 
-    // ZIG: Allocating a large (16MB) log buffer for high-throughput IPC.
+    // ZIG: Allocating a large log buffer for high-throughput IPC.
     // AERON: IPC (Inter-Process Communication) uses shared memory log buffers directly.
-    const term_length = 16 * 1024 * 1024;
+    const term_length = opts.term_length;
     const lb = try allocator.create(LogBuffer);
     defer allocator.destroy(lb);
     lb.* = try LogBuffer.init(allocator, term_length);
@@ -54,7 +131,7 @@ pub fn main() !void {
     // ZIG: ExclusivePublication avoids mutexes by assuming a single writer thread.
     // AERON: Publications are the write handles for an Aeron stream.
     var publication = ExclusivePublication.init(1, 1, initial_term_id, term_length, 1408, lb);
-    publication.publisher_limit = 100 * 1024 * 1024;
+    publication.publisher_limit = std.math.maxInt(i64);
 
     // ZIG: Image represents a specific publisher's session within a subscription.
     const img = try allocator.create(Image);
@@ -66,14 +143,14 @@ pub fn main() !void {
     defer subscription.deinit();
     try subscription.addImage(img);
 
-    // ZIG: Fixed message payload to minimize formatting overhead in the hot loop.
-    var msg_buffer: [256]u8 = undefined;
-    @memset(&msg_buffer, 'X');
-    const msg = msg_buffer[0..256];
+    // ZIG: Configurable payload size keeps the example usable as a benchmark harness.
+    const msg = try allocator.alloc(u8, opts.message_size);
+    defer allocator.free(msg);
+    @memset(msg, 'X');
 
     // ZIG: std.time.Timer provides high-resolution monotonic time.
     var timer = try std.time.Timer.start();
-    const test_duration_ns = 10 * std.time.ns_per_s;
+    const test_duration_ns = opts.duration_s * std.time.ns_per_s;
     var stat_timer = try std.time.Timer.start();
     const stat_interval_ns = 1 * std.time.ns_per_s;
 
@@ -85,11 +162,17 @@ pub fn main() !void {
     std.debug.print("Time(s)  | Messages/sec | Bytes/sec    | Total Sent | Total Recv\n", .{});
     std.debug.print("---------+--------------+--------------+------------+-----------\n", .{});
 
-    // ZIG: Tight poll loop for maximum throughput.
+    var last_total_received: i64 = 0;
+    var last_total_bytes: i64 = 0;
     while (timer.read() < test_duration_ns) {
         // AERON: offer() writes the message and advances the tail cursor via CAS.
-        _ = publication.offer(msg);
-        total_sent += 1;
+        // Reset the single-term IPC log when it fills so the example does not stall permanently.
+        switch (publication.offer(msg)) {
+            .ok => |_| total_sent += 1,
+            .admin_action => {},
+            .back_pressure => resetIpcLogBuffer(initial_term_id, lb, &publication, img),
+            else => {},
+        }
 
         // AERON: poll() reads messages and invokes the handler. fragment_limit=100 for batching.
         ctx.messages_received = 0;
@@ -101,8 +184,10 @@ pub fn main() !void {
         // ZIG: Periodic stats output.
         if (stat_timer.read() >= stat_interval_ns) {
             const elapsed_sec: i64 = @intCast(timer.read() / std.time.ns_per_s);
-            const msg_per_sec = @divTrunc(total_received, elapsed_sec + 1);
-            const bytes_per_sec = @divTrunc(total_bytes, elapsed_sec + 1);
+            const msg_per_sec = total_received - last_total_received;
+            const bytes_per_sec = total_bytes - last_total_bytes;
+            last_total_received = total_received;
+            last_total_bytes = total_bytes;
 
             std.debug.print(
                 "{d:7} | {d:12} | {d:12} | {d:10} | {d:9}\n",
