@@ -177,7 +177,7 @@ pub const Receiver = struct {
     loss_report_instance: ?*loss_report.LossReport,
     event_log: ?*event_log_mod.EventLog,
     allocator: std.mem.Allocator,
-    recv_buf: [4096]u8,
+    recv_buf: [4096]u8 align(8),
     mutex: std.Thread.Mutex = .{},
 
     pub fn init(
@@ -268,6 +268,11 @@ pub const Receiver = struct {
             // LESSON(receiver/aeron): DATA frame insertion into Image log buffer—detects gaps and records loss observations. See docs/tutorial/03-driver/02-receiver.md
             const header = @as(*const protocol.DataHeader, @ptrCast(@alignCast(&self.recv_buf[0])));
             // std.debug.print("[RECEIVER] DATA frame: session={d} stream={d} len={d}\n", .{ header.session_id, header.stream_id, header.frame_length });
+
+            if (header.frame_length < protocol.DataHeader.LENGTH) {
+                std.debug.print("[RECEIVER] Ignoring invalid DATA frame_length={d}\n", .{header.frame_length});
+                return 1;
+            }
 
             self.mutex.lock();
             defer self.mutex.unlock();
@@ -362,6 +367,15 @@ pub const Receiver = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         try self.images.append(self.allocator, image);
+    }
+
+    pub fn hasImage(self: *Receiver, session_id: i32, stream_id: i32) bool {
+        for (self.images.items) |image| {
+            if (image.session_id == session_id and image.stream_id == stream_id) {
+                return true;
+            }
+        }
+        return false;
     }
 
     pub fn onRemoveSubscription(self: *Receiver, session_id: i32, stream_id: i32) void {
@@ -518,9 +532,11 @@ test "Receiver onAddSubscription and onRemoveSubscription" {
 
     try receiver.onAddSubscription(&image);
     try std.testing.expectEqual(@as(usize, 1), receiver.images.items.len);
+    try std.testing.expect(receiver.hasImage(1, 2));
 
     receiver.onRemoveSubscription(1, 2);
     try std.testing.expectEqual(@as(usize, 0), receiver.images.items.len);
+    try std.testing.expect(!receiver.hasImage(1, 2));
 }
 
 test "Image insertFrame writes data at correct offset" {

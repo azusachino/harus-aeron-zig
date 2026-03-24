@@ -10,7 +10,7 @@ services:
       - JAVA_OPTS=-Djava.io.tmpdir=/dev/shm
     command: >
       sh -c "javac -cp aeron-all.jar BasicPublisher.java &&
-             java -cp .:aeron-all.jar BasicPublisher"
+             java --add-opens=java.base/sun.nio.ch=ALL-UNNAMED -Djava.io.tmpdir=/dev/shm -cp .:aeron-all.jar BasicPublisher"
     network_mode: host
 
   zig-sub:

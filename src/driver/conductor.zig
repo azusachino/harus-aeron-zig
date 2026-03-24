@@ -127,6 +127,11 @@ pub const DriverConductor = struct {
             var found = false;
             for (self.subscriptions.items) |sub| {
                 if (sub.stream_id == sig.stream_id) {
+                    if (self.receiver.hasImage(sig.session_id, sig.stream_id)) {
+                        std.debug.print("[CONDUCTOR] Image already exists for session {d} stream {d}, skipping duplicate SETUP\n", .{ sig.session_id, sig.stream_id });
+                        found = true;
+                        break;
+                    }
                     std.debug.print("[CONDUCTOR] Found subscription for stream {d}, creating image...\n", .{sig.stream_id});
                     found = true;
                     // Create Image
@@ -154,6 +159,7 @@ pub const DriverConductor = struct {
                         sig.source_address,
                     );
                     self.receiver.onAddSubscription(image) catch continue;
+                    self.receiver.sendStatus(image) catch {};
 
                     // Send ON_IMAGE_READY to clients
                     self.sendImageReady(sig.session_id, sig.stream_id, sub.registration_id);
@@ -301,20 +307,21 @@ pub const DriverConductor = struct {
 
     fn handleAddSubscription(self: *DriverConductor, data: []const u8) void {
         // LESSON(conductor/aeron): Subscription lifecycle—store channel + stream_id, wait for publisher SETUP to create Image. See docs/tutorial/03-driver/03-conductor.md
-        if (data.len < 12) return;
+        if (data.len < 24) return;
 
         const correlation_id = std.mem.readInt(i64, data[0..8], .little);
-        const stream_id = std.mem.readInt(i32, data[8..12], .little);
-        const channel_len = if (data.len >= 16) std.mem.readInt(i32, data[12..16], .little) else 0;
+        const registration_id = std.mem.readInt(i64, data[8..16], .little);
+        const stream_id = std.mem.readInt(i32, data[16..20], .little);
+        const channel_len = std.mem.readInt(i32, data[20..24], .little);
 
-        std.debug.print("[CONDUCTOR] ADD_SUBSCRIPTION: correlation={d} stream={d} channel_len={d}\n", .{ correlation_id, stream_id, channel_len });
+        std.debug.print("[CONDUCTOR] ADD_SUBSCRIPTION: correlation={d} registration={d} stream={d} channel_len={d}\n", .{ correlation_id, registration_id, stream_id, channel_len });
 
-        if (channel_len < 0 or data.len < 16 + @as(usize, @intCast(channel_len))) {
+        if (channel_len < 0 or data.len < 24 + @as(usize, @intCast(channel_len))) {
             self.sendError(correlation_id, 1, "Invalid ADD_SUBSCRIPTION message");
             return;
         }
 
-        const channel_data = data[16 .. 16 + @as(usize, @intCast(channel_len))];
+        const channel_data = data[24 .. 24 + @as(usize, @intCast(channel_len))];
 
         // Bind recv endpoint to channel port on first subscription (if not already bound)
         if (!self.recv_bound) {
@@ -602,12 +609,13 @@ test "DriverConductor ADD_SUBSCRIPTION creates entry and sends ready response" {
     @memset(&cmd_buf, 0);
     const channel = "aeron:udp";
     std.mem.writeInt(i64, cmd_buf[0..8], 54321, .little); // correlation_id
-    std.mem.writeInt(i32, cmd_buf[8..12], 99, .little); // stream_id
-    std.mem.writeInt(i32, cmd_buf[12..16], @as(i32, @intCast(channel.len)), .little); // channel_len
-    @memcpy(cmd_buf[16 .. 16 + channel.len], channel);
+    std.mem.writeInt(i64, cmd_buf[8..16], -1, .little); // registration_id placeholder
+    std.mem.writeInt(i32, cmd_buf[16..20], 99, .little); // stream_id
+    std.mem.writeInt(i32, cmd_buf[20..24], @as(i32, @intCast(channel.len)), .little); // channel_len
+    @memcpy(cmd_buf[24 .. 24 + channel.len], channel);
 
     // Directly call handler
-    conductor.handleAddSubscription(cmd_buf[0 .. 16 + channel.len]);
+    conductor.handleAddSubscription(cmd_buf[0 .. 24 + channel.len]);
 
     try testing.expectEqual(@as(usize, 1), conductor.subscriptions.items.len);
     try testing.expectEqual(@as(i32, 99), conductor.subscriptions.items[0].stream_id);
