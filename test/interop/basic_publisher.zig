@@ -37,14 +37,16 @@ pub fn main() !void {
     while (timer.read() < timeout_ns) {
         _ = client.doWork();
         if (client.getPublication(registration_id)) |p| {
-            pub_instance = p;
-            break;
+            if (p.isConnected()) {
+                pub_instance = p;
+                break;
+            }
         }
         std.Thread.sleep(100 * std.time.ns_per_ms);
     }
 
     if (pub_instance) |p| {
-        std.debug.print("[ZIG] Publication connected! Sending 100 messages...\n", .{});
+        std.debug.print("[ZIG] Publication connected via STATUS. Sending 100 messages...\n", .{});
         var i: usize = 0;
         while (i < 100) {
             var msg_buf: [32]u8 = undefined;
