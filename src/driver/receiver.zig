@@ -319,7 +319,10 @@ pub const Receiver = struct {
                         const payload = data[payload_offset .. payload_offset + payload_len];
 
                         // Write frame to log buffer
-                        _ = image.insertFrame(self.counters_map, header, payload);
+                        const written = image.insertFrame(self.counters_map, header, payload);
+                        if (!written) {
+                            std.debug.print("[RECEIVER] insertFrame FAILED: session={d} stream={d} term_id={d} term_offset={d} frame_length={d}\n", .{ header.session_id, header.stream_id, header.term_id, header.term_offset, header.frame_length });
+                        }
 
                         // Log frame_in event
                         if (self.event_log) |el| {
@@ -366,7 +369,8 @@ pub const Receiver = struct {
                 }
             }
 
-            // Unknown session/stream — log/ignore (conductor handles creation)
+            // Unknown session/stream — data arrived before image creation
+            std.debug.print("[RECEIVER] DATA for unknown session={d} stream={d} (images={d})\n", .{ header.session_id, header.stream_id, self.images.items.len });
             return 1;
         } else if (frame_type_raw == @intFromEnum(protocol.FrameType.setup)) {
             if (data.len < protocol.SetupHeader.LENGTH) {

@@ -13,12 +13,14 @@ data:
     import io.aeron.driver.MediaDriver;
     import org.agrona.concurrent.UnsafeBuffer;
     import java.nio.ByteBuffer;
+    import java.util.concurrent.TimeUnit;
 
     public class BasicPublisher {
         public static void main(String[] args) throws Exception {
-            final String channel = System.getenv("CHANNEL");
-            final int streamId = Integer.parseInt(System.getenv("STREAM_ID"));
+            final String channel = System.getenv().getOrDefault("CHANNEL", "aeron:udp?endpoint=localhost:40124");
+            final int streamId = Integer.parseInt(System.getenv().getOrDefault("STREAM_ID", "1001"));
             final String aeronDir = System.getenv("AERON_DIR");
+            final long connectDeadlineNs = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
 
             System.out.println("Launching Java Media Driver at " + aeronDir + "...");
             MediaDriver.Context driverCtx = new MediaDriver.Context()
@@ -26,21 +28,30 @@ data:
                 .dirDeleteOnStart(true);
 
             try (MediaDriver driver = MediaDriver.launch(driverCtx)) {
-                Thread.sleep(1000);
+                Thread.sleep(500);
                 try (Aeron aeron = Aeron.connect(new Aeron.Context().aeronDirectoryName(driver.aeronDirectoryName()));
                      Publication pub = aeron.addPublication(channel, streamId)) {
 
-                    System.out.println("Java Publisher connected to " + channel);
+                    System.out.println("Java Publisher waiting for subscriber...");
+                    while (!pub.isConnected()) {
+                        if (System.nanoTime() >= connectDeadlineNs) {
+                            throw new IllegalStateException("Timed out waiting for subscriber connection");
+                        }
+                        Thread.sleep(10);
+                    }
+                    System.out.println("Java Publisher connected to " + channel + ", warmup...");
+                    Thread.sleep(1500);
+
                     UnsafeBuffer buffer = new UnsafeBuffer(ByteBuffer.allocateDirect(128));
                     for (int i = 0; i < 100; i++) {
                         String msg = "Hello Aeron " + i;
                         buffer.putStringWithoutLengthUtf8(0, msg);
                         while (pub.offer(buffer, 0, msg.length()) < 0) {
-                            Thread.yield();
+                            Thread.onSpinWait();
                         }
                         if (i % 10 == 0) System.out.println("Sent " + i + " messages...");
                     }
-                    Thread.sleep(1000); // Wait for delivery
+                    Thread.sleep(1000);
                     System.out.println("Java Publisher smoke test: SUCCESS (sent 100 messages)");
                 }
             }

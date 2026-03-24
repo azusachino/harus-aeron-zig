@@ -37,6 +37,9 @@ pub const Image = struct {
         const result = term_reader.TermReader.read(term_buffer, term_offset, handler, ctx, fragment_limit);
 
         const read_bytes = result.offset - term_offset;
+        if (result.fragments_read > 0) {
+            std.debug.print("[IMAGE] poll: partition={d} term_offset={d} fragments={d} read_bytes={d} new_pos={d}\n", .{ partition, term_offset, result.fragments_read, read_bytes, self.subscriber_position + read_bytes });
+        }
         self.subscriber_position += read_bytes;
 
         return result.fragments_read;
