@@ -17,6 +17,11 @@ zig-out/
 *.swp
 *.swo
 
+# Local helper artifacts
+test/interop/aeron-all.jar
+throughput
+vendor/zig-std
+
 # Agent state (session-volatile)
 .agents/CURRENT_TASK.md
 .agents/MEMORY.md
