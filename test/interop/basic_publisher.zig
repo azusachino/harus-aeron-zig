@@ -30,21 +30,23 @@ pub fn main() !void {
     std.debug.print("[ZIG] Publication requested, registration_id={d}\n", .{registration_id});
 
     var timer = try std.time.Timer.start();
-    const timeout_ns = 60 * std.time.ns_per_s;
+    const timeout_ns = 30 * std.time.ns_per_s;
 
     std.debug.print("[ZIG] Waiting for publication to be connected...\n", .{});
     var pub_instance: ?*aeron.ExclusivePublication = null;
     while (timer.read() < timeout_ns) {
         _ = client.doWork();
         if (client.getPublication(registration_id)) |p| {
-            pub_instance = p;
-            break;
+            if (p.isConnected()) {
+                pub_instance = p;
+                break;
+            }
         }
         std.Thread.sleep(100 * std.time.ns_per_ms);
     }
 
     if (pub_instance) |p| {
-        std.debug.print("[ZIG] Publication connected! Sending 100 messages...\n", .{});
+        std.debug.print("[ZIG] Publication connected via STATUS. Sending 100 messages...\n", .{});
         var i: usize = 0;
         while (i < 100) {
             var msg_buf: [32]u8 = undefined;

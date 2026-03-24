@@ -26,16 +26,20 @@ pub const Image = struct {
     }
 
     pub fn poll(self: *Image, handler: term_reader.FragmentHandler, ctx: *anyopaque, fragment_limit: i32) i32 {
-        const meta = self.log_buffer.metaData();
-        const active_term_count = meta.activeTermCount();
-        const partition = metadata.activePartitionIndex(active_term_count);
+        // Compute partition from subscriber_position and initial_term_id, not log metadata
+        // (the receiver writes frames by term_id but never updates activeTermCount in metadata)
+        const term_count: usize = @intCast(@divTrunc(self.subscriber_position, @as(i64, self.term_length)));
+        const partition = @mod(term_count, metadata.PARTITION_COUNT);
         const term_buffer = self.log_buffer.termBuffer(partition);
 
-        const term_offset = @as(i32, @intCast(self.subscriber_position & @as(i64, self.term_length - 1)));
+        const term_offset = @as(i32, @intCast(@mod(self.subscriber_position, @as(i64, self.term_length))));
 
         const result = term_reader.TermReader.read(term_buffer, term_offset, handler, ctx, fragment_limit);
 
         const read_bytes = result.offset - term_offset;
+        if (result.fragments_read > 0) {
+            std.debug.print("[IMAGE] poll: partition={d} term_offset={d} fragments={d} read_bytes={d} new_pos={d}\n", .{ partition, term_offset, result.fragments_read, read_bytes, self.subscriber_position + read_bytes });
+        }
         self.subscriber_position += read_bytes;
 
         return result.fragments_read;

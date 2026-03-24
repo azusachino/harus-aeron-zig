@@ -47,12 +47,12 @@ pub const UdpChannel = struct {
 
         // Resolve interface address
         if (aeron_uri.interfaceName()) |iface| {
-            channel.local_address = parseAddress(iface, 0) catch null;
+            channel.local_address = try parseAddress(iface, 0);
         }
 
         // Resolve control address
         if (aeron_uri.controlEndpoint()) |ctrl| {
-            channel.control = parseAddress(ctrl, 0) catch null;
+            channel.control = try parseAddress(ctrl, 0);
         }
 
         if (channel.endpoint) |ep| {
@@ -111,7 +111,10 @@ pub const UdpChannel = struct {
         if (std.mem.eql(u8, host, "localhost")) {
             return std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
         }
-        return std.net.Address.resolveIp(host, port);
+        return std.net.Address.resolveIp(host, port) catch |err| switch (err) {
+            error.InvalidIPAddressFormat => error.InvalidAddress,
+            else => err,
+        };
     }
 
     // LESSON(transport/aeron): Multicast detection relies on IPv4 class D (224.0.0.0/4) and IPv6 ff00::/8. MDC needs no mcast join.
@@ -172,6 +175,21 @@ test "UdpChannel: parse with control and session-id" {
     try std.testing.expectEqual(AeronUri.ControlMode.dynamic, channel.control_mode.?);
     try std.testing.expectEqual(@as(i32, 42), channel.session_id.?);
     try std.testing.expectEqual(@as(u32, 131072), channel.term_length.?);
+}
+
+test "UdpChannel: parse endpoint shorthand" {
+    const allocator = std.testing.allocator;
+    var channel = try UdpChannel.parse(allocator, "aeron:udp://localhost:40123");
+    defer channel.deinit(allocator);
+
+    try std.testing.expect(channel.endpoint != null);
+    try std.testing.expectEqual(@as(u16, 40123), channel.endpoint.?.getPort());
+}
+
+test "UdpChannel: reject invalid interface address" {
+    const allocator = std.testing.allocator;
+    const result = UdpChannel.parse(allocator, "aeron:udp?endpoint=localhost:40123|interface=[]");
+    try std.testing.expectError(error.InvalidAddress, result);
 }
 
 test "UdpChannel: parse IPv6 endpoint and subnet-qualified interface" {

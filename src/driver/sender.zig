@@ -86,24 +86,25 @@ pub const Sender = struct {
     }
 
     fn processPublication(self: *Sender, publication: *NetworkPublication) i32 {
-        // LESSON(sender/aeron): Publisher_limit counter controls flow—only send up to limit. Sender position tracks progress. See docs/tutorial/03-driver/01-sender.md
+        // LESSON(sender/aeron): SETUP must be sent unconditionally to establish the connection.
+        // Only after a subscriber responds with STATUS does publisher_limit advance, enabling data flow.
         var work_count: i32 = 0;
 
-        // Get current positions from counters
-        const sender_pos = self.counters_map.get(publication.sender_position.counter_id);
-        const pub_limit = self.counters_map.get(publication.publisher_limit.counter_id);
-
-        if (sender_pos >= pub_limit) {
-            return 0;
-        }
-
-        // Send SETUP frame periodically (every 50ms)
+        // Always send SETUP periodically — required before any STATUS can arrive
         const now_ms = self.current_time_ms;
         if (now_ms - publication.last_setup_time_ms >= 50) {
             if (self.sendSetupFrame(publication)) {
                 publication.last_setup_time_ms = now_ms;
                 work_count += 1;
             }
+        }
+
+        // Get current positions from counters
+        const sender_pos = self.counters_map.get(publication.sender_position.counter_id);
+        const pub_limit = self.counters_map.get(publication.publisher_limit.counter_id);
+
+        if (sender_pos >= pub_limit) {
+            return work_count;
         }
 
         // Send DATA frames from log buffer
@@ -321,6 +322,28 @@ pub const Sender = struct {
         try self.retransmit_queue.append(self.allocator, req);
     }
 
+    pub fn onStatusMessage(
+        self: *Sender,
+        session_id: i32,
+        stream_id: i32,
+        consumption_term_id: i32,
+        consumption_term_offset: i32,
+        receiver_window: i32,
+    ) void {
+        // LESSON(sender/aeron): STATUS is the receiver-driven flow-control signal. The sender
+        // translates the receiver's consumption position plus advertised window into a
+        // publisher-limit counter that both the driver and client publication observe.
+        for (self.publications.items) |publication| {
+            if (publication.session_id == session_id and publication.stream_id == stream_id) {
+                const receiver_position = @as(i64, consumption_term_id - publication.initial_term_id) * publication.log_buffer.term_length +
+                    consumption_term_offset;
+                const new_limit = receiver_position + receiver_window;
+                self.counters_map.set(publication.publisher_limit.counter_id, new_limit);
+                return;
+            }
+        }
+    }
+
     pub fn setCurrentTimeMs(self: *Sender, time_ms: i64) void {
         self.current_time_ms = time_ms;
     }
@@ -526,6 +549,39 @@ test "Sender: setCurrentTimeMs updates time" {
 
     sender.setCurrentTimeMs(1000);
     try std.testing.expectEqual(@as(i64, 1000), sender.current_time_ms);
+}
+
+test "Sender: STATUS updates publisher limit" {
+    const allocator = std.testing.allocator;
+    var meta align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
+    var values align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
+    var counters_map = counters.CountersMap.init(&meta, &values);
+
+    const sender_pos = counters_map.allocate(counters.SENDER_POSITION, "sender-pos");
+    const pub_limit = counters_map.allocate(counters.PUBLISHER_LIMIT, "pub-limit");
+
+    var sender = try Sender.init(allocator, undefined, &counters_map);
+    defer sender.deinit();
+
+    var log_buf = try logbuffer.LogBuffer.init(allocator, 64 * 1024);
+    defer log_buf.deinit();
+
+    var publication = NetworkPublication{
+        .session_id = 7,
+        .stream_id = 1001,
+        .initial_term_id = 3,
+        .log_buffer = &log_buf,
+        .sender_position = sender_pos,
+        .publisher_limit = pub_limit,
+        .send_channel = undefined,
+        .dest_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
+        .mtu = 1408,
+        .last_setup_time_ms = 0,
+    };
+    try sender.onAddPublication(&publication);
+
+    sender.onStatusMessage(7, 1001, 3, 1024, 4096);
+    try std.testing.expectEqual(@as(i64, 5120), counters_map.get(pub_limit.counter_id));
 }
 
 test "Sender: sendDataFrames reads committed frame from log buffer" {

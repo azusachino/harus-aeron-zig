@@ -29,6 +29,7 @@ pub const AeronUri = struct {
     pub const ParseError = error{
         InvalidUri,
         InvalidMediaType,
+        InvalidParam,
     };
 
     // LESSON(transport/zig): String parsing using std.mem.tokenizeScalar and manual ownership transfer.
@@ -50,6 +51,10 @@ pub const AeronUri = struct {
                 query = null;
             } else if (rest[0] == '?') {
                 query = rest[1..];
+            } else if (std.mem.startsWith(u8, rest, "://")) {
+                const endpoint_value = rest[3..];
+                if (endpoint_value.len == 0) return ParseError.InvalidParam;
+                query = try std.fmt.allocPrint(allocator, "endpoint={s}", .{endpoint_value});
             } else {
                 return ParseError.InvalidMediaType;
             }
@@ -69,6 +74,9 @@ pub const AeronUri = struct {
 
         const raw_uri = try allocator.dupe(u8, uri_str);
         errdefer allocator.free(raw_uri);
+        defer if (media_type == .udp and std.mem.startsWith(u8, after_prefix["udp".len..], "://")) {
+            allocator.free(query.?);
+        };
 
         var params = std.StringHashMap([]const u8).init(allocator);
         errdefer {
@@ -84,9 +92,10 @@ pub const AeronUri = struct {
             var it = std.mem.tokenizeScalar(u8, q, '|');
             while (it.next()) |param| {
                 var kv_it = std.mem.splitScalar(u8, param, '=');
-                const key = kv_it.next() orelse continue;
+                const key = kv_it.next() orelse return ParseError.InvalidParam;
                 const value = kv_it.rest();
-                if (value.len == 0) continue;
+                if (key.len == 0 or value.len == 0) return ParseError.InvalidParam;
+                try validateKnownParam(key, value);
 
                 const owned_key = try allocator.dupe(u8, key);
                 errdefer allocator.free(owned_key);
@@ -177,6 +186,40 @@ pub const AeronUri = struct {
 
     pub fn get(self: *const AeronUri, key: []const u8) ?[]const u8 {
         return self.params.get(key);
+    }
+
+    fn validateKnownParam(key: []const u8, value: []const u8) ParseError!void {
+        if (std.mem.eql(u8, key, "control-mode")) {
+            if (ControlMode.fromString(value) == null) return ParseError.InvalidParam;
+            return;
+        }
+
+        if (std.mem.eql(u8, key, "reliable") or std.mem.eql(u8, key, "sparse")) {
+            if (!std.mem.eql(u8, value, "true") and !std.mem.eql(u8, value, "false")) {
+                return ParseError.InvalidParam;
+            }
+            return;
+        }
+
+        if (std.mem.eql(u8, key, "mtu")) {
+            _ = std.fmt.parseInt(usize, value, 10) catch return ParseError.InvalidParam;
+            return;
+        }
+
+        if (std.mem.eql(u8, key, "ttl")) {
+            _ = std.fmt.parseInt(u8, value, 10) catch return ParseError.InvalidParam;
+            return;
+        }
+
+        if (std.mem.eql(u8, key, "term-length")) {
+            _ = std.fmt.parseInt(u32, value, 10) catch return ParseError.InvalidParam;
+            return;
+        }
+
+        if (std.mem.eql(u8, key, "initial-term-id") or std.mem.eql(u8, key, "session-id")) {
+            _ = std.fmt.parseInt(i32, value, 10) catch return ParseError.InvalidParam;
+            return;
+        }
     }
 };
 
@@ -295,6 +338,15 @@ test "AeronUri: parse UDP with no params" {
     try std.testing.expect(uri.endpoint() == null);
 }
 
+test "AeronUri: parse UDP endpoint shorthand" {
+    const allocator = std.testing.allocator;
+    var uri = try AeronUri.parse(allocator, "aeron:udp://localhost:40123");
+    defer uri.deinit();
+
+    try std.testing.expectEqual(AeronUri.MediaType.udp, uri.media_type);
+    try std.testing.expectEqualStrings("localhost:40123", uri.endpoint().?);
+}
+
 test "AeronUri: initial-term-id accessor" {
     const allocator = std.testing.allocator;
     var uri = try AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|initial-term-id=100");
@@ -309,4 +361,22 @@ test "AeronUri: mtu accessor" {
     defer uri.deinit();
 
     try std.testing.expectEqual(@as(usize, 8192), uri.mtu().?);
+}
+
+test "AeronUri: reject invalid control-mode" {
+    const allocator = std.testing.allocator;
+    const result = AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|control-mode=bogus");
+    try std.testing.expectError(error.InvalidParam, result);
+}
+
+test "AeronUri: reject invalid boolean parameter" {
+    const allocator = std.testing.allocator;
+    const result = AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|reliable=maybe");
+    try std.testing.expectError(error.InvalidParam, result);
+}
+
+test "AeronUri: reject empty endpoint value" {
+    const allocator = std.testing.allocator;
+    const result = AeronUri.parse(allocator, "aeron:udp?endpoint=");
+    try std.testing.expectError(error.InvalidParam, result);
 }

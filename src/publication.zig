@@ -3,6 +3,7 @@ const logbuffer = @import("logbuffer/log_buffer.zig");
 const term_appender = @import("logbuffer/term_appender.zig");
 const frame = @import("protocol/frame.zig");
 const metadata = @import("logbuffer/metadata.zig");
+const counters = @import("ipc/counters.zig");
 
 // LESSON(publication/zig): Tagged union result type encodes expected operational states (back_pressure, not_connected) as values, not error codes. See docs/tutorial/04-client/01-publications.md
 pub const OfferResult = union(enum) {
@@ -23,6 +24,8 @@ pub const ExclusivePublication = struct {
     mtu: i32,
     log_buffer: *logbuffer.LogBuffer,
     publisher_limit: i64, // max position allowed by flow control
+    counters_map: ?*counters.CountersMap,
+    publisher_limit_counter_id: i32,
     is_closed: bool,
     appender: term_appender.TermAppender,
 
@@ -47,10 +50,28 @@ pub const ExclusivePublication = struct {
             .term_length = term_length,
             .mtu = mtu,
             .log_buffer = log_buffer,
-            .publisher_limit = @as(i64, term_length),
+            .publisher_limit = 0,
+            .counters_map = null,
+            .publisher_limit_counter_id = counters.NULL_COUNTER_ID,
             .is_closed = false,
             .appender = term_appender.TermAppender.init(term_buffer, term_id),
         };
+    }
+
+    pub fn attachPublisherLimitCounter(self: *ExclusivePublication, counters_map: *counters.CountersMap, counter_id: i32) void {
+        self.counters_map = counters_map;
+        self.publisher_limit_counter_id = counter_id;
+        self.publisher_limit = counters_map.get(counter_id);
+    }
+
+    // LESSON(publication/aeron): A publication is not truly connected until a receiver STATUS
+    // advances the shared publisher-limit counter. Client handles must read that live counter
+    // from CnC.dat instead of assuming the ready response implies connectivity.
+    fn livePublisherLimit(self: *ExclusivePublication) i64 {
+        if (self.counters_map) |cm| {
+            self.publisher_limit = cm.get(self.publisher_limit_counter_id);
+        }
+        return self.publisher_limit;
     }
 
     // LESSON(publication/zig): offer() reads volatile tail (term_id || offset), computes stream position, checks publisher_limit for back_pressure. See docs/tutorial/04-client/01-publications.md
@@ -61,8 +82,13 @@ pub const ExclusivePublication = struct {
         const term_id = @as(i32, @intCast(raw_tail >> 32));
         const term_offset = @as(i32, @intCast(raw_tail & 0xFFFF_FFFF));
         const current_position = @as(i64, term_id - self.initial_term_id) * self.term_length + term_offset;
+        const publisher_limit = self.livePublisherLimit();
 
-        if (current_position >= self.publisher_limit) {
+        if (publisher_limit <= 0) {
+            return .not_connected;
+        }
+
+        if (current_position >= publisher_limit) {
             return .back_pressure;
         }
 
@@ -101,7 +127,8 @@ pub const ExclusivePublication = struct {
     }
 
     pub fn isConnected(self: *const ExclusivePublication) bool {
-        return self.publisher_limit > 0;
+        var mutable = @constCast(self);
+        return mutable.livePublisherLimit() > 0;
     }
 
     pub fn close(self: *ExclusivePublication) void {
@@ -143,6 +170,28 @@ test "offer: first message succeeds when publisher_limit equals term_length" {
     defer log_buf.deinit();
 
     var pub_instance = ExclusivePublication.init(1, 1001, 0, 64 * 1024, 1408, &log_buf);
+    pub_instance.publisher_limit = 64 * 1024;
     const result = pub_instance.offer("hello");
     try std.testing.expect(result == .ok);
+}
+
+test "offer: returns not_connected until publisher limit counter advances" {
+    const allocator = std.testing.allocator;
+    var meta align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
+    var values align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
+    var counters_map = counters.CountersMap.init(&meta, &values);
+    const pub_limit = counters_map.allocate(counters.PUBLISHER_LIMIT, "pub-limit");
+
+    var log_buf = try logbuffer.LogBuffer.init(allocator, 64 * 1024);
+    defer log_buf.deinit();
+
+    var pub_instance = ExclusivePublication.init(1, 1001, 0, 64 * 1024, 1408, &log_buf);
+    pub_instance.attachPublisherLimitCounter(&counters_map, pub_limit.counter_id);
+
+    try std.testing.expect(!pub_instance.isConnected());
+    try std.testing.expect(pub_instance.offer("hello") == .not_connected);
+
+    counters_map.set(pub_limit.counter_id, 64 * 1024);
+    try std.testing.expect(pub_instance.isConnected());
+    try std.testing.expect(pub_instance.offer("hello") == .ok);
 }

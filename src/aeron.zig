@@ -46,6 +46,7 @@ pub const Aeron = struct {
     cnc_file: cnc.CncFile,
     to_driver_ring_buffer: ipc.ring_buffer.ManyToOneRingBuffer,
     to_clients_broadcast_receiver: ipc.broadcast.BroadcastReceiver,
+    counters_map: ipc.counters.CountersMap,
     next_correlation_id: std.atomic.Value(i64),
 
     // Tracking
@@ -61,6 +62,8 @@ pub const Aeron = struct {
         var file = try cnc.CncFile.open(allocator, cnc_path);
         const to_driver = file.toDriverBuffer();
         const to_clients = file.toClientsBuffer();
+        const counters_meta = file.countersMetadataBuffer();
+        const counters_values = file.countersValuesBuffer();
 
         return Aeron{
             .ctx = ctx,
@@ -68,6 +71,7 @@ pub const Aeron = struct {
             .cnc_file = file,
             .to_driver_ring_buffer = ipc.ring_buffer.ManyToOneRingBuffer.init(to_driver),
             .to_clients_broadcast_receiver = ipc.broadcast.BroadcastReceiver.wrap(to_clients),
+            .counters_map = ipc.counters.CountersMap.init(counters_meta, counters_values),
             .next_correlation_id = std.atomic.Value(i64).init(1),
             .publications = .{},
             .subscriptions = .{},
@@ -86,6 +90,10 @@ pub const Aeron = struct {
 
         var sub_it = self.subscriptions.iterator();
         while (sub_it.next()) |entry| {
+            // Images are heap-allocated here (allocator.create in doWork); free before deinit.
+            for (entry.value_ptr.*.images()) |img| {
+                self.allocator.destroy(img);
+            }
             entry.value_ptr.*.deinit();
             self.allocator.destroy(entry.value_ptr.*);
         }
@@ -103,12 +111,13 @@ pub const Aeron = struct {
                 const registration_id = std.mem.readInt(i64, buffer[0..8], .little);
                 const session_id = std.mem.readInt(i32, buffer[8..12], .little);
                 const stream_id = std.mem.readInt(i32, buffer[12..16], .little);
+                const initial_term_id = if (buffer.len >= 20) std.mem.readInt(i32, buffer[16..20], .little) else 0;
 
                 if (self.subscriptions.get(registration_id)) |sub| {
                     if (self.embedded_driver) |md| {
                         if (md.getImageLogBuffer(session_id, stream_id)) |lb| {
                             const img = self.allocator.create(Image) catch continue;
-                            img.* = Image.init(session_id, stream_id, 0, lb);
+                            img.* = Image.init(session_id, stream_id, initial_term_id, lb);
                             sub.addImage(img) catch self.allocator.destroy(img);
                         }
                     }
@@ -133,11 +142,15 @@ pub const Aeron = struct {
                 const correlation_id = std.mem.readInt(i64, buffer[0..8], .little);
                 const session_id = std.mem.readInt(i32, buffer[8..12], .little);
                 const stream_id = std.mem.readInt(i32, buffer[12..16], .little);
+                const publisher_limit_counter_id = if (buffer.len >= 20) std.mem.readInt(i32, buffer[16..20], .little) else ipc.counters.NULL_COUNTER_ID;
 
                 if (self.embedded_driver) |md| {
                     if (md.getPublicationLogBuffer(session_id, stream_id)) |lb| {
                         const pub_instance = self.allocator.create(ExclusivePublication) catch continue;
                         pub_instance.* = ExclusivePublication.init(session_id, stream_id, 0, lb.term_length, 1408, lb);
+                        if (publisher_limit_counter_id != ipc.counters.NULL_COUNTER_ID) {
+                            pub_instance.attachPublisherLimitCounter(&self.counters_map, publisher_limit_counter_id);
+                        }
                         self.publications.put(self.allocator, correlation_id, pub_instance) catch {
                             self.allocator.destroy(pub_instance);
                             continue;
