@@ -92,7 +92,7 @@ fn runArchive(allocator: std.mem.Allocator) !void {
         .control_channel = control_channel,
     };
 
-    var archive = archive_mod.Archive.init(allocator, ctx);
+    var archive = try archive_mod.Archive.init(allocator, ctx);
     defer archive.deinit();
 
     archive.start();

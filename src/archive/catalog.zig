@@ -33,6 +33,7 @@ pub const Catalog = struct {
     allocator: std.mem.Allocator,
     entries: std.ArrayList(RecordingDescriptorEntry),
     next_recording_id: i64,
+    path: ?[]u8,
 
     /// Initialize a new catalog
     pub fn init(allocator: std.mem.Allocator) Catalog {
@@ -40,12 +41,35 @@ pub const Catalog = struct {
             .allocator = allocator,
             .entries = .{},
             .next_recording_id = 1,
+            .path = null,
         };
+    }
+
+    /// Initialize a catalog that persists its entries under the given archive directory.
+    pub fn initWithArchiveDir(allocator: std.mem.Allocator, archive_dir: []const u8) !Catalog {
+        try std.fs.cwd().makePath(archive_dir);
+
+        const path = try std.fmt.allocPrint(allocator, "{s}/catalog.dat", .{archive_dir});
+        errdefer allocator.free(path);
+
+        var catalog = Catalog{
+            .allocator = allocator,
+            .entries = .{},
+            .next_recording_id = 1,
+            .path = path,
+        };
+        errdefer catalog.deinit();
+
+        try catalog.loadFromDisk();
+        return catalog;
     }
 
     /// Free catalog resources
     pub fn deinit(self: *Catalog) void {
         self.entries.deinit(self.allocator);
+        if (self.path) |path| {
+            self.allocator.free(path);
+        }
     }
 
     /// Add a new recording and return its recording_id
@@ -90,24 +114,39 @@ pub const Catalog = struct {
         try self.entries.append(self.allocator, entry);
         const recording_id = self.next_recording_id;
         self.next_recording_id += 1;
+        try self.persist();
         return recording_id;
     }
 
     /// Update stop position for a recording
-    pub fn updateStopPosition(self: *Catalog, recording_id: i64, stop_position: i64) void {
+    pub fn updateStopPosition(self: *Catalog, recording_id: i64, stop_position: i64) !void {
         for (self.entries.items) |*entry| {
             if (entry.recording_id == recording_id) {
                 entry.stop_position = stop_position;
+                try self.persist();
                 return;
             }
         }
     }
 
     /// Update stop timestamp for a recording
-    pub fn updateStopTimestamp(self: *Catalog, recording_id: i64, stop_timestamp: i64) void {
+    pub fn updateStopTimestamp(self: *Catalog, recording_id: i64, stop_timestamp: i64) !void {
         for (self.entries.items) |*entry| {
             if (entry.recording_id == recording_id) {
                 entry.stop_timestamp = stop_timestamp;
+                try self.persist();
+                return;
+            }
+        }
+    }
+
+    /// Update final stop state for a recording in a single persisted write.
+    pub fn updateStopState(self: *Catalog, recording_id: i64, stop_position: i64, stop_timestamp: i64) !void {
+        for (self.entries.items) |*entry| {
+            if (entry.recording_id == recording_id) {
+                entry.stop_position = stop_position;
+                entry.stop_timestamp = stop_timestamp;
+                try self.persist();
                 return;
             }
         }
@@ -171,6 +210,47 @@ pub const Catalog = struct {
     pub fn copySourceIdentity(entry: *const RecordingDescriptorEntry) []const u8 {
         return entry.source_identity[0..@intCast(entry.source_identity_length)];
     }
+
+    fn loadFromDisk(self: *Catalog) !void {
+        const path = self.path orelse return;
+        const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
+            error.FileNotFound => return,
+            else => return err,
+        };
+        defer file.close();
+
+        const file_size = (try file.stat()).size;
+        if (file_size == 0) {
+            return;
+        }
+        if (file_size % @sizeOf(RecordingDescriptorEntry) != 0) {
+            return error.CorruptCatalog;
+        }
+
+        const bytes = try file.readToEndAlloc(self.allocator, file_size);
+        defer self.allocator.free(bytes);
+
+        var offset: usize = 0;
+        var max_recording_id: i64 = 0;
+        while (offset < bytes.len) : (offset += @sizeOf(RecordingDescriptorEntry)) {
+            var entry: RecordingDescriptorEntry = undefined;
+            @memcpy(std.mem.asBytes(&entry), bytes[offset .. offset + @sizeOf(RecordingDescriptorEntry)]);
+            try self.entries.append(self.allocator, entry);
+            max_recording_id = @max(max_recording_id, entry.recording_id);
+        }
+        self.next_recording_id = max_recording_id + 1;
+    }
+
+    fn persist(self: *Catalog) !void {
+        const path = self.path orelse return;
+        const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+        defer file.close();
+
+        if (self.entries.items.len > 0) {
+            try file.writeAll(std.mem.sliceAsBytes(self.entries.items));
+        }
+        try file.sync();
+    }
 };
 
 // Tests
@@ -222,11 +302,42 @@ test "updateStopPosition updates correct entry" {
     defer catalog.deinit();
 
     const id = try catalog.addNewRecording(1, 1, "ch", "src", 0, 0, 0, 0, 0, 0);
-    catalog.updateStopPosition(id, 12345);
+    try catalog.updateStopPosition(id, 12345);
 
     const entry = catalog.recordingDescriptor(id);
     try std.testing.expect(entry != null);
     try std.testing.expectEqual(12345, entry.?.stop_position);
+}
+
+test "persistent catalog survives re-init" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/harus-aeron-catalog-{d}", .{std.time.nanoTimestamp()});
+    defer allocator.free(archive_dir);
+    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+
+    {
+        var catalog = try Catalog.initWithArchiveDir(allocator, archive_dir);
+        defer catalog.deinit();
+
+        const id1 = try catalog.addNewRecording(11, 22, "ch1", "src1", 1, 4096, 65536, 1408, 0, 100);
+        try catalog.updateStopState(id1, 64, 200);
+        _ = try catalog.addNewRecording(33, 44, "ch2", "src2", 2, 8192, 131072, 1408, 64, 300);
+    }
+
+    {
+        var catalog = try Catalog.initWithArchiveDir(allocator, archive_dir);
+        defer catalog.deinit();
+
+        try std.testing.expectEqual(@as(i64, 3), catalog.next_recording_id);
+        const first = catalog.recordingDescriptor(1).?;
+        try std.testing.expectEqual(@as(i64, 64), first.stop_position);
+        try std.testing.expectEqual(@as(i64, 200), first.stop_timestamp);
+        const second = catalog.recordingDescriptor(2).?;
+        try std.testing.expectEqual(@as(i32, 44), second.stream_id);
+    }
 }
 
 test "listRecordings iterates range" {

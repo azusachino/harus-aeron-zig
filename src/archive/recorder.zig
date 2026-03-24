@@ -284,14 +284,13 @@ pub const Recorder = struct {
     /// Closes the session and updates catalog with final position and timestamp.
     /// recording_id: ID of recording to stop
     /// stop_timestamp: wall-clock time when recording stopped
-    pub fn onStopRecording(self: *Recorder, recording_id: i64, stop_timestamp: i64) void {
+    pub fn onStopRecording(self: *Recorder, recording_id: i64, stop_timestamp: i64) !void {
         // Find and close the matching session
         for (self.sessions.items) |*session| {
             if (session.recording_id == recording_id) {
                 session.close();
                 // Update catalog with final state
-                self.catalog.updateStopPosition(recording_id, session.writer.stopPosition());
-                self.catalog.updateStopTimestamp(recording_id, stop_timestamp);
+                try self.catalog.updateStopState(recording_id, session.writer.stopPosition(), stop_timestamp);
                 return;
             }
         }
@@ -463,7 +462,7 @@ test "Recorder onStopRecording closes session and updates catalog" {
     try session.onFragment("data2");
 
     // Stop recording
-    recorder.onStopRecording(recording_id, 6000);
+    try recorder.onStopRecording(recording_id, 6000);
 
     try std.testing.expect(!session.isActive());
 
@@ -492,11 +491,11 @@ test "Recorder doWork returns active session count" {
     try std.testing.expectEqual(2, recorder.doWork());
 
     const id1 = 1;
-    recorder.onStopRecording(id1, 200);
+    try recorder.onStopRecording(id1, 200);
     try std.testing.expectEqual(1, recorder.doWork());
 
     const id2 = 2;
-    recorder.onStopRecording(id2, 200);
+    try recorder.onStopRecording(id2, 200);
     try std.testing.expectEqual(0, recorder.doWork());
 }
 

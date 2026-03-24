@@ -52,8 +52,8 @@ pub fn fuzz(input: []const u8) void {
     _ = cat.recordingDescriptor(999);
 
     // Try updates (safe even if no entries exist)
-    cat.updateStopPosition(1, 1024);
-    cat.updateStopTimestamp(1, std.time.milliTimestamp());
+    _ = cat.updateStopPosition(1, 1024) catch {};
+    _ = cat.updateStopTimestamp(1, std.time.milliTimestamp()) catch {};
 }
 
 test "fuzz_catalog: empty input" {

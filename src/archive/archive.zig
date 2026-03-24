@@ -51,11 +51,11 @@ pub const Archive = struct {
 
     /// Initialize a new Archive with the given allocator and context.
     /// The conductor is created but not started; call start() to begin processing.
-    pub fn init(allocator: std.mem.Allocator, ctx: ArchiveContext) Archive {
+    pub fn init(allocator: std.mem.Allocator, ctx: ArchiveContext) !Archive {
         return Archive{
             .allocator = allocator,
             .ctx = ctx,
-            .conductor = conductor_mod.ArchiveConductor.initWithArchiveDir(allocator, ctx.archive_dir),
+            .conductor = try conductor_mod.ArchiveConductor.initWithArchiveDir(allocator, ctx.archive_dir),
             .is_running = false,
         };
     }
@@ -132,6 +132,10 @@ pub const ListRecordingsCmd = conductor_mod.ListRecordingsCmd;
 // Tests
 // =============================================================================
 
+fn makeTempArchiveDir(allocator: std.mem.Allocator) ![]u8 {
+    return std.fmt.allocPrint(allocator, "/tmp/harus-aeron-archive-{d}", .{std.time.nanoTimestamp()});
+}
+
 test "ArchiveContext has sensible defaults" {
     const ctx = ArchiveContext{};
     try std.testing.expectEqualStrings("aeron:udp?endpoint=localhost:8010", ctx.control_channel);
@@ -147,8 +151,12 @@ test "Archive init and deinit" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const ctx = ArchiveContext{};
-    var archive = Archive.init(allocator, ctx);
+    const archive_dir = try makeTempArchiveDir(allocator);
+    defer allocator.free(archive_dir);
+    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+
+    const ctx = ArchiveContext{ .archive_dir = archive_dir };
+    var archive = try Archive.init(allocator, ctx);
     defer archive.deinit();
 
     try std.testing.expect(!archive.isRunning());
@@ -159,8 +167,12 @@ test "Archive start and stop" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const ctx = ArchiveContext{};
-    var archive = Archive.init(allocator, ctx);
+    const archive_dir = try makeTempArchiveDir(allocator);
+    defer allocator.free(archive_dir);
+    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+
+    const ctx = ArchiveContext{ .archive_dir = archive_dir };
+    var archive = try Archive.init(allocator, ctx);
     defer archive.deinit();
 
     try std.testing.expect(!archive.isRunning());
@@ -177,8 +189,12 @@ test "Archive doWork returns 0 when not running" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const ctx = ArchiveContext{};
-    var archive = Archive.init(allocator, ctx);
+    const archive_dir = try makeTempArchiveDir(allocator);
+    defer allocator.free(archive_dir);
+    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+
+    const ctx = ArchiveContext{ .archive_dir = archive_dir };
+    var archive = try Archive.init(allocator, ctx);
     defer archive.deinit();
 
     const work_count = try archive.doWork();
@@ -191,8 +207,12 @@ test "Archive end-to-end: start recording, write data, replay" {
     const allocator = gpa.allocator();
 
     // Create and start archive
-    const ctx = ArchiveContext{};
-    var archive = Archive.init(allocator, ctx);
+    const archive_dir = try makeTempArchiveDir(allocator);
+    defer allocator.free(archive_dir);
+    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+
+    const ctx = ArchiveContext{ .archive_dir = archive_dir };
+    var archive = try Archive.init(allocator, ctx);
     defer archive.deinit();
 
     archive.start();
@@ -289,4 +309,100 @@ test "Archive end-to-end: start recording, write data, replay" {
     archive.stop();
     const no_work = try archive.doWork();
     try std.testing.expectEqual(@as(i32, 0), no_work);
+}
+
+test "Archive survives restart for listing and replay" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const archive_dir = try makeTempArchiveDir(allocator);
+    defer allocator.free(archive_dir);
+    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+
+    const ctx = ArchiveContext{ .archive_dir = archive_dir };
+
+    {
+        var archive = try Archive.init(allocator, ctx);
+        defer archive.deinit();
+        archive.start();
+
+        const channel = try allocator.dupe(u8, "aeron:udp?endpoint=localhost:40123");
+        defer allocator.free(channel);
+        const source_identity = try allocator.dupe(u8, "test-source");
+        defer allocator.free(source_identity);
+
+        try archive.enqueueCommand(.{
+            .start_recording = .{
+                .correlation_id = 1,
+                .session_id = 7,
+                .stream_id = 8,
+                .channel = channel,
+                .source_identity = source_identity,
+            },
+        });
+        _ = try archive.doWork();
+        _ = archive.pollResponses(&struct {
+            fn handle(_: *const Response) void {}
+        }.handle);
+
+        const recorder = archive.conductor.recorder.?;
+        const session = recorder.findSession(1).?;
+        try session.onFragment("persisted-frame");
+        try session.writer.flush();
+
+        try archive.enqueueCommand(.{
+            .stop_recording = .{
+                .correlation_id = 2,
+                .recording_id = 1,
+            },
+        });
+        _ = try archive.doWork();
+        _ = archive.pollResponses(&struct {
+            fn handle(_: *const Response) void {}
+        }.handle);
+    }
+
+    {
+        var archive = try Archive.init(allocator, ctx);
+        defer archive.deinit();
+        archive.start();
+
+        try archive.enqueueCommand(.{
+            .list_recordings = .{
+                .correlation_id = 3,
+                .from_recording_id = 1,
+                .record_count = 10,
+            },
+        });
+        _ = try archive.doWork();
+        const Capture = struct {
+            pub var listed_count: i64 = -1;
+        };
+        Capture.listed_count = -1;
+        _ = archive.pollResponses(&struct {
+            fn handle(response: *const Response) void {
+                Capture.listed_count = response.recording_id;
+            }
+        }.handle);
+
+        try std.testing.expectEqual(@as(i64, 1), Capture.listed_count);
+        try std.testing.expect(archive.conductor.catalog.recordingDescriptor(1) != null);
+
+        try archive.enqueueCommand(.{
+            .replay = .{
+                .correlation_id = 4,
+                .recording_id = 1,
+                .position = 0,
+                .length = 0,
+            },
+        });
+        _ = try archive.doWork();
+        _ = archive.pollResponses(&struct {
+            fn handle(_: *const Response) void {}
+        }.handle);
+
+        const replay_session = archive.conductor.replayer.findSession(1).?;
+        try std.testing.expectEqualSlices(u8, "persisted-frame", replay_session.source_data);
+    }
 }
