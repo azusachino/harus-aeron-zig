@@ -4,6 +4,7 @@ const term_appender = @import("logbuffer/term_appender.zig");
 const frame = @import("protocol/frame.zig");
 const metadata = @import("logbuffer/metadata.zig");
 
+// LESSON(publication/zig): Tagged union result type encodes expected operational states (back_pressure, not_connected) as values, not error codes. See docs/tutorial/04-client/01-publications.md
 pub const OfferResult = union(enum) {
     ok: i64, // new stream position
     back_pressure, // publisher limit reached
@@ -13,6 +14,7 @@ pub const OfferResult = union(enum) {
     max_position_exceeded,
 };
 
+// LESSON(publication/aeron): publisher_limit is a flow-control ceiling set by Sender Agent; write succeeds only if current_position < publisher_limit. See docs/tutorial/04-client/01-publications.md
 pub const ExclusivePublication = struct {
     session_id: i32,
     stream_id: i32,
@@ -45,12 +47,13 @@ pub const ExclusivePublication = struct {
             .term_length = term_length,
             .mtu = mtu,
             .log_buffer = log_buffer,
-            .publisher_limit = 0,
+            .publisher_limit = @as(i64, term_length),
             .is_closed = false,
             .appender = term_appender.TermAppender.init(term_buffer, term_id),
         };
     }
 
+    // LESSON(publication/zig): offer() reads volatile tail (term_id || offset), computes stream position, checks publisher_limit for back_pressure. See docs/tutorial/04-client/01-publications.md
     pub fn offer(self: *ExclusivePublication, data: []const u8) OfferResult {
         if (self.is_closed) return .closed;
 
@@ -63,6 +66,7 @@ pub const ExclusivePublication = struct {
             return .back_pressure;
         }
 
+        // LESSON(publication/aeron): Single-frame messages use BEGIN_FLAG | END_FLAG; multi-frame fragmentation uses BEGIN/no-flag/END across appends. See docs/tutorial/04-client/01-publications.md
         var header: frame.DataHeader = undefined;
         header.version = frame.VERSION;
         header.flags = frame.DataHeader.BEGIN_FLAG | frame.DataHeader.END_FLAG;
@@ -88,6 +92,7 @@ pub const ExclusivePublication = struct {
         };
     }
 
+    // LESSON(publication/aeron): Term-relative positioning: stream position is (term_id_delta * term_length) + offset_within_term. See docs/tutorial/04-client/01-publications.md
     pub fn position(self: *const ExclusivePublication) i64 {
         const raw_tail = self.appender.rawTailVolatile();
         const term_id = @as(i32, @intCast(raw_tail >> 32));
@@ -130,4 +135,14 @@ test "ExclusivePublication offer writes to log buffer" {
     const expected_aligned_len = std.mem.alignForward(i32, @as(i32, @intCast(frame.DataHeader.LENGTH + test_payload.len)), frame.FRAME_ALIGNMENT);
     try std.testing.expectEqual(expected_aligned_len, frame_length);
     try std.testing.expectEqualSlices(u8, test_payload, term0[frame.DataHeader.LENGTH .. frame.DataHeader.LENGTH + test_payload.len]);
+}
+
+test "offer: first message succeeds when publisher_limit equals term_length" {
+    const allocator = std.testing.allocator;
+    var log_buf = try logbuffer.LogBuffer.init(allocator, 64 * 1024);
+    defer log_buf.deinit();
+
+    var pub_instance = ExclusivePublication.init(1, 1001, 0, 64 * 1024, 1408, &log_buf);
+    const result = pub_instance.offer("hello");
+    try std.testing.expect(result == .ok);
 }

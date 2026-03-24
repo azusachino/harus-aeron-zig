@@ -71,6 +71,7 @@ pub const Sender = struct {
     }
 
     pub fn doWork(self: *Sender) i32 {
+        // LESSON(sender/zig): Main work loop dispatches to publication processing and retransmit handling. See docs/tutorial/03-driver/01-sender.md
         var work_count: i32 = 0;
 
         // Process active publications
@@ -85,6 +86,7 @@ pub const Sender = struct {
     }
 
     fn processPublication(self: *Sender, publication: *NetworkPublication) i32 {
+        // LESSON(sender/aeron): Publisher_limit counter controls flow—only send up to limit. Sender position tracks progress. See docs/tutorial/03-driver/01-sender.md
         var work_count: i32 = 0;
 
         // Get current positions from counters
@@ -112,6 +114,7 @@ pub const Sender = struct {
     }
 
     fn sendSetupFrame(_: *Sender, publication: *NetworkPublication) bool {
+        // LESSON(sender/zig): Align buffer to protocol struct for C-compatible casting without copying. See docs/tutorial/03-driver/01-sender.md
         var frame_buffer: [protocol.SetupHeader.LENGTH]u8 align(@alignOf(protocol.SetupHeader)) = undefined;
         const header: *protocol.SetupHeader = @ptrCast(&frame_buffer);
 
@@ -145,6 +148,7 @@ pub const Sender = struct {
     }
 
     fn sendDataFrames(self: *Sender, publication: *NetworkPublication, sender_pos: i64, pub_limit: i64) i32 {
+        // LESSON(sender/aeron): Retransmission strategy via term-relative offsets. Sender scans log buffer for committed frames and sends up to flow control limit. See docs/tutorial/03-driver/01-sender.md
         var work_count: i32 = 0;
         var current_pos: i64 = sender_pos;
 
@@ -203,6 +207,7 @@ pub const Sender = struct {
     }
 
     fn processRetransmits(self: *Sender) i32 {
+        // LESSON(sender/aeron): NAK processing—on NAK receipt, queue retransmit request and drain in doWork. See docs/tutorial/03-driver/01-sender.md
         var work_count: i32 = 0;
 
         var i: usize = 0;

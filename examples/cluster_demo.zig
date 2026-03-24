@@ -9,6 +9,7 @@ const log_mod = aeron.cluster.log;
 const conductor_mod = aeron.cluster.conductor;
 
 pub fn main() !void {
+    // ZIG: GeneralPurposeAllocator ensures no memory leaks in this complex simulation.
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -17,14 +18,17 @@ pub fn main() !void {
 
     // Phase 1: Create 3 cluster nodes
     std.debug.print("--- Phase 1: Initialize 3-node cluster ---\n", .{});
+    // AERON: Cluster configuration requires a list of all participating member IDs.
     const members = [_]cluster.MemberConfig{
         .{ .member_id = 0 },
         .{ .member_id = 1 },
         .{ .member_id = 2 },
     };
 
+    // ZIG: Using an array to hold all nodes in the same process address space.
     var nodes: [3]cluster.ConsensusModule = undefined;
     for (0..3) |i| {
+        // AERON: ConsensusModule is the core engine for Raft-based state machine replication.
         nodes[i] = try cluster.ConsensusModule.init(allocator, .{
             .member_id = @intCast(i),
             .cluster_members = &members,
@@ -38,22 +42,23 @@ pub fn main() !void {
     std.debug.print("\n--- Phase 2: Leader Election ---\n", .{});
     var now_ns: i64 = 0;
 
-    // Tick all nodes through init → canvass
+    // ZIG: doWork(now_ns) takes an explicit timestamp to support deterministic testing.
+    // AERON: Nodes start in the canvass state, searching for an existing leader.
     for (&nodes) |*n| _ = try n.doWork(now_ns);
     now_ns += 1000;
     for (0..3) |i| {
         std.debug.print("  Node {d}: state={s}\n", .{ i, @tagName(nodes[i].electionState()) });
     }
 
-    // Advance past canvass timeout (5 seconds) for node 0 to become candidate
+    // AERON: If no leader is found within the timeout, a node becomes a candidate and starts a ballot.
     now_ns = election_mod.STARTUP_CANVASS_TIMEOUT_NS + 1;
     for (&nodes) |*n| _ = try n.doWork(now_ns);
     for (0..3) |i| {
         std.debug.print("  Node {d}: state={s}\n", .{ i, @tagName(nodes[i].electionState()) });
     }
 
-    // Nodes 1 and 2 vote for node 0
-    // Node 0 is in candidate_ballot, nodes 1,2 receive vote request
+    // ZIG: Direct function calls simulate network messages between nodes.
+    // AERON: Raft requires a majority of votes to win an election.
     _ = nodes[1].election.onRequestVote(
         nodes[0].election.candidate_term_id,
         nodes[0].election.leader_ship_term_id,
@@ -75,7 +80,7 @@ pub fn main() !void {
     now_ns += 1000;
     for (&nodes) |*n| _ = try n.doWork(now_ns);
 
-    // Notify followers of new leadership term
+    // AERON: Leader notifies followers of the new leadership term to synchronize their logs.
     nodes[1].election.onNewLeadershipTerm(
         nodes[0].election.leaderShipTermId(),
         nodes[0].election.log_position,
@@ -105,6 +110,7 @@ pub fn main() !void {
     const response_channel = try allocator.dupe(u8, "aeron:udp?endpoint=client:40123");
     defer allocator.free(response_channel);
 
+    // AERON: Clients connect via a session. The leader replicates the session connect to followers.
     try nodes[0].enqueueCommand(.{
         .session_connect = .{
             .correlation_id = 1,
@@ -124,7 +130,7 @@ pub fn main() !void {
     // Phase 4: Log replication
     std.debug.print("\n--- Phase 4: Log Replication ---\n", .{});
 
-    // Create log leader and followers
+    // AERON: LogLeader manages the replication progress; LogFollower receives and ACKs appends.
     var leader_log = log_mod.ClusterLog.init(allocator);
     defer leader_log.deinit();
     var log_leader = try log_mod.LogLeader.init(allocator, &leader_log, 3);
@@ -140,15 +146,16 @@ pub fn main() !void {
         const pos = try leader_log.append(msg, @intCast(now_ns + @as(i64, @intCast(idx)) * 1000));
         std.debug.print("  Leader append: \"{s}\" at position {d}\n", .{ msg, pos });
 
-        // Replicate to followers
+        // AERON: Leader replicates the append to all followers.
         const f0_pos = try follower0.onAppendRequest(1, msg, @intCast(now_ns));
         const f1_pos = try follower1.onAppendRequest(1, msg, @intCast(now_ns));
         const data_len: i64 = @intCast(msg.len);
+        // AERON: Followers send their append positions back to the leader.
         log_leader.onAppendPosition(1, f0_pos + data_len);
         log_leader.onAppendPosition(2, f1_pos + data_len);
     }
 
-    // Propagate commit position
+    // AERON: Once a majority have ACK'd, the leader advances the commit position.
     follower0.onCommitPosition(leader_log.commitPosition());
     follower1.onCommitPosition(leader_log.commitPosition());
 
@@ -160,9 +167,10 @@ pub fn main() !void {
     // Phase 5: Leader failover simulation
     std.debug.print("\n--- Phase 5: Leader Failover ---\n", .{});
     std.debug.print("  Killing node 0 (leader)...\n", .{});
+    // ZIG: stop() clears the running flag and shuts down background threads.
     nodes[0].stop();
 
-    // Node 1 times out waiting for leader heartbeat and starts election
+    // AERON: When the leader fails, followers time out and start a new election.
     now_ns += election_mod.ELECTION_TIMEOUT_NS + 1;
 
     // Reset node 1's election to canvass (simulating heartbeat timeout)
@@ -172,7 +180,7 @@ pub fn main() !void {
 
     std.debug.print("  Node 1 state: {s}\n", .{@tagName(nodes[1].electionState())});
 
-    // Node 2 votes for node 1
+    // AERON: Majority (node 1 and 2) agree on a new leader.
     _ = nodes[2].election.onRequestVote(
         nodes[1].election.candidate_term_id,
         nodes[1].election.leader_ship_term_id,
@@ -203,9 +211,11 @@ pub fn main() !void {
 
     // Phase 6: Send message to new leader
     std.debug.print("\n--- Phase 6: Message to New Leader ---\n", .{});
+    // ZIG: allocator.dupe creates a heap-allocated copy of the message.
     const msg_data = try allocator.dupe(u8, "post-failover message");
     defer allocator.free(msg_data);
 
+    // AERON: New leader accepts the command and starts its own replication cycle.
     try nodes[1].enqueueCommand(.{
         .session_message = .{
             .cluster_session_id = 100,

@@ -33,6 +33,9 @@ test-unit:
 test-integration:
 	$(NIX_RUN) zig build test-integration
 
+test-interop:
+	bash test/interop/run.sh
+
 lint: fmt-check
 
 check: fmt-check build test
@@ -62,8 +65,8 @@ colima-down:
 
 nix-image:
 	nix build .#oci
-	colima nerdctl load < result
-	colima ssh -- sudo ctr -n k8s.io images import - < result
+	docker load < result
+	docker save harus-aeron-zig:latest | colima ssh -- sudo ctr -n k8s.io images import -
 
 k8s-up: nix-image
 	kubectl apply -k deploy/k8s/
@@ -98,19 +101,13 @@ stress:  ## Run stress tests
 # =============================================================================
 # Interop Testing
 # =============================================================================
+# Consolidated into single `make interop` target that:
+# - Builds OCI image (nix-image dependency)
+# - Compiles Java Aeron interop apps
+# - Deploys K8s jobs (java-pub-zig-sub, zig-pub-java-sub)
+# - Waits for completion and reports results
+# See: test/interop/k8s-verify.sh
 
-interop: interop-build interop-run  ## Run full interop test suite
+interop:  ## Run full interop test suite
+	bash test/interop/k8s-verify.sh
 
-interop-build: nix-image  ## Build interop test images
-	docker build -t java-aeron:latest -f deploy/interop/Dockerfile.java-aeron deploy/interop/
-	nerdctl -n k8s.io image import $$(docker save java-aeron:latest | nerdctl -n k8s.io image load 2>&1 | grep -oP 'sha256:\S+') || \
-		docker save java-aeron:latest | nerdctl -n k8s.io image load
-
-interop-run:  ## Run interop test jobs in k3s
-	kubectl delete jobs -n aeron -l app.kubernetes.io/part-of=interop --ignore-not-found
-	kubectl apply -k deploy/interop/
-	@echo "Waiting for interop jobs to complete..."
-	kubectl wait --for=condition=complete --timeout=180s jobs -n aeron -l app.kubernetes.io/part-of=interop || \
-		{ kubectl get jobs -n aeron -l app.kubernetes.io/part-of=interop -o wide >&2; \
-		  echo "Interop jobs did not complete (timeout or failure)" >&2; exit 1; }
-	@echo "All interop tests passed!"

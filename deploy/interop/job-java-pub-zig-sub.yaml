@@ -4,7 +4,7 @@ metadata:
   name: interop-java-pub-zig-sub
   namespace: aeron
 spec:
-  backoffLimit: 2
+  backoffLimit: 0
   activeDeadlineSeconds: 120
   template:
     spec:
@@ -13,24 +13,35 @@ spec:
         - name: java-publisher
           image: java-aeron:latest
           imagePullPolicy: Never
-          command: ["/opt/aeron/test-publisher.sh"]
+          command: ["sh", "-c"]
+          args:
+            - |
+              mkdir -p /dev/shm/java
+              cp /mnt/apps/BasicPublisher.java .
+              javac -cp /opt/aeron/aeron-all.jar BasicPublisher.java
+              java -cp .:/opt/aeron/aeron-all.jar BasicPublisher
           env:
             - name: CHANNEL
-              value: "aeron:udp?endpoint=0.0.0.0:40124"
+              value: "aeron:udp?endpoint=127.0.0.1:40124"
             - name: STREAM_ID
               value: "1001"
-            - name: MESSAGE_COUNT
-              value: "1000"
-            - name: MESSAGE_LENGTH
-              value: "256"
+            - name: AERON_DIR
+              value: "/dev/shm/java"
           volumeMounts:
             - name: shm
               mountPath: /dev/shm
+            - name: apps
+              mountPath: /mnt/apps
+              readOnly: true
         - name: zig-subscriber
           image: harus-aeron-zig:latest
           imagePullPolicy: Never
-          command: ["/opt/aeron/aeron-driver"]
-          args: ["--subscribe", "--channel=aeron:udp?endpoint=localhost:40124", "--stream-id=1001", "--messages=1000"]
+          command: ["/bin/basic-subscriber-interop"]
+          env:
+            - name: AERON_DIR
+              value: "/dev/shm/zig"
+            - name: LISTEN_PORT
+              value: "40124"
           volumeMounts:
             - name: shm
               mountPath: /dev/shm
@@ -39,3 +50,6 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 256Mi
+        - name: apps
+          configMap:
+            name: java-interop-apps

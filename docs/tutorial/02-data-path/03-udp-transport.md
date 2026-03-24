@@ -1,164 +1,87 @@
-# 2.3 UDP Transport
+# Chapter 2.3: UDP Transport
 
-**Sources:** `src/transport/udp_channel.zig`, `src/transport/endpoint.zig`, `src/transport/poller.zig`
-**Concept:** Aeron URI parsing, UDP socket lifecycle, multicast group membership, poll multiplexing
-**Zig focus:** `std.posix` socket API, `std.net.Address`, `setsockopt`, `std.posix.poll`
+This chapter covers the network transport layer of Aeron. While Aeron is famous for its shared-memory IPC, its primary role is providing reliable messaging over unreliable UDP.
 
----
+## The Problem
 
-## Aeron URI Format
-
-Aeron identifies a channel by a URI of the form:
-
-```
-aeron:udp?endpoint=localhost:40123
-aeron:udp?endpoint=224.0.1.1:40456|interface=192.168.1.10
-aeron:ipc
-```
-
-The scheme is always `aeron:`. The media is `udp` or `ipc`. After `?`, parameters are `key=value` pairs delimited by `|` (not `&`). The `endpoint` key names the remote address for senders or the group address for multicast receivers. `interface` pins the local bind address.
-
-An address in the `224.0.0.0/4` range is multicast; `UdpChannel.parse` sets `is_multicast = true` automatically by inspecting the first octet.
+UDP is "fire and forget" — packets can be lost, reordered, or duplicated. Aeron needs a way to turn this chaotic stream into a reliable, ordered sequence of messages while maintaining the low-latency benefits of UDP.
 
 ---
 
-## UdpChannel
+## Zig Track: The `std.posix` Socket API
 
-`UdpChannel` is the parsed, validated representation of a URI. It owns a heap copy of the URI string and zero or more resolved `std.net.Address` values.
+In Zig, network programming is explicit and close to the OS. We don't use a high-level "Socket" class with hidden state; we use raw file descriptors and syscall wrappers.
+
+### Non-blocking Sockets
+
+Aeron's media driver never blocks on I/O. Every socket is opened with the `SOCK.NONBLOCK` flag.
 
 ```zig
-pub const UdpChannel = struct {
-    uri: []const u8,
-    endpoint: ?std.net.Address,
-    local_address: ?std.net.Address,
-    is_multicast: bool,
-    mtu: ?usize,
-    ttl: ?u8,
+// LESSON(transport/zig): SOCK_NONBLOCK avoids a separate fcntl() call.
+const sock = try std.posix.socket(
+    family,
+    std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK,
+    std.posix.IPPROTO.UDP,
+);
+```
+
+On Linux, this sets the flag atomically during socket creation. On macOS, Zig's `std.posix` helper transparently handles the `FIONBIO` ioctl if needed. When a non-blocking `recvfrom` has no data, it returns `error.WouldBlock`.
+
+### Multicast Group Join
+
+Receiving multicast requires telling the OS which group we want to join. This involves the `IP_ADD_MEMBERSHIP` socket option.
+
+```zig
+const mreq = IpMreq{
+    .imr_multiaddr = group.in.sa.addr,
+    .imr_interface = interface_addr.in.sa.addr,
 };
+try std.posix.setsockopt(self.socket, std.posix.IPPROTO.IP, IP_ADD_MEMBERSHIP, &std.mem.toBytes(mreq));
 ```
 
-`parse` takes an allocator and a URI string, splits on `|`, and resolves each `key=value` pair:
-
-```zig
-pub fn parse(allocator: std.mem.Allocator, uri: []const u8) !UdpChannel
-```
-
-The allocator is needed for the owned URI copy and for `std.net.getAddressList` when a hostname requires DNS resolution. Callers must call `channel.deinit(allocator)` when done.
-
-`isMulticast` detection happens inside `parseAddress`: if the resolved IPv4 address has a first octet in `[224, 239]`, `is_multicast` is set to `true`.
+Because these constants and structs vary by operating system, `harus-aeron-zig` defines them in `src/transport/endpoint.zig` to ensure cross-platform compatibility where `std.posix` might be missing them.
 
 ---
 
-## SendChannelEndpoint
+## Aeron Track: Handshakes and Flow Control
 
-`SendChannelEndpoint` wraps a single non-blocking DGRAM socket used for outbound frames.
+Aeron doesn't use TCP-style connections, but it still needs to establish state between a sender and a receiver.
 
-```zig
-pub const SendChannelEndpoint = struct {
-    socket: std.posix.socket_t,
+### The SETUP/STATUS Handshake
 
-    pub fn open(channel: *const UdpChannel) !SendChannelEndpoint
-    pub fn send(self: *SendChannelEndpoint, dest: std.net.Address, data: []const u8) !usize
-    pub fn close(self: *SendChannelEndpoint) void
-};
-```
+When a publication starts sending, it periodically broadcasts a **SETUP** frame. This frame contains the `session_id`, `initial_term_id`, and `term_length`.
 
-`open` calls `std.posix.socket` with `SOCK.DGRAM | SOCK.NONBLOCK` and optionally `bind`s to `channel.local_address`. The address family is inferred from `channel.endpoint.any.family` so both IPv4 and IPv6 channels are handled with the same code path.
+1. **Sender** sends SETUP until it receives a STATUS frame.
+2. **Receiver** sees the SETUP, allocates a local **Image** (including log buffers), and starts sending **STATUS** frames back.
+3. **STATUS** frames contain the `receiver_window_address` — this tells the sender how much data it is allowed to send before hitting back-pressure.
 
-`send` delegates to `std.posix.sendto`:
+### NAK Retransmit Flow
 
-```zig
-return std.posix.sendto(self.socket, data, 0, &dest.any, dest.getOsSockLen());
-```
+If the receiver detects a gap in the sequence numbers (term offsets), it doesn't immediately ask for a retransmit. It waits for a short duration (default 1ms) to allow for out-of-order packets to arrive.
 
-No connection state is maintained. Each call to `send` names the destination explicitly, matching Aeron's model where a publication may have multiple subscribers.
+If the gap persists, it sends a **NAK** (Negative Acknowledgement) frame. The sender, upon receiving a NAK, scans its log buffer and re-sends the missing range of data.
 
----
+### Unicast vs Multicast URIs
 
-## ReceiveChannelEndpoint
+Aeron URIs encode the transport configuration:
 
-`ReceiveChannelEndpoint` handles the inbound side, including optional multicast group membership.
+- **Unicast**: `aeron:udp?endpoint=192.168.1.10:40123`
+- **Multicast**: `aeron:udp?endpoint=224.0.1.1:40456|interface=192.168.1.20`
 
-```zig
-pub const ReceiveChannelEndpoint = struct {
-    socket: std.posix.socket_t,
-    bound_address: std.net.Address,
-
-    pub fn open(channel: *const UdpChannel) !ReceiveChannelEndpoint
-    pub fn bind(self: *ReceiveChannelEndpoint) !void
-    pub fn joinMulticastGroup(self: *ReceiveChannelEndpoint, group: std.net.Address, interface_addr: std.net.Address) !void
-    pub fn recv(self: *ReceiveChannelEndpoint, buf: []u8, src: *std.net.Address) !usize
-    pub fn close(self: *ReceiveChannelEndpoint) void
-};
-```
-
-For multicast channels, `open` sets `SO_REUSEPORT` before binding so that multiple processes can subscribe to the same group and port. Binding uses `0.0.0.0:port` rather than the multicast address itself, which is the portable approach across Linux and macOS.
-
-`joinMulticastGroup` issues `IP_ADD_MEMBERSHIP` (IPv4) or `IPV6_JOIN_GROUP` (IPv6) via `setsockopt`. These constants are defined per-OS in the file because `std.posix` does not expose them on all targets:
-
-```zig
-const IP_ADD_MEMBERSHIP: u32 = switch (builtin.os.tag) {
-    .macos, .ios, .watchos, .tvos => 12,
-    .linux => 35,
-    else => 12,
-};
-```
-
-`recv` calls `std.posix.recvfrom` and fills the caller-provided `src` address:
-
-```zig
-pub fn recv(self: *ReceiveChannelEndpoint, buf: []u8, src: *std.net.Address) !usize {
-    var addrlen: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.storage);
-    return std.posix.recvfrom(self.socket, buf, 0, &src.any, &addrlen);
-}
-```
-
-Both `send` and `recv` return `error.WouldBlock` (surfaced as `POSIX error EAGAIN`) when the socket has no data, because both sockets are opened with `SOCK.NONBLOCK`. The poller drives the duty cycle.
+The driver automatically detects multicast by checking if the endpoint address is in the `224.0.0.0/4` range. For multicast, the `interface` parameter is critical — it tells the OS which physical network card to use for the group join.
 
 ---
 
-## Poller
+## Implementation Walkthrough
 
-`Poller` multiplexes reads across many `ReceiveChannelEndpoint` instances using `std.posix.poll`.
+- **`src/transport/uri.zig`**: Parses the `aeron:udp?...` string into key-value pairs.
+- **`src/transport/udp_channel.zig`**: Resolves hostnames and determines if the channel is multicast.
+- **`src/transport/endpoint.zig`**: Manages the lifecycle of the `std.posix` socket.
+- **`src/transport/poller.zig`**: Uses `std.posix.poll` to multiplex many receive endpoints in a single duty cycle.
 
-```zig
-pub const Poller = struct {
-    fds: std.ArrayList(std.posix.pollfd),
-    endpoints: std.ArrayList(*ReceiveChannelEndpoint),
-    allocator: std.mem.Allocator,
+## Exercise
 
-    pub fn init(allocator: std.mem.Allocator) Poller
-    pub fn add(self: *Poller, fd: std.posix.fd_t, endpoint: *ReceiveChannelEndpoint) !void
-    pub fn remove(self: *Poller, fd: std.posix.fd_t) void
-    pub fn poll(self: *Poller, timeout_ms: i32) ![]const std.posix.pollfd
-    pub fn deinit(self: *Poller) void
-};
-```
+1. Open `tutorial/transport/udp_channel.zig` and implement the `isMulticastAddress` helper.
+2. Verify with `make tutorial-check`.
 
-`add` appends a `pollfd` entry with `events = POLL.IN` alongside a pointer to the owning endpoint. The two `ArrayList`s are kept in sync: index `i` in `fds` corresponds to index `i` in `endpoints`.
-
-`poll` calls `std.posix.poll` on the raw slice, then returns only the entries where `revents` includes `POLL.IN`. The driver's receive duty-cycle iterates over the returned entries and calls `endpoint.recv` on each.
-
-`remove` searches `fds` for the matching `fd` and swaps the tail element into the vacated slot, keeping both lists dense without reallocation.
-
----
-
-## std.posix Socket API Summary
-
-| Operation | Zig call |
-|-----------|---------|
-| Create socket | `std.posix.socket(family, type, protocol)` |
-| Bind to address | `std.posix.bind(sock, &addr.any, addr.getOsSockLen())` |
-| Set socket option | `std.posix.setsockopt(sock, level, optname, &value_bytes)` |
-| Send datagram | `std.posix.sendto(sock, buf, flags, &dest.any, dest_len)` |
-| Receive datagram | `std.posix.recvfrom(sock, buf, flags, &src.any, &src_len)` |
-| Poll for readability | `std.posix.poll(fds_slice, timeout_ms)` |
-| Close | `std.posix.close(sock)` |
-
-All calls return Zig error unions; the driver never ignores a send or receive error.
-
----
-
-## Next Step
-
-With the data path complete — appender, reader, and transport — proceed to **Part 3: The Driver** to see how the `DriverConductor` orchestrates publications, subscriptions, and the flow of frames between them.
+Further reading: [Aeron UDP Protocol](https://github.com/aeron-io/aeron/wiki/Protocol-Specification)

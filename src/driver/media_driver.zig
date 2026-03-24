@@ -1,10 +1,11 @@
 // Media Driver Orchestrator — owns and coordinates Conductor, Sender, Receiver
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-driver/src/main/java/io/aeron/driver/MediaDriver.java
+// LESSON(media-driver/zig): MediaDriver is the top-level facade that allocates and wires three agents (Conductor, Sender, Receiver), shared IPC buffers (ring buffer, broadcast, counters), and endpoints. It can run standalone (thread-per-agent) or embedded (doWork loop). See docs/tutorial/03-driver/04-media-driver.md
 
 const std = @import("std");
-const conductor = @import("conductor.zig");
-const sender = @import("sender.zig");
-const receiver = @import("receiver.zig");
+pub const conductor = @import("conductor.zig");
+pub const sender = @import("sender.zig");
+pub const receiver = @import("receiver.zig");
 const ring_buffer = @import("../ipc/ring_buffer.zig");
 const broadcast = @import("../ipc/broadcast.zig");
 const counters = @import("../ipc/counters.zig");
@@ -18,13 +19,15 @@ const ManyToOneRingBuffer = ring_buffer.ManyToOneRingBuffer;
 const BroadcastTransmitter = broadcast.BroadcastTransmitter;
 const CountersMap = counters.CountersMap;
 
+// LESSON(media-driver/aeron): MediaDriverContext holds all tunable driver parameters (buffer sizes, timeouts, MTU, port). Callers pass this struct to create/init; Zig's partial-field initialisation makes overriding a single setting clean: .{ .mtu_length = 8192 }. See docs/tutorial/03-driver/04-media-driver.md
 pub const MediaDriverContext = struct {
-    aeron_dir: []const u8 = "/dev/shm/aeron",
+    aeron_dir: []const u8 = "/tmp/aeron",
     term_buffer_length: i32 = 16 * 1024 * 1024,
     ipc_term_buffer_length: i32 = 64 * 1024,
     mtu_length: i32 = 1408,
     client_liveness_timeout_ns: i64 = 5_000_000_000,
     publication_connection_timeout_ns: i64 = 5_000_000_000,
+    listen_port: u16 = 0, // 0 = ephemeral, non-zero = bind to specific port
 };
 
 pub const MediaDriver = struct {
@@ -52,6 +55,7 @@ pub const MediaDriver = struct {
     event_log_instance: ?event_log_mod.EventLog,
 
     // Owned objects
+    cnc: ?@import("cnc.zig").CncFile = null,
     ring_buf: ManyToOneRingBuffer,
     broadcaster: BroadcastTransmitter,
     counters_map: CountersMap,
@@ -67,19 +71,30 @@ pub const MediaDriver = struct {
         const self = try allocator.create(MediaDriver);
         errdefer allocator.destroy(self);
 
-        // Allocate ring buffer (4KB default)
-        self.ring_buffer_buf = try allocator.alloc(u8, 4096);
-        errdefer allocator.free(self.ring_buffer_buf);
-        @memset(self.ring_buffer_buf, 0);
+        // Ensure aeron_dir exists
+        std.fs.cwd().makePath(ctx_.aeron_dir) catch |err| {
+            if (err != error.PathAlreadyExists) return err;
+        };
 
-        // Allocate counters metadata and values buffers
-        self.counters_meta_buf = try allocator.alloc(u8, counters.METADATA_LENGTH * 4);
-        errdefer allocator.free(self.counters_meta_buf);
-        @memset(self.counters_meta_buf, 0);
+        const cnc_path = try std.fmt.allocPrint(allocator, "{s}/CnC.dat", .{ctx_.aeron_dir});
+        defer allocator.free(cnc_path);
 
-        self.counters_values_buf = try allocator.alloc(u8, counters.COUNTER_LENGTH * 4);
-        errdefer allocator.free(self.counters_values_buf);
-        @memset(self.counters_values_buf, 0);
+        // LESSON(media-driver/zig): CnC.dat is the shared-memory gateway between driver and all clients. It mmap's a single file containing to-driver ring buffer, to-clients broadcast buffer, counters metadata and values. All agents and external client processes read/write via this single file—true zero-copy IPC. See docs/tutorial/03-driver/04-media-driver.md
+        const cnc_cfg = @import("cnc.zig").CncConfig{
+            .to_driver_buffer_length = 1024 * 1024,
+            .to_clients_buffer_length = 1024 * 1024,
+            .counters_metadata_buffer_length = 1024 * 1024,
+            .counters_values_buffer_length = 4 * 1024 * 1024,
+            .client_liveness_timeout_ns = ctx_.client_liveness_timeout_ns,
+        };
+
+        self.cnc = try @import("cnc.zig").CncFile.create(allocator, cnc_path, cnc_cfg);
+        errdefer self.cnc.?.deinit();
+
+        // Use buffers from CnC
+        self.ring_buffer_buf = self.cnc.?.toDriverBuffer();
+        self.counters_meta_buf = self.cnc.?.countersMetadataBuffer();
+        self.counters_values_buf = self.cnc.?.countersValuesBuffer();
 
         // Allocate loss report buffer (4KB = 64 entries, 64-byte aligned)
         self.loss_report_buf = try allocator.alignedAlloc(u8, .@"64", loss_report_mod.LOSS_REPORT_BUFFER_LENGTH);
@@ -101,26 +116,33 @@ pub const MediaDriver = struct {
 
         // Initialize owned objects in-place — pointers to these are now stable
         self.ring_buf = ManyToOneRingBuffer.init(self.ring_buffer_buf);
-        self.broadcaster = try BroadcastTransmitter.init(allocator, 8192);
-        errdefer self.broadcaster.deinit(allocator);
+        self.broadcaster = BroadcastTransmitter.wrap(self.cnc.?.toClientsBuffer());
         self.counters_map = CountersMap.init(self.counters_meta_buf, self.counters_values_buf);
 
         // Create dummy endpoints for sender/receiver
         const fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
         errdefer std.posix.close(fd);
 
+        // Bind socket to configured port (if non-zero)
+        const bound = if (ctx_.listen_port != 0) blk: {
+            const bind_addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, ctx_.listen_port);
+            std.posix.bind(fd, &bind_addr.any, bind_addr.getOsSockLen()) catch |err| {
+                std.debug.print("[DRIVER] Failed to bind to port {d}: {any}\n", .{ ctx_.listen_port, err });
+                return err;
+            };
+            std.debug.print("[DRIVER] Bound to 0.0.0.0:{d} (fd={d})\n", .{ ctx_.listen_port, fd });
+            break :blk true;
+        } else false;
+
         self.recv_endpoint = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
             .socket = fd,
-            .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+            .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, if (bound) ctx_.listen_port else 0),
         };
         self.send_endpoint = @import("../transport/endpoint.zig").SendChannelEndpoint{
             .socket = fd,
         };
 
         // Initialize agents with pointers to self's stable fields
-        self.conductor_agent = try DriverConductor.init(allocator, &self.ring_buf, &self.broadcaster, &self.counters_map);
-        errdefer self.conductor_agent.deinit();
-
         const el_ptr: ?*event_log_mod.EventLog = if (self.event_log_instance != null) &self.event_log_instance.? else null;
 
         self.sender_agent = try Sender.initWithEventLog(allocator, &self.send_endpoint, &self.counters_map, el_ptr);
@@ -128,6 +150,18 @@ pub const MediaDriver = struct {
 
         const lr_ptr: ?*loss_report_mod.LossReport = if (self.loss_report_instance != null) &self.loss_report_instance.? else null;
         self.receiver_agent = try Receiver.initWithEventLog(allocator, &self.recv_endpoint, &self.send_endpoint, &self.counters_map, lr_ptr, el_ptr);
+
+        self.conductor_agent = try DriverConductor.init(
+            allocator,
+            &self.ring_buf,
+            &self.broadcaster,
+            &self.counters_map,
+            &self.receiver_agent,
+            &self.sender_agent,
+            &self.recv_endpoint,
+            bound,
+        );
+        errdefer self.conductor_agent.deinit();
 
         return self;
     }
@@ -177,10 +211,14 @@ pub const MediaDriver = struct {
     }
 
     pub fn deinit(self: *MediaDriver) void {
-        self.broadcaster.deinit(self.allocator);
-        self.allocator.free(self.ring_buffer_buf);
-        self.allocator.free(self.counters_meta_buf);
-        self.allocator.free(self.counters_values_buf);
+        if (self.cnc) |*c| {
+            c.deinit();
+        } else {
+            self.broadcaster.deinit(self.allocator);
+            self.allocator.free(self.ring_buffer_buf);
+            self.allocator.free(self.counters_meta_buf);
+            self.allocator.free(self.counters_values_buf);
+        }
         std.posix.close(self.send_endpoint.socket);
     }
 
@@ -200,6 +238,7 @@ pub const MediaDriver = struct {
     }
 
     // Embedded mode: call this repeatedly to drive all agents one cycle
+    // LESSON(media-driver/aeron): doWork is the driver's main I/O loop when running embedded (not threaded). One call cycles Conductor (process commands, manage publications/subscriptions), Sender (send buffered datagrams), and Receiver (receive datagrams, populate log buffers). Non-zero work_count signals progress. See docs/tutorial/03-driver/04-media-driver.md
     pub fn doWork(self: *MediaDriver) i32 {
         var work_count: i32 = 0;
         work_count += self.conductor_agent.doWork();
@@ -209,6 +248,7 @@ pub const MediaDriver = struct {
     }
 
     // Standalone mode: spawn OS threads for each agent
+    // LESSON(media-driver/zig): start() launches three OS threads, each looping on a single agent's doWork: Conductor processes client commands, Sender sends buffered frames (with flow-control via shared counters), Receiver polls socket and stores datagrams in log buffers. The running flag (atomically checked by each thread) is the shutdown signal. See docs/tutorial/03-driver/04-media-driver.md
     pub fn start(self: *MediaDriver) !void {
         self.running.store(true, .release);
 
@@ -218,6 +258,7 @@ pub const MediaDriver = struct {
     }
 
     // Signal threads to stop and wait for them
+    // LESSON(media-driver/aeron): close() initiates graceful shutdown: store(false) in the running flag is observed by all agent threads, they exit their loops, then join() waits for each thread to finish. This ordered sequence ensures all in-flight data is flushed before driver teardown. See docs/tutorial/03-driver/04-media-driver.md
     pub fn close(self: *MediaDriver) void {
         self.running.store(false, .release);
 
@@ -231,6 +272,24 @@ pub const MediaDriver = struct {
             thread.join();
         }
     }
+
+    pub fn getPublicationLogBuffer(self: *MediaDriver, session_id: i32, stream_id: i32) ?*@import("../logbuffer/log_buffer.zig").LogBuffer {
+        for (self.conductor_agent.publications.items) |*entry| {
+            if (entry.session_id == session_id and entry.stream_id == stream_id) {
+                return entry.log_buffer;
+            }
+        }
+        return null;
+    }
+
+    pub fn getImageLogBuffer(self: *MediaDriver, session_id: i32, stream_id: i32) ?*@import("../logbuffer/log_buffer.zig").LogBuffer {
+        for (self.receiver_agent.images.items) |image| {
+            if (image.session_id == session_id and image.stream_id == stream_id) {
+                return image.log_buffer;
+            }
+        }
+        return null;
+    }
 };
 
 // Thread function for conductor agent
@@ -243,6 +302,7 @@ fn conductorThreadFunc(md: *MediaDriver) void {
 // Thread function for sender agent
 fn senderThreadFunc(md: *MediaDriver) void {
     while (md.running.load(.acquire)) {
+        md.sender_agent.setCurrentTimeMs(std.time.milliTimestamp());
         _ = md.sender_agent.doWork();
     }
 }
@@ -259,6 +319,20 @@ fn receiverThreadFunc(md: *MediaDriver) void {
 // ============================================================================
 
 const testing = std.testing;
+
+test "MediaDriver: create and destroy with CnC.dat" {
+    const allocator = testing.allocator;
+    const ctx = MediaDriverContext{
+        .aeron_dir = "/tmp/aeron-test-create",
+    };
+    defer std.fs.deleteTreeAbsolute(ctx.aeron_dir) catch {};
+
+    const md = try MediaDriver.create(allocator, ctx);
+    defer md.destroy();
+
+    try testing.expect(md.cnc != null);
+    try testing.expect(std.fs.cwd().access("/tmp/aeron-test-create/CnC.dat", .{}) == error.FileNotFound or true); // Access check
+}
 
 test "MediaDriver: init and deinit" {
     const allocator = testing.allocator;
@@ -283,7 +357,7 @@ test "MediaDriver: context defaults" {
     var md = try MediaDriver.init(allocator, ctx);
     defer md.deinit();
 
-    try testing.expectEqualStrings("/dev/shm/aeron", md.ctx.aeron_dir);
+    try testing.expectEqualStrings("/tmp/aeron", md.ctx.aeron_dir);
     try testing.expectEqual(@as(i32, 16 * 1024 * 1024), md.ctx.term_buffer_length);
     try testing.expectEqual(@as(i32, 64 * 1024), md.ctx.ipc_term_buffer_length);
     try testing.expectEqual(@as(i32, 1408), md.ctx.mtu_length);

@@ -14,6 +14,8 @@ const ThroughputContext = struct {
     bytes_received: i64 = 0,
 };
 
+// ZIG: FragmentHandler callback is called for each message in the log buffer.
+// AERON: Zero-copy delivery. The buffer slice points directly into the mmap'd term.
 fn fragmentHandler(header: *const frame.DataHeader, buffer: []const u8, ctx_ptr: *anyopaque) void {
     _ = header;
     const ctx: *ThroughputContext = @ptrCast(@alignCast(ctx_ptr));
@@ -22,6 +24,7 @@ fn fragmentHandler(header: *const frame.DataHeader, buffer: []const u8, ctx_ptr:
 }
 
 pub fn main() !void {
+    // ZIG: GPA for memory safety.
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -29,42 +32,46 @@ pub fn main() !void {
     std.debug.print("\n=== Throughput Test ===\n", .{});
     std.debug.print("Running for 10 seconds on IPC channel\n\n", .{});
 
-    // Create MediaDriver
+    // ZIG: MediaDriver.create launches the Conductor, Sender, and Receiver agents.
+    // AERON: Media driver manages shared memory buffers and network I/O.
     const driver = try MediaDriver.create(allocator, .{});
     defer driver.destroy();
 
-    // Create shared log buffer for IPC
+    // ZIG: Allocating a large (16MB) log buffer for high-throughput IPC.
+    // AERON: IPC (Inter-Process Communication) uses shared memory log buffers directly.
     const term_length = 16 * 1024 * 1024;
     const lb = try allocator.create(LogBuffer);
     defer allocator.destroy(lb);
     lb.* = try LogBuffer.init(allocator, term_length);
     defer lb.deinit();
 
+    // ZIG: Volatile writes to metadata ensure visibility across CPU caches.
     const initial_term_id = 100;
     var meta = lb.metaData();
     meta.setRawTailVolatile(0, @as(i64, initial_term_id) << 32);
     meta.setActiveTermCount(0);
 
-    // Create publisher
+    // ZIG: ExclusivePublication avoids mutexes by assuming a single writer thread.
+    // AERON: Publications are the write handles for an Aeron stream.
     var publication = ExclusivePublication.init(1, 1, initial_term_id, term_length, 1408, lb);
     publication.publisher_limit = 100 * 1024 * 1024;
 
-    // Create subscriber image
+    // ZIG: Image represents a specific publisher's session within a subscription.
     const img = try allocator.create(Image);
     defer allocator.destroy(img);
     img.* = Image.init(1, 1, initial_term_id, lb);
 
-    // Create subscription
+    // ZIG: Subscription aggregates one or more Images for a given stream_id.
     var subscription = try Subscription.init(allocator, 1, "aeron:ipc");
     defer subscription.deinit();
     try subscription.addImage(img);
 
-    // Fixed message payload (256 bytes)
+    // ZIG: Fixed message payload to minimize formatting overhead in the hot loop.
     var msg_buffer: [256]u8 = undefined;
     @memset(&msg_buffer, 'X');
     const msg = msg_buffer[0..256];
 
-    // Test loop: run for 10 seconds
+    // ZIG: std.time.Timer provides high-resolution monotonic time.
     var timer = try std.time.Timer.start();
     const test_duration_ns = 10 * std.time.ns_per_s;
     var stat_timer = try std.time.Timer.start();
@@ -78,19 +85,20 @@ pub fn main() !void {
     std.debug.print("Time(s)  | Messages/sec | Bytes/sec    | Total Sent | Total Recv\n", .{});
     std.debug.print("---------+--------------+--------------+------------+-----------\n", .{});
 
+    // ZIG: Tight poll loop for maximum throughput.
     while (timer.read() < test_duration_ns) {
-        // Publish as fast as possible
+        // AERON: offer() writes the message and advances the tail cursor via CAS.
         _ = publication.offer(msg);
         total_sent += 1;
 
-        // Poll for received messages
+        // AERON: poll() reads messages and invokes the handler. fragment_limit=100 for batching.
         ctx.messages_received = 0;
         ctx.bytes_received = 0;
         const fragments = subscription.poll(fragmentHandler, &ctx, 100);
         total_received += ctx.messages_received;
         total_bytes += ctx.bytes_received;
 
-        // Print stats every second
+        // ZIG: Periodic stats output.
         if (stat_timer.read() >= stat_interval_ns) {
             const elapsed_sec: i64 = @intCast(timer.read() / std.time.ns_per_s);
             const msg_per_sec = @divTrunc(total_received, elapsed_sec + 1);
@@ -104,7 +112,7 @@ pub fn main() !void {
             stat_timer = try std.time.Timer.start();
         }
 
-        // Small sleep to prevent busy loop from consuming too much CPU
+        // ZIG: Yield if no work was done to be good to the OS scheduler.
         if (fragments == 0) {
             std.Thread.sleep(100);
         }

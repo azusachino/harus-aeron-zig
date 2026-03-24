@@ -36,3 +36,37 @@ test "round-trip 1 message" {
 
     try testing.expectEqual(@as(i32, 1), received_count);
 }
+
+test "subscriber receives data after SETUP handshake" {
+    const allocator = std.testing.allocator;
+    var h = try harness.TestHarness.init(allocator);
+    defer h.deinit();
+
+    var sub = try h.createSubscription(1001, "aeron:ipc");
+    defer sub.deinit();
+
+    // Register subscription in driver conductor so it can match the SETUP frame
+    try h.driver.conductor_agent.subscriptions.append(allocator, .{
+        .registration_id = 123,
+        .stream_id = 1001,
+        .channel = try allocator.dupe(u8, "aeron:ipc"),
+    });
+
+    // Inject a synthetic SETUP signal directly into the receiver queue
+    const aeron_pkg = @import("aeron");
+    try h.injectSetupFrame(aeron_pkg.driver.receiver.SetupSignal{
+        .session_id = 42,
+        .stream_id = 1001,
+        .initial_term_id = 0,
+        .active_term_id = 0,
+        .term_length = 64 * 1024,
+        .mtu = 1408,
+        .source_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
+    });
+
+    // Allow conductor duty cycle to process the signal
+    h.doConductorWork(10);
+
+    // Receiver should now have an Image
+    try std.testing.expectEqual(@as(usize, 1), h.driver.receiver_agent.images.items.len);
+}

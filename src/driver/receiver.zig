@@ -20,6 +20,7 @@ pub const Image = struct {
     subscriber_position: counters.CounterHandle, // where subscriber has consumed to
     rebuild_position: i64, // tracks gap filling progress
     source_address: std.net.Address,
+    nak_state: NakState,
 
     pub fn init(
         session_id: i32,
@@ -43,6 +44,7 @@ pub const Image = struct {
             .subscriber_position = subscriber_position,
             .rebuild_position = 0,
             .source_address = source_address,
+            .nak_state = NakState.init(stream_id),
         };
     }
 
@@ -53,6 +55,7 @@ pub const Image = struct {
     // Write an incoming DATA frame into the log buffer at the correct partition+offset
     // Returns true if written, false if out-of-bounds or duplicate
     pub fn insertFrame(self: *Image, counters_map: *counters.CountersMap, header: *const protocol.DataHeader, payload: []const u8) bool {
+        // LESSON(receiver/zig): Write header then payload to term buffer, then write frame_length last (atomic commit signal). See docs/tutorial/03-driver/02-receiver.md
         // Compute active partition for header.term_id
         const term_count = header.term_id - self.initial_term_id;
         const partition = @as(usize, @intCast(@mod(term_count, 3)));
@@ -99,19 +102,83 @@ pub const Image = struct {
 
     // Returns the term_offset of the gap start (for NAK generation)
     pub fn gapTermOffset(self: *const Image) i32 {
-        return @as(i32, @intCast(self.rebuild_position % @as(i64, @intCast(self.term_length))));
+        return @as(i32, @intCast(@mod(self.rebuild_position, @as(i64, @intCast(self.term_length)))));
+    }
+};
+
+pub const SetupSignal = struct {
+    session_id: i32,
+    stream_id: i32,
+    initial_term_id: i32,
+    active_term_id: i32,
+    term_length: i32,
+    mtu: i32,
+    source_address: std.net.Address,
+};
+
+const NAK_DELAY_NS: i64 = 1_000_000; // 1ms
+
+pub const GapRange = struct { offset: i32, length: i32 };
+
+pub const NakState = struct {
+    stream_id: i32,
+    gap_list: [16]GapRange = undefined,
+    gap_list_len: usize = 0,
+    first_gap_ns: i64 = 0,
+
+    pub fn init(stream_id: i32) NakState {
+        return .{ .stream_id = stream_id, .gap_list_len = 0 };
+    }
+
+    /// For tests: inject a known first_gap_ns instead of using the real clock.
+    pub fn initWithTime(stream_id: i32, first_gap_ns: i64) NakState {
+        return .{ .stream_id = stream_id, .first_gap_ns = first_gap_ns, .gap_list_len = 0 };
+    }
+
+    pub fn recordGap(self: *NakState, offset: i32, length: i32) void {
+        const end = offset + length;
+        // Try to merge with existing gap
+        var i: usize = 0;
+        while (i < self.gap_list_len) : (i += 1) {
+            var g = &self.gap_list[i];
+            if (offset <= g.offset + g.length and end >= g.offset) {
+                g.offset = @min(g.offset, offset);
+                g.length = @max(g.offset + g.length, end) - g.offset;
+                return;
+            }
+        }
+        if (self.gap_list_len == 0) self.first_gap_ns = @intCast(@as(i128, std.time.nanoTimestamp()));
+        if (self.gap_list_len < 16) {
+            self.gap_list[self.gap_list_len] = .{ .offset = offset, .length = length };
+            self.gap_list_len += 1;
+        }
+    }
+
+    pub fn shouldSend(self: *const NakState, now_ns: i64) bool {
+        return self.gap_list_len > 0 and (now_ns - self.first_gap_ns) >= NAK_DELAY_NS;
+    }
+
+    pub fn gaps(self: *const NakState) []const GapRange {
+        return self.gap_list[0..self.gap_list_len];
+    }
+
+    pub fn clear(self: *NakState) void {
+        self.gap_list_len = 0;
+        self.first_gap_ns = 0;
     }
 };
 
 pub const Receiver = struct {
-    images: std.ArrayList(*Image),
+    images: std.ArrayListUnmanaged(*Image),
+    pending_setups: std.ArrayListUnmanaged(SetupSignal) = .{},
     recv_endpoint: *transport.ReceiveChannelEndpoint,
     send_endpoint: *transport.SendChannelEndpoint,
     counters_map: *counters.CountersMap,
     loss_report_instance: ?*loss_report.LossReport,
     event_log: ?*event_log_mod.EventLog,
     allocator: std.mem.Allocator,
-    recv_buf: [4096]u8,
+    recv_buf: [4096]u8 align(8),
+    mutex: std.Thread.Mutex = .{},
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -132,7 +199,8 @@ pub const Receiver = struct {
         el: ?*event_log_mod.EventLog,
     ) !Receiver {
         return .{
-            .images = std.ArrayList(*Image){},
+            .images = .{},
+            .pending_setups = .{},
             .recv_endpoint = recv_ep,
             .send_endpoint = send_ep,
             .counters_map = counters_map_,
@@ -140,21 +208,39 @@ pub const Receiver = struct {
             .event_log = el,
             .allocator = allocator,
             .recv_buf = undefined,
+            .mutex = .{},
         };
     }
 
     pub fn deinit(self: *Receiver) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        for (self.images.items) |image| {
+            image.log_buffer.deinit();
+            self.allocator.destroy(image.log_buffer);
+            self.allocator.destroy(image);
+        }
         self.images.deinit(self.allocator);
+        self.pending_setups.deinit(self.allocator);
+    }
+
+    pub fn drainPendingSetups(self: *Receiver) []SetupSignal {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const slice = self.pending_setups.toOwnedSlice(self.allocator) catch return &.{};
+        return slice;
     }
 
     // Single duty cycle: recv one frame, dispatch, return work count (0 or 1)
     pub fn doWork(self: *Receiver) i32 {
+        // LESSON(receiver/zig): Non-blocking UDP receive loop—read up to 4096 bytes, parse frame type, dispatch. See docs/tutorial/03-driver/02-receiver.md
         // 1. Call recv_endpoint.recv(&recv_buf, &src_addr)
         var src_addr: std.net.Address = undefined;
         const bytes_read = self.recv_endpoint.recv(&self.recv_buf, &src_addr) catch |err| {
             if (err == error.WouldBlock) {
                 return 0;
             }
+            std.debug.print("[RECEIVER] recv error: {any}\n", .{err});
             return 0;
         };
 
@@ -162,21 +248,34 @@ pub const Receiver = struct {
             return 0;
         }
 
+        std.debug.print("[RECEIVER] Received {d} bytes (fd={d})\n", .{ bytes_read, self.recv_endpoint.socket });
+
         // 2. Read frame type from buf[6..8] as little-endian u16
         if (bytes_read < 8) {
+            std.debug.print("[RECEIVER] Packet too small: {d} bytes\n", .{bytes_read});
             return 0;
         }
 
         const frame_type_raw = std.mem.readInt(u16, self.recv_buf[6..8], .little);
+        std.debug.print("[RECEIVER] Hex: {X:0>2} {X:0>2} {X:0>2} {X:0>2} | {X:0>2} {X:0>2} | {X:0>2} {X:0>2} | {X:0>2} {X:0>2} {X:0>2} {X:0>2}\n", .{
+            self.recv_buf[0], self.recv_buf[1], self.recv_buf[2],  self.recv_buf[3],
+            self.recv_buf[4], self.recv_buf[5], self.recv_buf[6],  self.recv_buf[7],
+            self.recv_buf[8], self.recv_buf[9], self.recv_buf[10], self.recv_buf[11],
+        });
 
         // 3. Dispatch based on frame type
         if (frame_type_raw == @intFromEnum(protocol.FrameType.data)) {
-            // FrameType.data (0x01)
-            if (bytes_read < protocol.DataHeader.LENGTH) {
-                return 0;
+            // LESSON(receiver/aeron): DATA frame insertion into Image log buffer—detects gaps and records loss observations. See docs/tutorial/03-driver/02-receiver.md
+            const header = @as(*const protocol.DataHeader, @ptrCast(@alignCast(&self.recv_buf[0])));
+            // std.debug.print("[RECEIVER] DATA frame: session={d} stream={d} len={d}\n", .{ header.session_id, header.stream_id, header.frame_length });
+
+            if (header.frame_length < protocol.DataHeader.LENGTH) {
+                std.debug.print("[RECEIVER] Ignoring invalid DATA frame_length={d}\n", .{header.frame_length});
+                return 1;
             }
 
-            const header = @as(*const protocol.DataHeader, @ptrCast(@alignCast(&self.recv_buf[0])));
+            self.mutex.lock();
+            defer self.mutex.unlock();
 
             // Find image by (session_id, stream_id)
             for (self.images.items) |image| {
@@ -199,6 +298,11 @@ pub const Receiver = struct {
 
                         // Check for gap and record loss observation
                         if (image.hasGap(self.counters_map)) {
+                            const hwm = self.counters_map.get(image.receiver_hwm.counter_id);
+                            const gap_len = @as(i32, @intCast(hwm - image.rebuild_position));
+                            const gap_off = @as(i32, @intCast(@mod(image.rebuild_position, @as(i64, @intCast(image.term_length)))));
+                            image.nak_state.recordGap(gap_off, gap_len);
+
                             if (self.loss_report_instance) |lr| {
                                 const now: i64 = @intCast(@as(i128, std.time.nanoTimestamp()));
                                 lr.recordObservation(
@@ -209,6 +313,12 @@ pub const Receiver = struct {
                                     "aeron:udp",
                                 );
                             }
+                        }
+
+                        const now = @as(i64, @intCast(@as(i128, std.time.nanoTimestamp())));
+                        if (image.nak_state.shouldSend(now)) {
+                            self.sendNak(image) catch {};
+                            image.nak_state.clear();
                         }
 
                         // Send status message
@@ -222,8 +332,26 @@ pub const Receiver = struct {
             // Unknown session/stream — log/ignore (conductor handles creation)
             return 1;
         } else if (frame_type_raw == @intFromEnum(protocol.FrameType.setup)) {
-            // FrameType.setup (0x03)
-            // No auto-create (conductor handles that) — just log/ignore unknown sessions
+            // LESSON(receiver/aeron): SETUP frame handshake—queue for conductor to attach Image to log buffer. See docs/tutorial/03-driver/02-receiver.md
+            // FrameType.setup
+            if (bytes_read < protocol.SetupHeader.LENGTH) {
+                return 1;
+            }
+            const setup = @as(*const protocol.SetupHeader, @ptrCast(@alignCast(&self.recv_buf[0])));
+            std.debug.print("[RECEIVER] SETUP frame: session={d} stream={d} term_length={d}\n", .{ setup.session_id, setup.stream_id, setup.term_length });
+
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            self.pending_setups.append(self.allocator, .{
+                .session_id = setup.session_id,
+                .stream_id = setup.stream_id,
+                .initial_term_id = setup.initial_term_id,
+                .active_term_id = setup.active_term_id,
+                .term_length = setup.term_length,
+                .mtu = setup.mtu,
+                .source_address = src_addr,
+            }) catch return 1;
             return 1;
         } else if (frame_type_raw == @intFromEnum(protocol.FrameType.nak)) {
             // FrameType.nak (0x05)
@@ -236,10 +364,23 @@ pub const Receiver = struct {
     }
 
     pub fn onAddSubscription(self: *Receiver, image: *Image) !void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         try self.images.append(self.allocator, image);
     }
 
+    pub fn hasImage(self: *Receiver, session_id: i32, stream_id: i32) bool {
+        for (self.images.items) |image| {
+            if (image.session_id == session_id and image.stream_id == stream_id) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     pub fn onRemoveSubscription(self: *Receiver, session_id: i32, stream_id: i32) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
         var i: usize = 0;
         while (i < self.images.items.len) {
             if (self.images.items[i].session_id == session_id and self.images.items[i].stream_id == stream_id) {
@@ -250,26 +391,29 @@ pub const Receiver = struct {
         }
     }
 
-    // Send a NAK frame back to source_address for the given image's gap
+    // Send a NAK frame back to source_address for the given image's gaps
     pub fn sendNak(self: *Receiver, image: *Image) !void {
-        var nak_header: protocol.NakHeader = undefined;
-        nak_header.frame_length = protocol.NakHeader.LENGTH;
-        nak_header.version = protocol.VERSION;
-        nak_header.flags = 0;
-        nak_header.type = @intFromEnum(protocol.FrameType.nak);
-        nak_header.session_id = image.session_id;
-        nak_header.stream_id = image.stream_id;
-        nak_header.term_id = image.initial_term_id + @as(i32, @intCast(image.rebuild_position / @as(i64, @intCast(image.term_length))));
-        nak_header.term_offset = image.gapTermOffset();
-        nak_header.length = 4096; // Request a chunk
+        // LESSON(receiver/aeron): NAK generation coalesces gaps then sends one NAK per gap after 1ms delay. See docs/tutorial/03-driver/02-receiver.md
+        for (image.nak_state.gaps()) |gap| {
+            var nak_header: protocol.NakHeader = undefined;
+            nak_header.frame_length = protocol.NakHeader.LENGTH;
+            nak_header.version = protocol.VERSION;
+            nak_header.flags = 0;
+            nak_header.type = @intFromEnum(protocol.FrameType.nak);
+            nak_header.session_id = image.session_id;
+            nak_header.stream_id = image.stream_id;
+            nak_header.term_id = image.initial_term_id + @as(i32, @intCast(@divTrunc(image.rebuild_position, @as(i64, @intCast(image.term_length)))));
+            nak_header.term_offset = gap.offset;
+            nak_header.length = gap.length;
 
-        const nak_bytes = @as([*]const u8, @ptrCast(&nak_header))[0..protocol.NakHeader.LENGTH];
-        _ = try self.send_endpoint.send(image.source_address, nak_bytes);
+            const nak_bytes = @as([*]const u8, @ptrCast(&nak_header))[0..protocol.NakHeader.LENGTH];
+            _ = try self.send_endpoint.send(image.source_address, nak_bytes);
 
-        // Log send_nak event
-        if (self.event_log) |el| {
-            const nak_now: i64 = @intCast(@as(i128, std.time.nanoTimestamp()));
-            el.log(.send_nak, nak_now, image.session_id, image.stream_id, nak_bytes);
+            // Log send_nak event
+            if (self.event_log) |el| {
+                const nak_now: i64 = @intCast(@as(i128, std.time.nanoTimestamp()));
+                el.log(.send_nak, nak_now, image.session_id, image.stream_id, nak_bytes);
+            }
         }
     }
 
@@ -297,6 +441,32 @@ pub const Receiver = struct {
 };
 
 // Unit tests
+test "NAK: adjacent gaps produce one coalesced NAK" {
+    // Create two adjacent gap records for the same Image
+    var nak_state = NakState.init(1001);
+    nak_state.recordGap(100, 64); // gap at offset 100, length 64
+    nak_state.recordGap(164, 128); // adjacent gap at 164, length 128
+
+    // Should coalesce into one gap: offset=100, length=192
+    const gaps = nak_state.gaps();
+    try std.testing.expectEqual(@as(usize, 1), gaps.len);
+    try std.testing.expectEqual(@as(i32, 100), gaps[0].offset);
+    try std.testing.expectEqual(@as(i32, 192), gaps[0].length);
+}
+
+test "NAK: no NAK sent within delay window" {
+    // Use an injectable base_time to avoid non-determinism from std.time.nanoTimestamp().
+    // NakState.initWithTime(stream_id, first_gap_ns) sets first_gap_ns directly.
+    var nak_state = NakState.initWithTime(1001, 0);
+    nak_state.gap_list[0] = .{ .offset = 100, .length = 64 };
+    nak_state.gap_list_len = 1;
+
+    // Before delay elapses: should not send
+    try std.testing.expect(!nak_state.shouldSend(NAK_DELAY_NS - 1));
+    // After delay: should send
+    try std.testing.expect(nak_state.shouldSend(NAK_DELAY_NS));
+}
+
 test "Receiver init and deinit" {
     const allocator = std.testing.allocator;
 
@@ -362,9 +532,11 @@ test "Receiver onAddSubscription and onRemoveSubscription" {
 
     try receiver.onAddSubscription(&image);
     try std.testing.expectEqual(@as(usize, 1), receiver.images.items.len);
+    try std.testing.expect(receiver.hasImage(1, 2));
 
     receiver.onRemoveSubscription(1, 2);
     try std.testing.expectEqual(@as(usize, 0), receiver.images.items.len);
+    try std.testing.expect(!receiver.hasImage(1, 2));
 }
 
 test "Image insertFrame writes data at correct offset" {

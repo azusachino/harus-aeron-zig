@@ -7,7 +7,7 @@ const std = @import("std");
 
 pub const RecordDescriptor = struct {
     pub const ALIGNMENT = 8;
-    pub const HEADER_LENGTH = 12; // type(4) + length(4) + reserved(4)
+    pub const HEADER_LENGTH = 8; // type(4) + length(4)
 
     pub fn aligned(length: usize) usize {
         return std.mem.alignForward(usize, length + HEADER_LENGTH, ALIGNMENT);
@@ -33,6 +33,17 @@ pub const BroadcastTransmitter = struct {
         };
     }
 
+    pub fn wrap(buffer: []u8) BroadcastTransmitter {
+        const capacity = buffer.len - @sizeOf(std.atomic.Value(usize));
+        const tail_ptr = @as(*std.atomic.Value(usize), @ptrCast(@alignCast(buffer[capacity..])));
+
+        return BroadcastTransmitter{
+            .buffer = buffer[0..capacity],
+            .capacity = capacity,
+            .tail = tail_ptr,
+        };
+    }
+
     pub fn deinit(self: *BroadcastTransmitter, allocator: std.mem.Allocator) void {
         const full_buffer = @as([*]u8, @ptrCast(self.buffer.ptr))[0 .. self.buffer.len + @sizeOf(std.atomic.Value(usize))];
         allocator.free(full_buffer);
@@ -45,15 +56,17 @@ pub const BroadcastTransmitter = struct {
         var tail = self.tail.load(.seq_cst);
 
         while (true) {
-            const next_tail = (tail + aligned_length) % self.capacity;
-            if (next_tail + aligned_length > self.capacity) {
-                // Would wrap in an awkward way; skip to next aligned boundary or wrap around
+            // Check if we need to wrap around
+            if (tail + aligned_length > self.capacity) {
+                // Would overflow; skip to next aligned boundary or wrap around
                 tail = std.mem.alignForward(usize, tail, 64); // align to cache line
                 if (tail >= self.capacity) {
                     tail = 0;
                 }
                 continue;
             }
+
+            const next_tail = tail + aligned_length;
 
             // Write record header at current tail
             const offset = tail;
@@ -62,7 +75,6 @@ pub const BroadcastTransmitter = struct {
             var header_bytes: [RecordDescriptor.HEADER_LENGTH]u8 = undefined;
             std.mem.writeInt(i32, header_bytes[0..4], msg_type_id, .little);
             std.mem.writeInt(i32, header_bytes[4..8], record_length, .little);
-            std.mem.writeInt(i32, header_bytes[8..12], 0, .little); // reserved
 
             @memcpy(header_ptr, &header_bytes);
 
@@ -72,8 +84,7 @@ pub const BroadcastTransmitter = struct {
             }
 
             // Atomically advance tail
-            const new_tail = (tail + aligned_length) % self.capacity;
-            if (self.tail.cmpxchgStrong(tail, new_tail, .seq_cst, .seq_cst) == null) {
+            if (self.tail.cmpxchgStrong(tail, next_tail, .seq_cst, .seq_cst) == null) {
                 return; // Success
             }
 
@@ -99,6 +110,21 @@ pub const BroadcastReceiver = struct {
             .shared_buffer = transmitter.buffer,
             .capacity = transmitter.capacity,
             .transmitter_tail = transmitter.tail,
+            .head = 0,
+            .record_offset = 0,
+            .record_length = 0,
+            .record_type_id = 0,
+        };
+    }
+
+    pub fn wrap(shared_buffer_raw: []u8) BroadcastReceiver {
+        const capacity = shared_buffer_raw.len - @sizeOf(std.atomic.Value(usize));
+        const tail_ptr = @as(*std.atomic.Value(usize), @ptrCast(@alignCast(shared_buffer_raw[capacity..])));
+
+        return BroadcastReceiver{
+            .shared_buffer = shared_buffer_raw[0..capacity],
+            .capacity = capacity,
+            .transmitter_tail = tail_ptr,
             .head = 0,
             .record_offset = 0,
             .record_length = 0,
@@ -171,6 +197,28 @@ pub const BroadcastReceiver = struct {
     }
 };
 
+test "broadcast: header is 8 bytes (type i32 + length i32)" {
+    // Verify HEADER_LENGTH constant is exactly 8
+    try std.testing.expectEqual(@as(usize, 8), RecordDescriptor.HEADER_LENGTH);
+}
+
+test "broadcast: transmit and receive roundtrip" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var tx = try BroadcastTransmitter.init(allocator, 4096);
+    defer tx.deinit(allocator);
+
+    const msg = "hello aeron";
+    tx.transmit(42, msg);
+
+    var rx = try BroadcastReceiver.init(allocator, &tx);
+    try std.testing.expect(rx.receiveNext());
+    try std.testing.expectEqual(@as(i32, 42), rx.typeId());
+    try std.testing.expectEqualSlices(u8, msg, rx.buffer());
+}
+
 test "broadcast transmit and receive" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -219,6 +267,6 @@ test "broadcast multiple messages" {
 }
 
 test "record alignment" {
-    try std.testing.expectEqual(24, RecordDescriptor.aligned(5));
+    try std.testing.expectEqual(16, RecordDescriptor.aligned(5));
     try std.testing.expectEqual(24, RecordDescriptor.aligned(12));
 }

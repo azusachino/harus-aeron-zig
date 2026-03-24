@@ -80,6 +80,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "cluster-demo", .path = "examples/cluster_demo.zig" },
         .{ .name = "basic-publisher", .path = "examples/basic_publisher.zig" },
         .{ .name = "basic-subscriber", .path = "examples/basic_subscriber.zig" },
+        .{ .name = "basic-subscriber-interop", .path = "test/interop/basic_subscriber.zig" },
+        .{ .name = "basic-publisher-interop", .path = "test/interop/basic_publisher.zig" },
         .{ .name = "throughput-example", .path = "examples/throughput.zig" },
     };
     const examples_step = b.step("examples", "Build all examples");

@@ -1,8 +1,9 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-namespace: aeron
+
 resources:
-  - job-zig-pub-java-sub.yaml
+  - java-apps-configmap.yaml
   - job-java-pub-zig-sub.yaml
+  - job-zig-pub-java-sub.yaml
   - job-archive-interop.yaml
   - job-bidirectional.yaml

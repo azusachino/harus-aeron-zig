@@ -8,10 +8,10 @@ pub const FRAME_ALIGNMENT: usize = 32;
 pub const FrameType = enum(u16) {
     padding = 0x00,
     data = 0x01,
-    setup = 0x03,
-    status = 0x04,
-    nak = 0x05,
-    rtt_measurement = 0x0B,
+    nak = 0x02,
+    status = 0x03,
+    setup = 0x05,
+    rtt_measurement = 0x06,
     resolution_entry = 0x0E,
 };
 
@@ -95,7 +95,7 @@ pub const NakHeader = extern struct {
     pub const LENGTH = @sizeOf(NakHeader);
 };
 
-/// RTT Measurement frame — 24 bytes total
+/// RTT Measurement frame — 32 bytes total
 pub const RttMeasurement = extern struct {
     frame_length: i32,
     version: u8,
@@ -103,9 +103,9 @@ pub const RttMeasurement = extern struct {
     type: u16,
     echo_timestamp: i64 align(4),
     reception_delta: i64 align(4),
-    // LESSON(frame-codec): receiver_id was added in later Aeron versions (total 32 bytes).
-    // We implement the 24-byte version as specified in the project plan.
-    // receiver_id: i64 align(4),
+    // LESSON(frame-codec/aeron): receiver_id was present from the start in C header
+    // (aeron_udp_protocol.h). Total frame size = 32 bytes.
+    receiver_id: i64 align(4),
 
     pub const LENGTH = @sizeOf(RttMeasurement);
 };
@@ -147,7 +147,11 @@ comptime {
     std.debug.assert(@sizeOf(SetupHeader) == 40);
     std.debug.assert(@sizeOf(StatusMessage) == 36);
     std.debug.assert(@sizeOf(NakHeader) == 28);
-    std.debug.assert(@sizeOf(RttMeasurement) == 24);
+    std.debug.assert(@sizeOf(RttMeasurement) == 32);
+}
+
+test "RttMeasurement is exactly 32 bytes" {
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(RttMeasurement));
 }
 
 test "frame sizes match spec" {
@@ -155,7 +159,7 @@ test "frame sizes match spec" {
     try std.testing.expectEqual(40, SetupHeader.LENGTH);
     try std.testing.expectEqual(36, StatusMessage.LENGTH);
     try std.testing.expectEqual(28, NakHeader.LENGTH);
-    try std.testing.expectEqual(24, RttMeasurement.LENGTH);
+    try std.testing.expectEqual(32, RttMeasurement.LENGTH);
 }
 
 test "alignedLength calculation" {

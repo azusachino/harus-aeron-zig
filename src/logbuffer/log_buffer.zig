@@ -15,6 +15,7 @@ pub const LogBuffer = struct {
     meta_raw: []u8,
     term_length: i32,
     allocator: std.mem.Allocator,
+    mapped_buffer: ?[]align(std.heap.page_size_min) u8 = null,
 
     pub fn init(allocator: std.mem.Allocator, term_length: i32) !LogBuffer {
         // Validate term_length is power-of-2
@@ -43,15 +44,62 @@ pub const LogBuffer = struct {
             .meta_raw = meta_raw,
             .term_length = term_length,
             .allocator = allocator,
+            .mapped_buffer = null,
+        };
+    }
+
+    pub fn initMapped(allocator: std.mem.Allocator, term_length: i32, path: []const u8) !LogBuffer {
+        // Validate term_length is power-of-2
+        if (term_length < TERM_MIN_LENGTH or term_length > TERM_MAX_LENGTH) {
+            return error.InvalidTermLength;
+        }
+        if ((term_length & (term_length - 1)) != 0) {
+            return error.TermLengthNotPowerOfTwo;
+        }
+
+        const total = @as(usize, @intCast(term_length)) * PARTITION_COUNT + metadata.LOG_META_DATA_LENGTH;
+
+        // Create or open file and extend to required size
+        const file = try std.fs.createFileAbsolute(path, .{ .read = true, .truncate = false });
+        defer file.close();
+        try file.setEndPos(total);
+
+        const ptr = try std.posix.mmap(
+            null,
+            total,
+            std.posix.PROT.READ | std.posix.PROT.WRITE,
+            .{ .TYPE = .SHARED },
+            file.handle,
+            0,
+        );
+        const buffer = @as([*]align(std.heap.page_size_min) u8, @ptrCast(ptr))[0..total];
+
+        var terms: [PARTITION_COUNT][]u8 = undefined;
+        for (0..PARTITION_COUNT) |i| {
+            const start = i * @as(usize, @intCast(term_length));
+            terms[i] = buffer[start .. start + @as(usize, @intCast(term_length))];
+        }
+        const meta_raw = buffer[total - metadata.LOG_META_DATA_LENGTH ..];
+
+        return .{
+            .terms = terms,
+            .meta_raw = meta_raw,
+            .term_length = term_length,
+            .allocator = allocator,
+            .mapped_buffer = buffer,
         };
     }
 
     pub fn deinit(self: *LogBuffer) void {
-        var i: usize = 0;
-        while (i < PARTITION_COUNT) : (i += 1) {
-            self.allocator.free(self.terms[i]);
+        if (self.mapped_buffer) |mapped| {
+            std.posix.munmap(mapped);
+        } else {
+            var i: usize = 0;
+            while (i < PARTITION_COUNT) : (i += 1) {
+                self.allocator.free(self.terms[i]);
+            }
+            self.allocator.free(self.meta_raw);
         }
-        self.allocator.free(self.meta_raw);
     }
 
     pub fn termBuffer(self: *const LogBuffer, partition: usize) []u8 {
@@ -65,6 +113,20 @@ pub const LogBuffer = struct {
         };
     }
 };
+
+test "LogBuffer: mmap file created on disk" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/test-logbuf.dat";
+    defer std.fs.deleteFileAbsolute(path) catch {};
+
+    var lb = try LogBuffer.initMapped(allocator, 64 * 1024, path);
+    defer lb.deinit();
+
+    // File must exist and have correct size
+    const stat = try std.fs.cwd().statFile(path);
+    const expected_size = 3 * 64 * 1024 + metadata.LOG_META_DATA_LENGTH;
+    try std.testing.expectEqual(expected_size, stat.size);
+}
 
 test "LogBuffer init and deinit" {
     const allocator = std.testing.allocator;

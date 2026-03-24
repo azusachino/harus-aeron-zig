@@ -1,6 +1,7 @@
 const std = @import("std");
 const UdpChannel = @import("udp_channel.zig").UdpChannel;
 
+// LESSON(transport/aeron): Endpoints abstract send/receive channel pairs. Media driver assigns one endpoint per port to reduce syscall overhead.
 // POSIX multicast structs not exposed in std.posix on all targets
 const IpMreq = extern struct {
     imr_multiaddr: u32,
@@ -24,6 +25,9 @@ const IPV6_JOIN_GROUP: u32 = switch (builtin.os.tag) {
     else => 20,
 };
 
+// LESSON(transport/zig): SOCK_NONBLOCK avoids a separate fcntl() call. On Linux this is
+// an atomic socket + nonblock setup. On macOS it still requires FIONBIO — Zig's std.posix
+// handles this transparently via the SOCK.NONBLOCK flag.
 pub const SendChannelEndpoint = struct {
     socket: std.posix.socket_t,
 
@@ -43,6 +47,10 @@ pub const SendChannelEndpoint = struct {
         return SendChannelEndpoint{ .socket = sock };
     }
 
+    // LESSON(transport/aeron): Aeron sends two types of UDP datagrams: unicast (point-to-point)
+    // and multicast (one-to-many). The same SendChannelEndpoint handles both — multicast is just
+    // sendto() with a group address. The receiver joins the multicast group via setsockopt
+    // IP_ADD_MEMBERSHIP so the OS delivers those packets.
     pub fn send(self: *SendChannelEndpoint, dest: std.net.Address, data: []const u8) !usize {
         return std.posix.sendto(self.socket, data, 0, &dest.any, dest.getOsSockLen());
     }
@@ -66,7 +74,7 @@ pub const ReceiveChannelEndpoint = struct {
         errdefer std.posix.close(sock);
 
         if (channel.is_multicast) {
-            // SO_REUSEPORT allows multiple sockets to bind to the same port, which is required for multicast
+            // LESSON(transport/aeron): SO_REUSEPORT allows multiple sockets to bind to the same mcast group; needed for multi-subscriber scenarios.
             try std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEPORT, &std.mem.toBytes(@as(i32, 1)));
         }
 

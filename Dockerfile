@@ -17,6 +17,7 @@ WORKDIR /src
 COPY build.zig build.zig.zon ./
 COPY src/ src/
 COPY test/ test/
+COPY examples/ examples/
 COPY tutorial/ tutorial/
 
 # Build release binaries
