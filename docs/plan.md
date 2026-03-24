@@ -746,6 +746,132 @@ Format as a text table readable via `make counters`.
 
 ---
 
+## Phase 5 — Parity Completion
+
+Goal: close the remaining gap to upstream Aeron by tightening protocol breadth, cluster recovery, archive fidelity, and benchmark/interop automation.
+
+Key reference files in the upstream repo:
+- `aeron-driver/src/main/java/io/aeron/driver/`
+- `aeron-archive/src/main/java/io/aeron/archive/`
+- `aeron-cluster/src/main/java/io/aeron/cluster/`
+- `aeron-all` sample apps and interop harnesses
+
+---
+
+### Task P5-1: Protocol Breadth and Codec Parity
+
+**File**: `src/protocol/`, `src/transport/`
+
+Expand the protocol surface to cover the remaining Aeron-compatible message shapes and URI forms that the current stack still treats as simplified.
+
+Implement:
+- the remaining transport/control codec variants needed by current archive and cluster flows
+- stricter URI parsing for Aeron-compatible channel forms used by upstream samples
+- unit tests for every new codec branch and parser edge case
+
+Acceptance criteria:
+- `make test-unit`
+- `make check`
+
+Dependencies:
+- Phase 1 frame and transport foundations
+
+---
+
+### Task P5-2: Cluster Failure and Rejoin Correctness
+
+**File**: `src/cluster/`, `test/integration/`
+
+Make the cluster stack survive leader loss, follower catch-up, and replay/rejoin without relying on the simplified happy-path assumptions.
+
+Implement:
+- leader/follower handoff checks that preserve log progress
+- recovery-oriented tests for election restart, commit advancement, and session redirection
+- a 3-node integration scenario that kills the leader and verifies a new leader can continue processing
+
+Acceptance criteria:
+- `make test-unit`
+- `make test-integration`
+- `make check`
+
+Dependencies:
+- Task P5-1
+
+---
+
+### Task P5-3: Archive Restart and Catalog Fidelity
+
+**File**: `src/archive/`, `docs/tutorial/05-archive/`
+
+Bring archive behavior closer to upstream by making restart, catalog, and replay behavior more faithful and less ad hoc.
+
+Implement:
+- recording descriptor fields that still use placeholder values
+- segment rotation and replay behavior that can survive archive restart
+- archive control tests that verify list/replay/stop flows against persisted data
+- a tutorial chapter for the parity behavior if the course material needs to stay in sync
+
+Acceptance criteria:
+- `make test-unit`
+- `make check`
+
+Dependencies:
+- Task P5-1
+
+---
+
+### Task P5-4: Interop Matrix Automation
+
+**File**: `Makefile`, `deploy/interop/`, `test/interop/`
+
+Make the interop path self-contained and explicit so a fresh clone can bring up the same matrix without manual artifact handling.
+
+Implement:
+- a pinned, deterministic fetch path for the Java Aeron JAR
+- explicit Java-publisher/Zig-subscriber and Zig-publisher/Java-subscriber jobs in the interop overlay
+- a single make target that performs setup, image build, and job execution
+
+Acceptance criteria:
+- `make setup`
+- `make interop`
+
+Dependencies:
+- Task P5-1
+
+---
+
+### Task P5-5: Throughput Baseline and Perf Hygiene
+
+**File**: `examples/throughput.zig`, `src/bench/throughput.zig`, `Makefile`
+
+Turn the current throughput helper into a useful benchmark entrypoint and use it to watch for regressions as the protocol and cluster work land.
+
+Implement:
+- a real `throughput` wrapper that invokes the built benchmark or example
+- benchmark documentation that explains the expected use
+- a small baseline run or smoke check that can be used before larger protocol changes
+
+Acceptance criteria:
+- `make bench`
+- `make check`
+
+Dependencies:
+- Task P5-1
+
+---
+
+### Suggested Sequence
+
+1. P5-1 protocol breadth and codec parity.
+2. P5-4 interop matrix automation.
+3. P5-3 archive restart and catalog fidelity.
+4. P5-2 cluster failure and rejoin correctness.
+5. P5-5 throughput baseline and perf hygiene.
+
+This order removes the broad compatibility blockers first, then uses interop and archive coverage to validate the transport path before the more stateful cluster recovery work.
+
+---
+
 ## Dependency Graph Summary
 
 ```
