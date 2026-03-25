@@ -147,11 +147,13 @@ stress:  ## Run stress tests
 # Interop Testing
 # =============================================================================
 
+COMPOSE ?= podman-compose
+
 interop:  ## Run full interop test suite (100 messages, all scenarios)
-	docker compose -f deploy/docker-compose.ci.yml up --abort-on-container-exit
+	AERON_VERSION=1.46.7 MSG_COUNT=100 $(COMPOSE) -f deploy/docker-compose.ci.yml up --abort-on-container-exit --exit-code-from java-client
 
 interop-smoke:  ## Run quick smoke interop test (10 messages, CI-friendly)
-	docker compose -f deploy/docker-compose.ci.yml up --abort-on-container-exit
+	AERON_VERSION=1.46.7 MSG_COUNT=10 $(COMPOSE) -f deploy/docker-compose.ci.yml up --abort-on-container-exit --exit-code-from java-client
 
 interop-status:  ## Show status of running interop jobs
 	@echo "=== Interop Jobs ==="

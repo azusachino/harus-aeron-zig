@@ -1,7 +1,7 @@
 FROM nixos/nix:latest AS builder
 WORKDIR /src
 COPY . .
-RUN nix develop --command make build
+RUN nix --extra-experimental-features nix-command --extra-experimental-features flakes develop --command make build
 
 FROM nixos/nix:latest
 WORKDIR /app

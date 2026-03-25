@@ -69,6 +69,7 @@
             zls
             nodePackages.prettier
             skopeo  # OCI image transport (push/pull without Docker)
+            podman-compose  # local CI interop smoke (podman-compose / podman compose)
           ];
 
           shellHook = ''
