@@ -24,7 +24,7 @@ pub const CliOptions = struct {
 
 pub fn parse(args: []const []const u8) CliOptions {
     var opts = CliOptions{
-        .aeron_dir = std.posix.getenv("AERON_DIR") orelse "/dev/shm/aeron",
+        .aeron_dir = "/aeron_data",
     };
 
     if (args.len < 2) return opts;
