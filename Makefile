@@ -5,7 +5,7 @@ AERON_VERSION := 1.46.7
 AERON_ALL_JAR_URL := https://repo1.maven.org/maven2/io/aeron/aeron-all/$(AERON_VERSION)/aeron-all-$(AERON_VERSION).jar
 AERON_ALL_JAR_SHA256 := ded2ed3c5b73991e31c439a7562a294e5d5566f955c3a9e81089a28a6b5b9d55
 
-.PHONY: fmt fmt-check build test lint check clean run tutorial-check \
+.PHONY: fmt fmt-check build test lint check clean run tutorial-check lesson-lint \
        fuzz bench stress \
        nix-image k8s-up k8s-down k8s-status k8s-logs colima-up colima-down \
        setup setup-interop \
@@ -41,6 +41,9 @@ test-interop:
 	bash test/interop/run.sh
 
 lint: fmt-check
+
+lesson-lint:  ## Verify all LESSON annotation slugs have a matching docs/tutorial/ chapter file
+	bash scripts/lesson-lint.sh
 
 check: fmt-check build test
 
