@@ -41,15 +41,13 @@ pub const DataHeader = extern struct {
 /// Returns `data_length` rounded up to the nearest FRAME_ALIGNMENT boundary.
 /// Aeron requires all frames to be aligned so receivers can scan forward safely.
 pub fn alignedLength(data_length: usize) usize {
-    _ = data_length;
-    @panic("TODO: implement");
+    return (data_length + (FRAME_ALIGNMENT - 1)) & ~(FRAME_ALIGNMENT - 1);
 }
 
 /// Returns the maximum payload bytes that fit in a single DATA frame given `mtu`.
 /// The DataHeader occupies the first 32 bytes of every data frame.
 pub fn computeMaxPayload(mtu: usize) usize {
-    _ = mtu;
-    @panic("TODO: implement");
+    return mtu - DataHeader.LENGTH;
 }
 
 test "alignedLength pads to 32-byte boundary" {
