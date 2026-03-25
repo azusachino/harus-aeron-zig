@@ -1,4 +1,4 @@
-NIX_RUN := $(if $(filter $(IN_NIX_SHELL),),nix develop --command ,)
+NIX_RUN := $(if $(IN_NIX_SHELL),,nix develop --command )
 export ZIG_GLOBAL_CACHE_DIR := $(CURDIR)/.zig-global-cache
 export ZIG_LOCAL_CACHE_DIR := $(CURDIR)/.zig-cache
 AERON_VERSION := 1.46.7

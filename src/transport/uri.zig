@@ -184,6 +184,45 @@ pub const AeronUri = struct {
         return std.mem.eql(u8, val, "true");
     }
 
+    /// Linger time in milliseconds before a publication is fully closed.
+    pub fn linger(self: *const AeronUri) ?u32 {
+        const val = self.params.get("linger") orelse return null;
+        return std.fmt.parseInt(u32, val, 10) catch null;
+    }
+
+    /// Flow-control strategy string (e.g. "min", "max", "tagged", "pref-tagged").
+    pub fn flowControl(self: *const AeronUri) ?[]const u8 {
+        return self.params.get("flow-control");
+    }
+
+    /// SO_SNDBUF hint in bytes for the sending socket.
+    pub fn socketSndbuf(self: *const AeronUri) ?usize {
+        const val = self.params.get("socket-sndbuf") orelse return null;
+        return std.fmt.parseInt(usize, val, 10) catch null;
+    }
+
+    /// SO_RCVBUF hint in bytes for the receiving socket.
+    pub fn socketRcvbuf(self: *const AeronUri) ?usize {
+        const val = self.params.get("socket-rcvbuf") orelse return null;
+        return std.fmt.parseInt(usize, val, 10) catch null;
+    }
+
+    /// Receiver window size override in bytes.
+    pub fn receiverWindow(self: *const AeronUri) ?i64 {
+        const val = self.params.get("receiver-window") orelse return null;
+        return std.fmt.parseInt(i64, val, 10) catch null;
+    }
+
+    /// Informational alias string for the channel (not used for routing).
+    pub fn alias(self: *const AeronUri) ?[]const u8 {
+        return self.params.get("alias");
+    }
+
+    /// Comma-separated tag string for channel grouping/matching.
+    pub fn tags(self: *const AeronUri) ?[]const u8 {
+        return self.params.get("tags");
+    }
+
     pub fn get(self: *const AeronUri, key: []const u8) ?[]const u8 {
         return self.params.get(key);
     }
@@ -212,7 +251,11 @@ pub const AeronUri = struct {
         }
 
         if (std.mem.eql(u8, key, "term-length")) {
-            _ = std.fmt.parseInt(u32, value, 10) catch return ParseError.InvalidParam;
+            const v = std.fmt.parseInt(u32, value, 10) catch return ParseError.InvalidParam;
+            // Must be a power of two in [64KiB, 1GiB] — same rule as upstream driver.
+            const TERM_MIN: u32 = 64 * 1024;
+            const TERM_MAX: u32 = 1024 * 1024 * 1024;
+            if (v < TERM_MIN or v > TERM_MAX or (v & (v - 1)) != 0) return ParseError.InvalidParam;
             return;
         }
 
@@ -220,6 +263,23 @@ pub const AeronUri = struct {
             _ = std.fmt.parseInt(i32, value, 10) catch return ParseError.InvalidParam;
             return;
         }
+
+        if (std.mem.eql(u8, key, "linger")) {
+            _ = std.fmt.parseInt(u32, value, 10) catch return ParseError.InvalidParam;
+            return;
+        }
+
+        if (std.mem.eql(u8, key, "socket-sndbuf") or std.mem.eql(u8, key, "socket-rcvbuf")) {
+            _ = std.fmt.parseInt(usize, value, 10) catch return ParseError.InvalidParam;
+            return;
+        }
+
+        if (std.mem.eql(u8, key, "receiver-window")) {
+            _ = std.fmt.parseInt(i64, value, 10) catch return ParseError.InvalidParam;
+            return;
+        }
+
+        // flow-control, alias, and tags accept any non-empty string value — pass through.
     }
 };
 
@@ -379,4 +439,79 @@ test "AeronUri: reject empty endpoint value" {
     const allocator = std.testing.allocator;
     const result = AeronUri.parse(allocator, "aeron:udp?endpoint=");
     try std.testing.expectError(error.InvalidParam, result);
+}
+
+test "AeronUri: linger accessor" {
+    const allocator = std.testing.allocator;
+    var uri = try AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|linger=5000");
+    defer uri.deinit();
+    try std.testing.expectEqual(@as(u32, 5000), uri.linger().?);
+}
+
+test "AeronUri: flowControl accessor" {
+    const allocator = std.testing.allocator;
+    var uri = try AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|flow-control=min");
+    defer uri.deinit();
+    try std.testing.expectEqualStrings("min", uri.flowControl().?);
+}
+
+test "AeronUri: socketSndbuf and socketRcvbuf accessors" {
+    const allocator = std.testing.allocator;
+    var uri = try AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|socket-sndbuf=2097152|socket-rcvbuf=1048576");
+    defer uri.deinit();
+    try std.testing.expectEqual(@as(usize, 2097152), uri.socketSndbuf().?);
+    try std.testing.expectEqual(@as(usize, 1048576), uri.socketRcvbuf().?);
+}
+
+test "AeronUri: receiverWindow accessor" {
+    const allocator = std.testing.allocator;
+    var uri = try AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|receiver-window=524288");
+    defer uri.deinit();
+    try std.testing.expectEqual(@as(i64, 524288), uri.receiverWindow().?);
+}
+
+test "AeronUri: alias accessor" {
+    const allocator = std.testing.allocator;
+    var uri = try AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|alias=my-channel");
+    defer uri.deinit();
+    try std.testing.expectEqualStrings("my-channel", uri.alias().?);
+}
+
+test "AeronUri: tags accessor" {
+    const allocator = std.testing.allocator;
+    var uri = try AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|tags=1,2,3");
+    defer uri.deinit();
+    try std.testing.expectEqualStrings("1,2,3", uri.tags().?);
+}
+
+test "AeronUri: term-length must be power of two" {
+    const allocator = std.testing.allocator;
+    // Valid power-of-2 in range
+    var ok = try AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|term-length=65536");
+    defer ok.deinit();
+    try std.testing.expectEqual(@as(u32, 65536), ok.termLength().?);
+
+    // Not a power of two
+    try std.testing.expectError(error.InvalidParam, AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|term-length=65537"));
+
+    // Below minimum (32768 < 65536)
+    try std.testing.expectError(error.InvalidParam, AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|term-length=32768"));
+
+    // Above maximum
+    try std.testing.expectError(error.InvalidParam, AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|term-length=2147483648"));
+}
+
+test "AeronUri: reject invalid linger value" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidParam, AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|linger=notanumber"));
+}
+
+test "AeronUri: reject invalid socket-sndbuf value" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidParam, AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|socket-sndbuf=-1"));
+}
+
+test "AeronUri: reject invalid receiver-window value" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidParam, AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|receiver-window=notanumber"));
 }

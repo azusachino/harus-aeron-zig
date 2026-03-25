@@ -16,6 +16,8 @@ pub const RecordingMetadata = struct {
 };
 
 /// RecordingWriter — buffers raw frame data for a single recording and mirrors it to disk.
+/// Supports segment rotation: when a segment fills up, the writer closes the current file
+/// and opens a new one named `{recording_id}-{segment_base}.dat`.
 pub const RecordingWriter = struct {
     allocator: std.mem.Allocator,
     recording_id: i64,
@@ -24,33 +26,51 @@ pub const RecordingWriter = struct {
     file: ?std.fs.File,
     /// Position of first byte in this recording (from media context)
     start_position: i64,
-    /// Current write position (start_position + bytes_written)
+    /// Current write position (start_position + bytes_written_across_all_segments)
     stop_position: i64,
-    /// In-memory buffer for raw frame data
+    /// Position at the start of the current segment file.
+    current_segment_base: i64,
+    /// Maximum bytes per segment file; 0 means no rotation.
+    segment_file_length: i64,
+    /// In-memory buffer for raw frame data (current segment only)
     buffer: std.ArrayList(u8),
 
-    /// Initialize a new recording writer.
-    /// allocator: memory allocator for the buffer
-    /// recording_id: unique identifier for this recording
-    /// start_position: position of first frame in media context (usually 0 or from media state)
-    /// archive_dir: directory that stores recording segments
+    /// Build segment file path: `{archive_dir}/{recording_id}-{base_position}.dat`
+    pub fn segmentFilePath(allocator: std.mem.Allocator, archive_dir: []const u8, recording_id: i64, base_position: i64) ![]u8 {
+        return std.fmt.allocPrint(allocator, "{s}/{d}-{d}.dat", .{ archive_dir, recording_id, base_position });
+    }
+
+    /// Initialize a new recording writer with no segment rotation (for tests).
     pub fn init(
         allocator: std.mem.Allocator,
         recording_id: i64,
         start_position: i64,
     ) !RecordingWriter {
-        return RecordingWriter.initWithArchiveDir(allocator, recording_id, start_position, "/tmp/aeron-archive");
+        return RecordingWriter.initWithSegment(allocator, recording_id, start_position, 0, "/tmp/aeron-archive");
     }
 
+    /// Initialize a new recording writer with a configured archive directory.
     pub fn initWithArchiveDir(
         allocator: std.mem.Allocator,
         recording_id: i64,
         start_position: i64,
         archive_dir: []const u8,
     ) !RecordingWriter {
+        return RecordingWriter.initWithSegment(allocator, recording_id, start_position, 0, archive_dir);
+    }
+
+    /// Initialize with explicit segment_file_length for rotation.
+    /// segment_file_length == 0 disables rotation.
+    pub fn initWithSegment(
+        allocator: std.mem.Allocator,
+        recording_id: i64,
+        start_position: i64,
+        segment_file_length: i64,
+        archive_dir: []const u8,
+    ) !RecordingWriter {
         try std.fs.cwd().makePath(archive_dir);
 
-        const path = try std.fmt.allocPrint(allocator, "{s}/{d}.dat", .{ archive_dir, recording_id });
+        const path = try segmentFilePath(allocator, archive_dir, recording_id, start_position);
         errdefer allocator.free(path);
 
         const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
@@ -63,6 +83,8 @@ pub const RecordingWriter = struct {
             .file = file,
             .start_position = start_position,
             .stop_position = start_position,
+            .current_segment_base = start_position,
+            .segment_file_length = segment_file_length,
             .buffer = .{},
         };
     }
@@ -75,21 +97,57 @@ pub const RecordingWriter = struct {
     }
 
     /// Write raw frame data to the buffer and advance stop_position.
-    /// data: frame bytes to append (frame header + payload)
+    /// Rotates to a new segment file when the current segment is full.
     pub fn write(self: *RecordingWriter, data: []const u8) !void {
         try self.buffer.appendSlice(self.allocator, data);
         if (self.file) |*file| {
             try file.writeAll(data);
         }
         self.stop_position += @as(i64, @intCast(data.len));
+
+        // Rotate segment if configured and current segment is full.
+        if (self.segment_file_length > 0 and
+            self.stop_position - self.current_segment_base >= self.segment_file_length)
+        {
+            try self.rotateSegment();
+        }
     }
 
-    /// Read the full recording payload back from disk.
+    /// Close current segment and open a new one starting at `stop_position`.
+    fn rotateSegment(self: *RecordingWriter) !void {
+        if (self.file) |f| {
+            try f.sync();
+            f.close();
+            self.file = null;
+        }
+        self.buffer.clearRetainingCapacity();
+        self.current_segment_base = self.stop_position;
+
+        self.allocator.free(self.path);
+        self.path = try segmentFilePath(self.allocator, self.archive_dir, self.recording_id, self.current_segment_base);
+
+        self.file = try std.fs.cwd().createFile(self.path, .{ .truncate = true });
+    }
+
+    /// Read the current segment file from disk.
     pub fn readAll(self: *RecordingWriter, allocator: std.mem.Allocator) ![]u8 {
         const file = try std.fs.cwd().openFile(self.path, .{});
         defer file.close();
 
-        return file.readToEndAlloc(allocator, 1024 * 1024);
+        return file.readToEndAlloc(allocator, 256 * 1024 * 1024);
+    }
+
+    /// Read and concatenate all segment files for this recording from disk.
+    /// Reads from start_position up to stop_position across all segments.
+    pub fn readAllSegments(self: *RecordingWriter, allocator: std.mem.Allocator) ![]u8 {
+        return readAllSegmentsFromDisk(
+            allocator,
+            self.archive_dir,
+            self.recording_id,
+            self.start_position,
+            self.stop_position,
+            self.segment_file_length,
+        );
     }
 
     /// Return the recording's start position.
@@ -114,6 +172,46 @@ pub const RecordingWriter = struct {
         }
     }
 };
+
+/// Read and concatenate all segment files for a recording.
+/// Called by ArchiveConductor.readRecordingData for multi-segment replay.
+pub fn readAllSegmentsFromDisk(
+    allocator: std.mem.Allocator,
+    archive_dir: []const u8,
+    recording_id: i64,
+    start_position: i64,
+    stop_position: i64,
+    segment_file_length: i64,
+) ![]u8 {
+    var result: std.ArrayListUnmanaged(u8) = .{};
+    errdefer result.deinit(allocator);
+
+    const eff_segment_len: i64 = if (segment_file_length > 0) segment_file_length else stop_position - start_position + 1;
+    var base: i64 = start_position;
+    while (base <= stop_position or base == start_position) {
+        const seg_path = try RecordingWriter.segmentFilePath(allocator, archive_dir, recording_id, base);
+        defer allocator.free(seg_path);
+
+        const file = std.fs.cwd().openFile(seg_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => break,
+            else => return err,
+        };
+        defer file.close();
+
+        const file_size = (try file.stat()).size;
+        if (file_size > 0) {
+            const old_len = result.items.len;
+            try result.resize(allocator, old_len + file_size);
+            _ = try file.readAll(result.items[old_len..]);
+        }
+
+        if (segment_file_length <= 0) break;
+        base += eff_segment_len;
+        if (base > stop_position) break;
+    }
+
+    return result.toOwnedSlice(allocator);
+}
 
 /// RecordingSession — ties a recording ID to active session metadata.
 /// Receives fragments (frames) and forwards them to the RecordingWriter.
@@ -147,7 +245,7 @@ pub const RecordingSession = struct {
         channel: []const u8,
         start_position: i64,
     ) !RecordingSession {
-        return RecordingSession.initWithArchiveDir(allocator, recording_id, session_id, stream_id, channel, start_position, "/tmp/aeron-archive");
+        return RecordingSession.initWithArchiveDir(allocator, recording_id, session_id, stream_id, channel, start_position, 0, "/tmp/aeron-archive");
     }
 
     pub fn initWithArchiveDir(
@@ -157,6 +255,7 @@ pub const RecordingSession = struct {
         stream_id: i32,
         channel: []const u8,
         start_position: i64,
+        segment_file_length: i64,
         archive_dir: []const u8,
     ) !RecordingSession {
         return RecordingSession{
@@ -166,7 +265,7 @@ pub const RecordingSession = struct {
             .stream_id = stream_id,
             .channel = try allocator.dupe(u8, channel),
             .active = true,
-            .writer = try RecordingWriter.initWithArchiveDir(allocator, recording_id, start_position, archive_dir),
+            .writer = try RecordingWriter.initWithSegment(allocator, recording_id, start_position, segment_file_length, archive_dir),
         };
     }
 
@@ -281,6 +380,7 @@ pub const Recorder = struct {
             stream_id,
             channel,
             metadata.start_position,
+            @as(i64, metadata.segment_file_length),
             self.archive_dir,
         );
         try self.sessions.append(self.allocator, session);
@@ -550,6 +650,72 @@ test "Recorder doWork returns active session count" {
     const id2 = 2;
     try recorder.onStopRecording(id2, 200);
     try std.testing.expectEqual(0, recorder.doWork());
+}
+
+test "RecordingWriter rotates to new segment when full" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/harus-seg-rotate-{d}", .{std.time.nanoTimestamp()});
+    defer allocator.free(archive_dir);
+    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+
+    // Small segment size of 10 bytes to force rotation
+    var writer = try RecordingWriter.initWithSegment(allocator, 42, 0, 10, archive_dir);
+    defer writer.deinit();
+
+    // Write 10 bytes — exactly fills segment 0 → rotation happens at end of write
+    try writer.write("0123456789");
+    try std.testing.expectEqual(@as(i64, 10), writer.current_segment_base);
+    try std.testing.expectEqual(@as(i64, 10), writer.stop_position);
+
+    // Second write goes into segment 10
+    try writer.write("abcde");
+    try std.testing.expectEqual(@as(i64, 10), writer.current_segment_base);
+    try std.testing.expectEqual(@as(i64, 15), writer.stop_position);
+
+    // Segment 0 file should exist with 10 bytes
+    const seg0_path = try RecordingWriter.segmentFilePath(allocator, archive_dir, 42, 0);
+    defer allocator.free(seg0_path);
+    const seg0_file = try std.fs.cwd().openFile(seg0_path, .{});
+    defer seg0_file.close();
+    try std.testing.expectEqual(@as(u64, 10), (try seg0_file.stat()).size);
+
+    // Segment 1 file should exist with 5 bytes
+    const seg1_path = try RecordingWriter.segmentFilePath(allocator, archive_dir, 42, 10);
+    defer allocator.free(seg1_path);
+    const seg1_file = try std.fs.cwd().openFile(seg1_path, .{});
+    defer seg1_file.close();
+    try std.testing.expectEqual(@as(u64, 5), (try seg1_file.stat()).size);
+}
+
+test "readAllSegmentsFromDisk reads across multiple segments" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/harus-seg-all-{d}", .{std.time.nanoTimestamp()});
+    defer allocator.free(archive_dir);
+    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+
+    // Write 25 bytes across segments of size 10
+    var writer = try RecordingWriter.initWithSegment(allocator, 99, 0, 10, archive_dir);
+    defer writer.deinit();
+
+    try writer.write("0123456789"); // segment 0 → full → rotate
+    try writer.write("abcdefghij"); // segment 10 → full → rotate
+    try writer.write("ABCDE"); // segment 20
+
+    try writer.flush();
+
+    const all = try writer.readAllSegments(allocator);
+    defer allocator.free(all);
+
+    try std.testing.expectEqual(@as(usize, 25), all.len);
+    try std.testing.expectEqualSlices(u8, "0123456789", all[0..10]);
+    try std.testing.expectEqualSlices(u8, "abcdefghij", all[10..20]);
+    try std.testing.expectEqualSlices(u8, "ABCDE", all[20..25]);
 }
 
 test "Recorder findSession returns correct session" {

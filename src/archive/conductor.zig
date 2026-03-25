@@ -54,6 +54,17 @@ pub const ListRecordingsCmd = struct {
     record_count: i32,
 };
 
+/// ExtendRecordingCmd — extend an existing stopped recording with new data.
+/// Upstream: ArchiveProxy.extendRecording / AeronArchive.extendRecording.
+pub const ExtendRecordingCmd = struct {
+    correlation_id: i64,
+    recording_id: i64,
+    session_id: i32,
+    stream_id: i32,
+    channel: []const u8,
+    source_identity: []const u8,
+};
+
 // =============================================================================
 // Command Union
 // =============================================================================
@@ -66,6 +77,7 @@ pub const Command = union(enum) {
     replay: ReplayCmd,
     stop_replay: StopReplayCmd,
     list_recordings: ListRecordingsCmd,
+    extend_recording: ExtendRecordingCmd,
 };
 
 // =============================================================================
@@ -207,6 +219,11 @@ pub const ArchiveConductor = struct {
                     try self.queueErrorResponse(list_cmd.correlation_id, err);
                 };
             },
+            .extend_recording => |ext_cmd| {
+                self.handleExtendRecording(ext_cmd) catch |err| {
+                    try self.queueErrorResponse(ext_cmd.correlation_id, err);
+                };
+            },
         }
     }
 
@@ -233,7 +250,43 @@ pub const ArchiveConductor = struct {
     /// Handle stop_recording command.
     fn handleStopRecording(self: *ArchiveConductor, cmd: StopRecordingCmd) !void {
         const recorder = self.recorder orelse return error.RecorderNotInitialized;
-        try recorder.onStopRecording(cmd.recording_id, 0); // stop_timestamp: use 0 for now
+        try recorder.onStopRecording(cmd.recording_id, std.time.milliTimestamp());
+        try self.queueSuccessResponse(cmd.correlation_id, cmd.recording_id);
+    }
+
+    /// Handle extend_recording command.
+    /// Reopens recording with the catalog descriptor's existing metadata.
+    fn handleExtendRecording(self: *ArchiveConductor, cmd: ExtendRecordingCmd) !void {
+        const recorder = self.recorder orelse return error.RecorderNotInitialized;
+
+        const desc = self.catalog.recordingDescriptor(cmd.recording_id) orelse {
+            try self.queueErrorCodeResponse(
+                cmd.correlation_id,
+                @intFromEnum(protocol.ControlResponseCode.recording_unknown),
+            );
+            return;
+        };
+
+        // Resume from the last known stop_position
+        const resume_position = desc.stop_position;
+        _ = try recorder.onStartRecording(
+            cmd.session_id,
+            cmd.stream_id,
+            cmd.channel,
+            cmd.source_identity,
+            .{
+                .initial_term_id = desc.initial_term_id,
+                .segment_file_length = desc.segment_file_length,
+                .term_buffer_length = desc.term_buffer_length,
+                .mtu_length = desc.mtu_length,
+                .start_position = resume_position,
+                .start_timestamp = std.time.milliTimestamp(),
+            },
+        );
+
+        // Update catalog: clear stop state so recording appears active again
+        try self.catalog.updateStopState(cmd.recording_id, resume_position, 0);
+
         try self.queueSuccessResponse(cmd.correlation_id, cmd.recording_id);
     }
 
@@ -349,20 +402,26 @@ pub const ArchiveConductor = struct {
     }
 
     fn readRecordingData(self: *ArchiveConductor, recording_id: i64) ![]u8 {
+        // If an active recording session exists, flush and read from it.
         if (self.recorder) |recorder| {
             if (recorder.findSession(recording_id)) |session| {
                 try session.writer.flush();
-                return session.snapshot(self.allocator);
+                return session.writer.readAllSegments(self.allocator);
             }
         }
 
-        const recording_path = try std.fmt.allocPrint(self.allocator, "{s}/{d}.dat", .{ self.archive_dir, recording_id });
-        defer self.allocator.free(recording_path);
+        // No active session: read from catalog descriptor + segment files on disk.
+        const desc = self.catalog.recordingDescriptor(recording_id) orelse
+            return error.RecordingNotFound;
 
-        const file = try std.fs.cwd().openFile(recording_path, .{});
-        defer file.close();
-        const file_size = (try file.stat()).size;
-        return file.readToEndAlloc(self.allocator, file_size);
+        return recorder_mod.readAllSegmentsFromDisk(
+            self.allocator,
+            self.archive_dir,
+            recording_id,
+            desc.start_position,
+            desc.stop_position,
+            @as(i64, desc.segment_file_length),
+        );
     }
 };
 
@@ -791,4 +850,87 @@ test "ArchiveConductor pollResponses drains queue" {
 
     try std.testing.expectEqual(2, count);
     try std.testing.expectEqual(0, conductor.responseCount());
+}
+
+test "ArchiveConductor extend_recording reopens stopped recording" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ArchiveConductor.init(allocator);
+    try conductor.initRecorder();
+    defer conductor.deinit();
+
+    const channel = try allocator.dupe(u8, "aeron:udp://localhost:40123");
+    defer allocator.free(channel);
+    const source_identity = try allocator.dupe(u8, "test-source");
+    defer allocator.free(source_identity);
+
+    // Start recording
+    const start_cmd = Command{ .start_recording = StartRecordingCmd{
+        .correlation_id = 100,
+        .session_id = 1,
+        .stream_id = 2,
+        .channel = channel,
+        .source_identity = source_identity,
+    } };
+    try conductor.enqueueCommand(start_cmd);
+    _ = try conductor.doWork();
+    _ = conductor.pollResponses(&struct {
+        pub fn handle(_: *const Response) void {}
+    }.handle);
+
+    // Stop recording
+    const stop_cmd = Command{ .stop_recording = StopRecordingCmd{
+        .correlation_id = 101,
+        .recording_id = 1,
+    } };
+    try conductor.enqueueCommand(stop_cmd);
+    _ = try conductor.doWork();
+    _ = conductor.pollResponses(&struct {
+        pub fn handle(_: *const Response) void {}
+    }.handle);
+
+    // Extend recording
+    const extend_cmd = Command{ .extend_recording = ExtendRecordingCmd{
+        .correlation_id = 102,
+        .recording_id = 1,
+        .session_id = 2,
+        .stream_id = 2,
+        .channel = channel,
+        .source_identity = source_identity,
+    } };
+    try conductor.enqueueCommand(extend_cmd);
+    _ = try conductor.doWork();
+
+    try std.testing.expectEqual(1, conductor.responseCount());
+}
+
+test "ArchiveConductor extend_recording unknown id returns error response" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ArchiveConductor.init(allocator);
+    try conductor.initRecorder();
+    defer conductor.deinit();
+
+    const channel = try allocator.dupe(u8, "aeron:udp://localhost:40123");
+    defer allocator.free(channel);
+    const source_identity = try allocator.dupe(u8, "test-source");
+    defer allocator.free(source_identity);
+
+    // Extend non-existent recording
+    const extend_cmd = Command{ .extend_recording = ExtendRecordingCmd{
+        .correlation_id = 200,
+        .recording_id = 999,
+        .session_id = 1,
+        .stream_id = 1,
+        .channel = channel,
+        .source_identity = source_identity,
+    } };
+    try conductor.enqueueCommand(extend_cmd);
+    _ = try conductor.doWork();
+
+    try std.testing.expectEqual(1, conductor.responseCount());
 }
