@@ -9,7 +9,7 @@ AERON_ALL_JAR_SHA256 := ded2ed3c5b73991e31c439a7562a294e5d5566f955c3a9e81089a28a
        fuzz bench stress \
        nix-image k8s-up k8s-down k8s-status k8s-logs colima-up colima-down \
        setup setup-interop \
-       interop interop-smoke interop-status status
+       interop interop-smoke interop-status test-protocol test-driver test-archive test-cluster test-scenarios status
 
 fmt:
 	$(NIX_RUN) zig fmt .
@@ -37,12 +37,26 @@ test-unit:
 test-integration:
 	$(NIX_RUN) zig build test-integration
 
+test-protocol:  ## Run protocol scenario tests
+	$(NIX_RUN) zig build test-protocol
+
+test-driver:  ## Run driver scenario tests
+	$(NIX_RUN) zig build test-driver
+
+test-archive:  ## Run archive scenario tests
+	$(NIX_RUN) zig build test-archive
+
+test-cluster:  ## Run cluster scenario tests
+	$(NIX_RUN) zig build test-cluster
+
+test-scenarios: test-protocol test-driver test-archive test-cluster  ## Run all scenario tests
+
 lint: fmt-check
 
 lesson-lint:  ## Verify all LESSON annotation slugs have a matching docs/tutorial/ chapter file
 	bash scripts/lesson-lint.sh
 
-check: fmt-check build test
+check: fmt-check build test test-scenarios lesson-lint  ## Full check: fmt + build + all tests
 
 status:  ## Show parity and chapter status from JSONL sources
 	@echo "=== Parity Gaps ==="

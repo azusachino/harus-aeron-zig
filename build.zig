@@ -62,6 +62,73 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(unit_test_step);
     test_step.dependOn(integration_test_step);
 
+    // Scenario tests — protocol layer
+    const test_protocol = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/protocol/frame_codec_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+            },
+        }),
+    });
+    const run_test_protocol = b.addRunArtifact(test_protocol);
+    const test_protocol_step = b.step("test-protocol", "Run protocol scenario tests");
+    test_protocol_step.dependOn(&run_test_protocol.step);
+
+    // Scenario tests — driver layer
+    const test_driver = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/driver/session_establishment_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+            },
+        }),
+    });
+    const run_test_driver = b.addRunArtifact(test_driver);
+    const test_driver_step = b.step("test-driver", "Run driver scenario tests");
+    test_driver_step.dependOn(&run_test_driver.step);
+
+    // Scenario tests — archive layer
+    const test_archive = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/archive/catalog_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+            },
+        }),
+    });
+    const run_test_archive = b.addRunArtifact(test_archive);
+    const test_archive_step = b.step("test-archive", "Run archive scenario tests");
+    test_archive_step.dependOn(&run_test_archive.step);
+
+    // Scenario tests — cluster layer
+    const test_cluster = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/cluster/election_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+            },
+        }),
+    });
+    const run_test_cluster = b.addRunArtifact(test_cluster);
+    const test_cluster_step = b.step("test-cluster", "Run cluster scenario tests");
+    test_cluster_step.dependOn(&run_test_cluster.step);
+
+    // Scenarios umbrella
+    const test_scenarios_step = b.step("test-scenarios", "Run all scenario tests");
+    test_scenarios_step.dependOn(test_protocol_step);
+    test_scenarios_step.dependOn(test_driver_step);
+    test_scenarios_step.dependOn(test_archive_step);
+    test_scenarios_step.dependOn(test_cluster_step);
+
     // Tutorial compile-check
     const chapter = b.option(u32, "chapter", "Active tutorial chapter (default: 0 = compile check only)") orelse 0;
     _ = chapter;
