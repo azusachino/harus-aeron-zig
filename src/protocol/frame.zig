@@ -273,7 +273,7 @@ test "decode: rejects buffer shorter than FrameHeader" {
 }
 
 test "decode: rejects zero frame_length" {
-    var buf = [_]u8{0} ** 64;
+    var buf align(8) = [_]u8{0} ** 64;
     std.mem.writeInt(i32, buf[0..4], 0, .little);
     buf[4] = VERSION;
     std.mem.writeInt(u16, buf[6..8], @intFromEnum(FrameType.data), .little);
@@ -281,7 +281,7 @@ test "decode: rejects zero frame_length" {
 }
 
 test "decode: rejects negative frame_length" {
-    var buf = [_]u8{0} ** 64;
+    var buf align(8) = [_]u8{0} ** 64;
     std.mem.writeInt(i32, buf[0..4], -1, .little);
     buf[4] = VERSION;
     std.mem.writeInt(u16, buf[6..8], @intFromEnum(FrameType.data), .little);
@@ -289,7 +289,7 @@ test "decode: rejects negative frame_length" {
 }
 
 test "decode: rejects frame_length beyond buffer" {
-    var buf = [_]u8{0} ** 32;
+    var buf align(8) = [_]u8{0} ** 32;
     std.mem.writeInt(i32, buf[0..4], 64, .little); // claims 64 bytes but buf is 32
     buf[4] = VERSION;
     std.mem.writeInt(u16, buf[6..8], @intFromEnum(FrameType.data), .little);
@@ -297,7 +297,7 @@ test "decode: rejects frame_length beyond buffer" {
 }
 
 test "decode: rejects wrong version" {
-    var buf = [_]u8{0} ** 64;
+    var buf align(8) = [_]u8{0} ** 64;
     std.mem.writeInt(i32, buf[0..4], 32, .little);
     buf[4] = 0xFF; // bad version
     std.mem.writeInt(u16, buf[6..8], @intFromEnum(FrameType.data), .little);
@@ -305,7 +305,7 @@ test "decode: rejects wrong version" {
 }
 
 test "decode: rejects unknown frame type" {
-    var buf = [_]u8{0} ** 64;
+    var buf align(8) = [_]u8{0} ** 64;
     std.mem.writeInt(i32, buf[0..4], 32, .little);
     buf[4] = VERSION;
     std.mem.writeInt(u16, buf[6..8], 0xFF, .little); // unknown type
