@@ -5,7 +5,7 @@ const frame = @import("protocol/frame.zig");
 const metadata = @import("logbuffer/metadata.zig");
 const counters = @import("ipc/counters.zig");
 
-// LESSON(publication/zig): Tagged union result type encodes expected operational states (back_pressure, not_connected) as values, not error codes. See docs/tutorial/04-client/01-publications.md
+// LESSON(publications): Tagged union result type encodes expected operational states (back_pressure, not_connected) as values, not error codes. See docs/tutorial/04-client/01-publications.md
 pub const OfferResult = union(enum) {
     ok: i64, // new stream position
     back_pressure, // publisher limit reached
@@ -15,7 +15,7 @@ pub const OfferResult = union(enum) {
     max_position_exceeded,
 };
 
-// LESSON(publication/aeron): publisher_limit is a flow-control ceiling set by Sender Agent; write succeeds only if current_position < publisher_limit. See docs/tutorial/04-client/01-publications.md
+// LESSON(publications): publisher_limit is a flow-control ceiling set by Sender Agent; write succeeds only if current_position < publisher_limit. See docs/tutorial/04-client/01-publications.md
 pub const ExclusivePublication = struct {
     session_id: i32,
     stream_id: i32,
@@ -64,9 +64,9 @@ pub const ExclusivePublication = struct {
         self.publisher_limit = counters_map.get(counter_id);
     }
 
-    // LESSON(publication/aeron): A publication is not truly connected until a receiver STATUS
+    // LESSON(publications): A publication is not truly connected until a receiver STATUS
     // advances the shared publisher-limit counter. Client handles must read that live counter
-    // from CnC.dat instead of assuming the ready response implies connectivity.
+    // from CnC.dat instead of assuming the ready response implies connectivity. See docs/tutorial/04-client/01-publications.md
     fn livePublisherLimit(self: *ExclusivePublication) i64 {
         if (self.counters_map) |cm| {
             self.publisher_limit = cm.get(self.publisher_limit_counter_id);
@@ -74,7 +74,7 @@ pub const ExclusivePublication = struct {
         return self.publisher_limit;
     }
 
-    // LESSON(publication/zig): offer() reads volatile tail (term_id || offset), computes stream position, checks publisher_limit for back_pressure. See docs/tutorial/04-client/01-publications.md
+    // LESSON(publications): offer() reads volatile tail (term_id || offset), computes stream position, checks publisher_limit for back_pressure. See docs/tutorial/04-client/01-publications.md
     pub fn offer(self: *ExclusivePublication, data: []const u8) OfferResult {
         if (self.is_closed) return .closed;
 
@@ -92,7 +92,7 @@ pub const ExclusivePublication = struct {
             return .back_pressure;
         }
 
-        // LESSON(publication/aeron): Single-frame messages use BEGIN_FLAG | END_FLAG; multi-frame fragmentation uses BEGIN/no-flag/END across appends. See docs/tutorial/04-client/01-publications.md
+        // LESSON(publications): Single-frame messages use BEGIN_FLAG | END_FLAG; multi-frame fragmentation uses BEGIN/no-flag/END across appends. See docs/tutorial/04-client/01-publications.md
         var header: frame.DataHeader = undefined;
         header.version = frame.VERSION;
         header.flags = frame.DataHeader.BEGIN_FLAG | frame.DataHeader.END_FLAG;
@@ -118,7 +118,7 @@ pub const ExclusivePublication = struct {
         };
     }
 
-    // LESSON(publication/aeron): Term-relative positioning: stream position is (term_id_delta * term_length) + offset_within_term. See docs/tutorial/04-client/01-publications.md
+    // LESSON(publications): Term-relative positioning: stream position is (term_id_delta * term_length) + offset_within_term. See docs/tutorial/04-client/01-publications.md
     pub fn position(self: *const ExclusivePublication) i64 {
         const raw_tail = self.appender.rawTailVolatile();
         const term_id = @as(i32, @intCast(raw_tail >> 32));

@@ -1,10 +1,14 @@
 // Lock-free many-to-one ring buffer for client→driver IPC
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-client/src/main/java/org/agrona/concurrent/ringbuffer/ManyToOneRingBuffer.java
-// LESSON(ring-buffer/aeron): Ring buffer avoids syscalls and mutexes by using compare-and-swap on shared metadata. See docs/tutorial/01-foundations/02-ring-buffer.md
+// LESSON(ring-buffer): Ring buffer avoids syscalls and mutexes by using compare-and-swap on shared metadata. See docs/tutorial/01-foundations/02-ring-buffer.md
 const std = @import("std");
 
 pub const INSUFFICIENT_CAPACITY: i32 = -1;
 pub const PADDING_MSG_TYPE_ID: i32 = -1;
+
+// Upstream command message types (client → driver)
+pub const CLIENT_KEEPALIVE_MSG_TYPE: i32 = 0x05;
+pub const TERMINATE_DRIVER_MSG_TYPE: i32 = 0x08;
 
 // Metadata positions (last 128 bytes of buffer)
 pub const TAIL_POSITION_OFFSET: usize = 0;
@@ -13,7 +17,7 @@ pub const HEAD_POSITION_OFFSET: usize = 16;
 pub const CORRELATION_COUNTER_OFFSET: usize = 24;
 pub const METADATA_LENGTH: usize = 128;
 
-// LESSON(ring-buffer/aeron): Records are padded to cache-line boundaries so wraparound works without straddling.
+// LESSON(ring-buffer): Records are padded to cache-line boundaries so wraparound works without straddling. See docs/tutorial/01-foundations/02-ring-buffer.md
 pub const RecordDescriptor = struct {
     pub const ALIGNMENT = 8;
     pub const HEADER_LENGTH = 8; // type(4) + length(4)
@@ -50,8 +54,8 @@ pub const ManyToOneRingBuffer = struct {
         @atomicStore(i64, @as(*i64, @ptrCast(@alignCast(addr))), value, .release);
     }
 
-    // LESSON(ring-buffer/zig): @cmpxchgStrong atomically swaps only if current == expected. Success=null, failure=old value.
-    // LESSON(ring-buffer/zig): .acq_rel memory ordering ensures writes before this CAS are visible to readers that acquire after.
+    // LESSON(ring-buffer): @cmpxchgStrong atomically swaps only if current == expected. Success=null, failure=old value. See docs/tutorial/01-foundations/02-ring-buffer.md
+    // LESSON(ring-buffer): .acq_rel memory ordering ensures writes before this CAS are visible to readers that acquire after. See docs/tutorial/01-foundations/02-ring-buffer.md
     fn casTail(self: *ManyToOneRingBuffer, expected: i64, new: i64) bool {
         const addr = self.buffer.ptr + self.metadataOffset(TAIL_POSITION_OFFSET);
         const result = @cmpxchgStrong(i64, @as(*i64, @ptrCast(@alignCast(addr))), expected, new, .acq_rel, .acquire);
@@ -113,8 +117,8 @@ pub const ManyToOneRingBuffer = struct {
             record_index = 0;
         }
 
-        // LESSON(ring-buffer/zig): CAS loop retries on contention until one writer claims the tail range. No spinlock.
-        // LESSON(ring-buffer/aeron): Only the tail cursor is claimed atomically; data copy happens after, so writers don't block each other.
+        // LESSON(ring-buffer): CAS loop retries on contention until one writer claims the tail range. No spinlock. See docs/tutorial/01-foundations/02-ring-buffer.md
+        // LESSON(ring-buffer): Only the tail cursor is claimed atomically; data copy happens after, so writers don't block each other. See docs/tutorial/01-foundations/02-ring-buffer.md
         while (!self.casTail(tail, tail + @as(i64, @intCast(aligned_length)))) {
             tail = self.loadTail();
         }

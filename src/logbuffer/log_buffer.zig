@@ -10,6 +10,8 @@ pub const LOG_META_DATA_SECTION_INDEX = PARTITION_COUNT;
 pub const TERM_MIN_LENGTH: i32 = 64 * 1024;
 pub const TERM_MAX_LENGTH: i32 = 1024 * 1024 * 1024;
 
+// LESSON(log-buffer): Three rotating terms let the publisher wrap without the subscriber
+// seeing a gap; term_count % 3 picks the active partition. See docs/tutorial/01-foundations/05-log-buffer.md
 pub const LogBuffer = struct {
     terms: [PARTITION_COUNT][]u8,
     meta_raw: []u8,
@@ -107,6 +109,9 @@ pub const LogBuffer = struct {
         return self.terms[partition];
     }
 
+    // LESSON(log-buffer): Log metadata stores term counts and append positions atomically;
+    // readers use cas (compare-and-swap) to detect and retry when the active term changes.
+    // See docs/tutorial/01-foundations/05-log-buffer.md
     pub fn metaData(self: *LogBuffer) metadata.LogBufferMetadata {
         return .{
             .buffer = self.meta_raw,

@@ -166,14 +166,21 @@ pub const DriverConductor = struct {
     }
 
     pub fn doWork(self: *DriverConductor) i32 {
-        _ = self;
-        @panic("TODO: implement doWork to drain ring buffer and process SETUP signals");
+        var work: i32 = 0;
+        work += self.ring_buffer.read(handleMessage, @ptrCast(self), 10);
+        return work;
     }
 
     pub fn handleAddPublication(self: *DriverConductor, data: []const u8) void {
-        _ = self;
-        _ = data;
-        @panic("TODO: implement handleAddPublication");
+        if (data.len < 24) return;
+
+        const correlation_id = std.mem.readInt(i64, data[0..8], .little);
+        const stream_id = std.mem.readInt(i32, data[16..20], .little);
+
+        const session_id = self.next_session_id;
+        self.next_session_id +%= 1;
+
+        self.sendPublicationReady(correlation_id, session_id, stream_id, 0);
     }
 
     // Other handlers stubbed out for simplicity
@@ -201,7 +208,30 @@ pub const DriverConductor = struct {
         _ = self;
         _ = data;
     }
+
+    fn sendPublicationReady(self: *DriverConductor, correlation_id: i64, session_id: i32, stream_id: i32, pub_limit_id: i32) void {
+        var buf: [20]u8 = undefined;
+        std.mem.writeInt(i64, buf[0..8], correlation_id, .little);
+        std.mem.writeInt(i32, buf[8..12], session_id, .little);
+        std.mem.writeInt(i32, buf[12..16], stream_id, .little);
+        std.mem.writeInt(i32, buf[16..20], pub_limit_id, .little);
+        self.broadcaster.transmit(RESPONSE_ON_PUBLICATION_READY, &buf);
+    }
 };
+
+fn handleMessage(msg_type_id: i32, data: []const u8, ctx: *anyopaque) void {
+    const self: *DriverConductor = @ptrCast(@alignCast(ctx));
+    switch (msg_type_id) {
+        CMD_ADD_PUBLICATION => self.handleAddPublication(data),
+        CMD_REMOVE_PUBLICATION => self.handleRemovePublication(data),
+        CMD_ADD_SUBSCRIPTION => self.handleAddSubscription(data),
+        CMD_REMOVE_SUBSCRIPTION => self.handleRemoveSubscription(data),
+        CMD_CLIENT_KEEPALIVE => self.handleClientKeepalive(data),
+        CMD_ADD_COUNTER => self.handleAddCounter(data),
+        CMD_REMOVE_COUNTER => self.handleRemoveCounter(data),
+        else => {},
+    }
+}
 
 test "DriverConductor learner stub" {
     // Tests will be defined here to check the learner's implementation

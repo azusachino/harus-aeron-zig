@@ -26,6 +26,9 @@ pub const RecordingProgressInfo = struct {
 /// ReplaySession — represents a single active replay of a recording.
 /// Tracks where we are in the recorded data and offers a window to advance through it.
 /// Each session has a unique replay_session_id that clients use to stop/query it.
+// LESSON(replayer): Replayer reads from a recording segment and offers frames via a
+// Publication; back-pressure from the Publication controls the read rate.
+// See docs/tutorial/05-archive/04-replayer.md
 pub const ReplaySession = struct {
     allocator: std.mem.Allocator,
     /// Unique identifier for this replay session, used by client to reference it.
@@ -82,6 +85,9 @@ pub const ReplaySession = struct {
     /// Advances current_position by chunk size on each call.
     /// Returns a slice to the next chunk of recorded data, or null if at end.
     /// Chunk size is adaptive: returns up to `max_length` bytes, or less if near end.
+    // LESSON(replayer): Adaptive chunking allows the Publication to pace the replay;
+    // the Conductor stops reading when Publication.offer() returns back-pressure.
+    // See docs/tutorial/05-archive/04-replayer.md
     pub fn readChunk(self: *ReplaySession, max_length: usize) ?[]const u8 {
         if (!self.active or self.isComplete()) {
             return null;

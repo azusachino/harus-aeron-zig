@@ -7,36 +7,56 @@ pub const Poller = struct {
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) Poller {
-        _ = allocator;
-        @panic("TODO: implement Poller.init (Chapter C-5)");
+        return .{
+            .fds = .{
+                .items = &.{},
+                .capacity = 0,
+            },
+            .endpoints = .{
+                .items = &.{},
+                .capacity = 0,
+            },
+            .allocator = allocator,
+        };
     }
 
     pub fn deinit(self: *Poller) void {
-        _ = self;
-        @panic("TODO: implement Poller.deinit (Chapter C-5)");
+        self.fds.deinit(self.allocator);
+        self.endpoints.deinit(self.allocator);
     }
 
     pub fn add(self: *Poller, fd: std.posix.fd_t, endpoint: *ReceiveChannelEndpoint) !void {
-        _ = self;
-        _ = fd;
-        _ = endpoint;
-        @panic("TODO: implement Poller.add (Chapter C-5)");
+        try self.fds.append(self.allocator, .{
+            .fd = fd,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        });
+        try self.endpoints.append(self.allocator, endpoint);
     }
 
     pub fn remove(self: *Poller, fd: std.posix.fd_t) void {
-        _ = self;
-        _ = fd;
-        @panic("TODO: implement Poller.remove (Chapter C-5)");
+        for (self.fds.items, 0..) |pfd, i| {
+            if (pfd.fd == fd) {
+                _ = self.fds.swapRemove(i);
+                _ = self.endpoints.swapRemove(i);
+                return;
+            }
+        }
     }
 
     pub fn poll(self: *Poller, timeout_ms: i32) i32 {
-        _ = self;
-        _ = timeout_ms;
-        @panic("TODO: implement Poller.poll (Chapter C-5)");
+        if (self.fds.items.len == 0) return 0;
+        const ready_count = std.posix.poll(self.fds.items, timeout_ms) catch return 0;
+        return @intCast(ready_count);
     }
 
     pub fn readyFds(self: *const Poller) []const std.posix.pollfd {
-        _ = self;
-        @panic("TODO: implement Poller.readyFds (Chapter C-5)");
+        return self.fds.items;
     }
 };
+
+test "Poller.init: starts with no ready fds" {
+    var p = Poller.init(std.testing.allocator);
+    defer p.deinit();
+    try std.testing.expectEqual(@as(usize, 0), p.readyFds().len);
+}

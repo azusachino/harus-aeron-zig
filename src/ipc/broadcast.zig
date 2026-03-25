@@ -1,9 +1,11 @@
 // One-writer-many-reader broadcast buffer for driver→client notifications.
-// LESSON(broadcast-buffer): lock-free broadcast using a shared ring buffer with atomic cursors.
-// See docs/tutorial/part/broadcast.md
+// LESSON(broadcast-buffer): lock-free broadcast using a shared ring buffer with atomic cursors. See docs/tutorial/01-foundations/03-broadcast.md
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-client/src/main/java/org/agrona/concurrent/broadcast/
 
 const std = @import("std");
+
+// Broadcast message type IDs
+pub const ON_OPERATION_SUCCESS_MSG_TYPE: i32 = 0x0F04;
 
 pub const RecordDescriptor = struct {
     pub const ALIGNMENT = 8;
@@ -92,10 +94,20 @@ pub const BroadcastTransmitter = struct {
             tail = self.tail.load(.seq_cst);
         }
     }
+
+    /// Send a generic operation success response back to the client.
+    /// Used after commands that succeed but have no typed response (e.g. remove operations).
+    pub fn sendOperationSuccess(self: *BroadcastTransmitter, correlation_id: i64) void {
+        var buf: [8]u8 = undefined;
+        std.mem.writeInt(i64, buf[0..8], correlation_id, .little);
+        self.transmit(ON_OPERATION_SUCCESS_MSG_TYPE, &buf);
+    }
 };
 
 /// BroadcastReceiver: many-reader side
 /// Reads records sequentially, tracking own cursor independently.
+// LESSON(broadcast): Readers poll receiveNext() without blocking; each reader keeps its own head cursor,
+// so readers cannot starve each other. See docs/tutorial/01-foundations/03-broadcast.md
 pub const BroadcastReceiver = struct {
     shared_buffer: []u8,
     capacity: usize,
@@ -269,4 +281,24 @@ test "broadcast multiple messages" {
 test "record alignment" {
     try std.testing.expectEqual(16, RecordDescriptor.aligned(5));
     try std.testing.expectEqual(24, RecordDescriptor.aligned(12));
+}
+
+test "broadcast: sendOperationSuccess" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var tx = try BroadcastTransmitter.init(allocator, 4096);
+    defer tx.deinit(allocator);
+
+    const correlation_id: i64 = 12345;
+    tx.sendOperationSuccess(correlation_id);
+
+    var rx = try BroadcastReceiver.init(allocator, &tx);
+    try std.testing.expect(rx.receiveNext());
+    try std.testing.expectEqual(ON_OPERATION_SUCCESS_MSG_TYPE, rx.typeId());
+    try std.testing.expectEqual(@as(i32, 8), rx.length());
+
+    const payload = rx.buffer();
+    try std.testing.expectEqual(correlation_id, std.mem.readInt(i64, payload[0..8], .little));
 }

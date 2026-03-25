@@ -11,6 +11,7 @@ const sender_mod = @import("sender.zig");
 const logbuffer = @import("../logbuffer/log_buffer.zig");
 const transport_uri = @import("../transport/udp_channel.zig");
 const endpoint_mod = @import("../transport/endpoint.zig");
+const signal = @import("../signal.zig");
 
 const ManyToOneRingBuffer = ring_buffer.ManyToOneRingBuffer;
 const BroadcastTransmitter = broadcast.BroadcastTransmitter;
@@ -26,6 +27,7 @@ pub const CMD_REMOVE_SUBSCRIPTION: i32 = 0x04;
 pub const CMD_CLIENT_KEEPALIVE: i32 = 0x05;
 pub const CMD_ADD_COUNTER: i32 = 0x06;
 pub const CMD_REMOVE_COUNTER: i32 = 0x07;
+pub const CMD_TERMINATE_DRIVER: i32 = 0x08;
 
 // Response type IDs
 pub const RESPONSE_ON_PUBLICATION_READY: i32 = 0x10;
@@ -34,6 +36,7 @@ pub const RESPONSE_ON_ERROR: i32 = 0x12;
 pub const RESPONSE_ON_IMAGE_READY: i32 = 0x13;
 pub const RESPONSE_ON_IMAGE_CLOSE: i32 = 0x14;
 pub const RESPONSE_ON_COUNTER_READY: i32 = 0x15;
+pub const RESPONSE_ON_OPERATION_SUCCESS: i32 = 0x0F04;
 
 pub const PublicationEntry = struct {
     registration_id: i64,
@@ -144,7 +147,7 @@ pub const DriverConductor = struct {
     }
 
     pub fn doWork(self: *DriverConductor) i32 {
-        // LESSON(conductor/zig): Command dispatch via ring buffer polling + SETUP signal processing in one work cycle. See docs/tutorial/03-driver/03-conductor.md
+        // LESSON(conductor): Command dispatch via ring buffer polling + SETUP signal processing in one work cycle. See docs/tutorial/03-driver/03-conductor.md
         var work: i32 = 0;
         work += self.ring_buffer.read(handleMessage, @ptrCast(self), 10);
 
@@ -160,7 +163,7 @@ pub const DriverConductor = struct {
         }
 
         for (setups) |sig| {
-            // LESSON(conductor/aeron): On SETUP signal, create Image with log buffer + counters, attach to Receiver. See docs/tutorial/03-driver/03-conductor.md
+            // LESSON(conductor): On SETUP signal, create Image with log buffer + counters, attach to Receiver. See docs/tutorial/03-driver/03-conductor.md
             // Find matching subscription
             var found = false;
             for (self.subscriptions.items) |sub| {
@@ -246,7 +249,7 @@ pub const DriverConductor = struct {
     }
 
     fn handleAddPublication(self: *DriverConductor, data: []const u8) void {
-        // LESSON(conductor/aeron): Publication lifecycle—allocate session ID, create log buffer + counters, register with Sender. See docs/tutorial/03-driver/03-conductor.md
+        // LESSON(conductor): Publication lifecycle—allocate session ID, create log buffer + counters, register with Sender. See docs/tutorial/03-driver/03-conductor.md
         if (data.len < 24) return;
 
         const correlation_id = std.mem.readInt(i64, data[0..8], .little);
@@ -351,6 +354,7 @@ pub const DriverConductor = struct {
     fn handleRemovePublication(self: *DriverConductor, data: []const u8) void {
         if (data.len < 16) return;
 
+        const correlation_id = std.mem.readInt(i64, data[0..8], .little);
         const registration_id = std.mem.readInt(i64, data[8..16], .little);
 
         var found_index: ?usize = null;
@@ -372,11 +376,12 @@ pub const DriverConductor = struct {
                 self.allocator.destroy(lb);
             }
             self.allocator.free(removed.channel);
+            self.sendOperationSuccess(correlation_id);
         }
     }
 
     fn handleAddSubscription(self: *DriverConductor, data: []const u8) void {
-        // LESSON(conductor/aeron): Subscription lifecycle—store channel + stream_id, wait for publisher SETUP to create Image. See docs/tutorial/03-driver/03-conductor.md
+        // LESSON(conductor): Subscription lifecycle—store channel + stream_id, wait for publisher SETUP to create Image. See docs/tutorial/03-driver/03-conductor.md
         if (data.len < 24) return;
 
         const correlation_id = std.mem.readInt(i64, data[0..8], .little);
@@ -432,6 +437,7 @@ pub const DriverConductor = struct {
     pub fn handleRemoveSubscription(self: *DriverConductor, data: []const u8) void {
         if (data.len < 16) return;
 
+        const correlation_id = std.mem.readInt(i64, data[0..8], .little);
         const registration_id = std.mem.readInt(i64, data[8..16], .little);
 
         var found_index: ?usize = null;
@@ -471,6 +477,7 @@ pub const DriverConductor = struct {
             }
             self.receiver.mutex.unlock();
             self.allocator.free(removed.channel);
+            self.sendOperationSuccess(correlation_id);
         }
     }
 
@@ -492,7 +499,7 @@ pub const DriverConductor = struct {
     }
 
     fn handleAddCounter(self: *DriverConductor, data: []const u8) void {
-        // LESSON(conductor/aeron): Counter allocation—assign shared-memory slots for sender_position, publisher_limit, receiver_hwm, etc. See docs/tutorial/03-driver/03-conductor.md
+        // LESSON(conductor): Counter allocation—assign shared-memory slots for sender_position, publisher_limit, receiver_hwm, etc. See docs/tutorial/03-driver/03-conductor.md
         if (data.len < 16) return;
 
         const correlation_id = std.mem.readInt(i64, data[0..8], .little);
@@ -525,8 +532,14 @@ pub const DriverConductor = struct {
         _ = correlation_id;
     }
 
+    fn handleTerminateDriver(self: *DriverConductor) void {
+        signal.running.store(false, .release);
+        std.debug.print("[CONDUCTOR] TERMINATE_DRIVER received — initiating graceful shutdown\n", .{});
+        _ = self;
+    }
+
     fn sendPublicationReady(self: *DriverConductor, correlation_id: i64, session_id: i32, stream_id: i32, pub_limit_counter_id: i32) void {
-        // LESSON(conductor/zig): Broadcast response to clients via shared-memory broadcast buffer—clients poll for readiness. See docs/tutorial/03-driver/03-conductor.md
+        // LESSON(conductor): Broadcast response to clients via shared-memory broadcast buffer—clients poll for readiness. See docs/tutorial/03-driver/03-conductor.md
         var buf: [20]u8 = undefined;
         std.mem.writeInt(i64, buf[0..8], correlation_id, .little);
         std.mem.writeInt(i32, buf[8..12], session_id, .little);
@@ -570,6 +583,12 @@ pub const DriverConductor = struct {
         std.mem.writeInt(i32, buf[8..12], counter_id, .little);
         self.broadcaster.transmit(RESPONSE_ON_COUNTER_READY, &buf);
     }
+
+    fn sendOperationSuccess(self: *DriverConductor, correlation_id: i64) void {
+        var buf: [8]u8 = undefined;
+        std.mem.writeInt(i64, buf[0..8], correlation_id, .little);
+        self.broadcaster.transmit(RESPONSE_ON_OPERATION_SUCCESS, &buf);
+    }
 };
 
 fn handleMessage(msg_type_id: i32, data: []const u8, ctx: *anyopaque) void {
@@ -582,6 +601,7 @@ fn handleMessage(msg_type_id: i32, data: []const u8, ctx: *anyopaque) void {
         CMD_CLIENT_KEEPALIVE => self.handleClientKeepalive(data),
         CMD_ADD_COUNTER => self.handleAddCounter(data),
         CMD_REMOVE_COUNTER => self.handleRemoveCounter(data),
+        CMD_TERMINATE_DRIVER => self.handleTerminateDriver(),
         else => {},
     }
 }
@@ -940,4 +960,92 @@ test "DriverConductor REMOVE_SUBSCRIPTION closes associated image" {
 
     try testing.expectEqual(@as(usize, 0), conductor.subscriptions.items.len);
     try testing.expectEqual(@as(usize, 0), receiver.images.items.len);
+}
+
+test "DriverConductor REMOVE_SUBSCRIPTION sends ON_OPERATION_SUCCESS" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var ring_buf: [4096]u8 = undefined;
+    var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
+    var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
+    defer bcast.deinit(allocator);
+    var meta_buf: [4096]u8 = undefined;
+    var values_buf: [4096]u8 = undefined;
+    var cm = counters.CountersMap.init(&meta_buf, &values_buf);
+    const dummy_socket: std.posix.socket_t = undefined;
+    var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
+        .socket = dummy_socket,
+        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+    };
+    var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{ .socket = dummy_socket };
+    var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &cm, null);
+    defer receiver.deinit();
+    var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
+    defer sender.deinit();
+    var conductor = try makeTestConductor(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep);
+    defer conductor.deinit();
+
+    const stream_id: i32 = 77;
+    const reg_id: i64 = 9900;
+    const correlation_id: i64 = 55555;
+
+    // Add a subscription
+    conductor.subscriptions.append(allocator, .{
+        .registration_id = reg_id,
+        .stream_id = stream_id,
+        .channel = try allocator.dupe(u8, "aeron:udp"),
+    }) catch unreachable;
+
+    // Remove the subscription with correlation_id
+    var remove_buf: [16]u8 = undefined;
+    std.mem.writeInt(i64, remove_buf[0..8], correlation_id, .little);
+    std.mem.writeInt(i64, remove_buf[8..16], reg_id, .little);
+    conductor.handleRemoveSubscription(&remove_buf);
+
+    // Verify the broadcast sent ON_OPERATION_SUCCESS
+    var rx = try broadcast.BroadcastReceiver.init(allocator, &bcast);
+    try testing.expect(rx.receiveNext());
+    try testing.expectEqual(RESPONSE_ON_OPERATION_SUCCESS, rx.typeId());
+    try testing.expectEqual(@as(i32, 8), rx.length());
+
+    const payload = rx.buffer();
+    try testing.expectEqual(correlation_id, std.mem.readInt(i64, payload[0..8], .little));
+}
+
+test "DriverConductor TERMINATE_DRIVER stops signal" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var ring_buf: [4096]u8 = undefined;
+    var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
+    var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
+    defer bcast.deinit(allocator);
+    var meta_buf: [4096]u8 = undefined;
+    var values_buf: [4096]u8 = undefined;
+    var cm = counters.CountersMap.init(&meta_buf, &values_buf);
+    const dummy_socket: std.posix.socket_t = undefined;
+    var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
+        .socket = dummy_socket,
+        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+    };
+    var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{ .socket = dummy_socket };
+    var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &cm, null);
+    defer receiver.deinit();
+    var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
+    defer sender.deinit();
+    var conductor = try makeTestConductor(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep);
+    defer conductor.deinit();
+
+    // Verify signal is initially running
+    signal.running.store(true, .release);
+    try testing.expect(signal.isRunning() == true);
+
+    // Send TERMINATE_DRIVER command
+    conductor.handleTerminateDriver();
+
+    // Verify signal is now stopped
+    try testing.expect(signal.isRunning() == false);
 }

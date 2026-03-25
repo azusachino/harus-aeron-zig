@@ -14,21 +14,15 @@ pub const CncDescriptor = struct {
     }
 
     pub fn cncFilePath(self: CncDescriptor, buf: []u8) []const u8 {
-        _ = self;
-        _ = buf;
-        @panic("TODO: implement cncFilePath to return aeron_dir/cnc.dat");
+        return std.fmt.bufPrint(buf, "{s}/cnc.dat", .{self.aeron_dir}) catch buf[0..0];
     }
 
     pub fn errorLogPath(self: CncDescriptor, buf: []u8) []const u8 {
-        _ = self;
-        _ = buf;
-        @panic("TODO: implement errorLogPath to return aeron_dir/error.log");
+        return std.fmt.bufPrint(buf, "{s}/error.log", .{self.aeron_dir}) catch buf[0..0];
     }
 
     pub fn lossReportPath(self: CncDescriptor, buf: []u8) []const u8 {
-        _ = self;
-        _ = buf;
-        @panic("TODO: implement lossReportPath to return aeron_dir/loss-report.dat");
+        return std.fmt.bufPrint(buf, "{s}/loss-report.dat", .{self.aeron_dir}) catch buf[0..0];
     }
 };
 
