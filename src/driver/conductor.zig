@@ -248,7 +248,7 @@ pub const DriverConductor = struct {
         self.broadcaster.transmit(RESPONSE_ON_IMAGE_READY, &buf);
     }
 
-    fn handleAddPublication(self: *DriverConductor, data: []const u8) void {
+    pub fn handleAddPublication(self: *DriverConductor, data: []const u8) void {
         // LESSON(conductor): Publication lifecycle—allocate session ID, create log buffer + counters, register with Sender. See docs/tutorial/03-driver/03-conductor.md
         if (data.len < 24) return;
 
@@ -351,7 +351,7 @@ pub const DriverConductor = struct {
         self.sendPublicationReady(correlation_id, session_id, stream_id, pub_limit_handle.counter_id);
     }
 
-    fn handleRemovePublication(self: *DriverConductor, data: []const u8) void {
+    pub fn handleRemovePublication(self: *DriverConductor, data: []const u8) void {
         if (data.len < 16) return;
 
         const correlation_id = std.mem.readInt(i64, data[0..8], .little);
@@ -380,7 +380,7 @@ pub const DriverConductor = struct {
         }
     }
 
-    fn handleAddSubscription(self: *DriverConductor, data: []const u8) void {
+    pub fn handleAddSubscription(self: *DriverConductor, data: []const u8) void {
         // LESSON(conductor): Subscription lifecycle—store channel + stream_id, wait for publisher SETUP to create Image. See docs/tutorial/03-driver/03-conductor.md
         if (data.len < 24) return;
 
@@ -481,7 +481,7 @@ pub const DriverConductor = struct {
         }
     }
 
-    fn handleClientKeepalive(self: *DriverConductor, data: []const u8) void {
+    pub fn handleClientKeepalive(self: *DriverConductor, data: []const u8) void {
         if (data.len < 8) return;
         const client_id = std.mem.readInt(i64, data[0..8], .little);
         // Update or register client liveness timestamp
@@ -498,7 +498,7 @@ pub const DriverConductor = struct {
         }) catch {};
     }
 
-    fn handleAddCounter(self: *DriverConductor, data: []const u8) void {
+    pub fn handleAddCounter(self: *DriverConductor, data: []const u8) void {
         // LESSON(conductor): Counter allocation—assign shared-memory slots for sender_position, publisher_limit, receiver_hwm, etc. See docs/tutorial/03-driver/03-conductor.md
         if (data.len < 16) return;
 
@@ -522,7 +522,7 @@ pub const DriverConductor = struct {
         self.sendCounterReady(correlation_id, handle.counter_id);
     }
 
-    fn handleRemoveCounter(self: *DriverConductor, data: []const u8) void {
+    pub fn handleRemoveCounter(self: *DriverConductor, data: []const u8) void {
         if (data.len < 12) return;
 
         const correlation_id = std.mem.readInt(i64, data[0..8], .little);
@@ -532,7 +532,7 @@ pub const DriverConductor = struct {
         _ = correlation_id;
     }
 
-    fn handleTerminateDriver(self: *DriverConductor) void {
+    pub fn handleTerminateDriver(self: *DriverConductor) void {
         signal.running.store(false, .release);
         std.debug.print("[CONDUCTOR] TERMINATE_DRIVER received — initiating graceful shutdown\n", .{});
         _ = self;

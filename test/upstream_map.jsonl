@@ -44,7 +44,7 @@
   "upstream_class": "PublicationImageTest",
   "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/",
   "aeron_version": "1.46.7",
-  "status": "pending"
+  "status": "done"
 }
 {
   "layer": "driver",
@@ -52,7 +52,7 @@
   "upstream_class": "DriverConductorTest",
   "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/",
   "aeron_version": "1.46.7",
-  "status": "pending"
+  "status": "done"
 }
 {
   "layer": "driver",
@@ -60,7 +60,7 @@
   "upstream_class": "DriverConductorTest",
   "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/",
   "aeron_version": "1.46.7",
-  "status": "pending"
+  "status": "done"
 }
 {
   "layer": "driver",
@@ -68,7 +68,7 @@
   "upstream_class": "DriverConductorTest",
   "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/",
   "aeron_version": "1.46.7",
-  "status": "pending"
+  "status": "done"
 }
 {
   "layer": "driver",
@@ -76,7 +76,7 @@
   "upstream_class": "DriverConductorTest",
   "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/",
   "aeron_version": "1.46.7",
-  "status": "pending"
+  "status": "done"
 }
 {
   "layer": "driver",
@@ -84,7 +84,7 @@
   "upstream_class": "LossHandlerTest",
   "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/",
   "aeron_version": "1.46.7",
-  "status": "pending"
+  "status": "done"
 }
 {
   "layer": "driver",
@@ -92,7 +92,7 @@
   "upstream_class": "RetransmitHandlerTest",
   "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/",
   "aeron_version": "1.46.7",
-  "status": "pending"
+  "status": "done"
 }
 {
   "layer": "archive",

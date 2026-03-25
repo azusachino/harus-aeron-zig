@@ -13,8 +13,8 @@ const loss_report_mod = @import("../loss_report.zig");
 const event_log_mod = @import("../event_log.zig");
 
 const DriverConductor = conductor.DriverConductor;
-const Sender = sender.Sender;
-const Receiver = receiver.Receiver;
+pub const Sender = sender.Sender;
+pub const Receiver = receiver.Receiver;
 const ManyToOneRingBuffer = ring_buffer.ManyToOneRingBuffer;
 const BroadcastTransmitter = broadcast.BroadcastTransmitter;
 const CountersMap = counters.CountersMap;
