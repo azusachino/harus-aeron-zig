@@ -100,7 +100,7 @@
   "upstream_class": "CatalogTest",
   "upstream_path": "aeron-archive/src/test/java/io/aeron/archive/",
   "aeron_version": "1.46.7",
-  "status": "pending"
+  "status": "done"
 }
 {
   "layer": "archive",
@@ -108,7 +108,7 @@
   "upstream_class": "ArchiveTest",
   "upstream_path": "aeron-archive/src/test/java/io/aeron/archive/",
   "aeron_version": "1.46.7",
-  "status": "pending"
+  "status": "done"
 }
 {
   "layer": "archive",
@@ -116,7 +116,7 @@
   "upstream_class": "RecordingWriterTest",
   "upstream_path": "aeron-archive/src/test/java/io/aeron/archive/",
   "aeron_version": "1.46.7",
-  "status": "pending"
+  "status": "done"
 }
 {
   "layer": "cluster",
