@@ -199,9 +199,35 @@ pub fn build(b: *std.Build) void {
     });
     const run_stress_driver_resilience = b.addRunArtifact(stress_driver_resilience);
 
+    const stress_archive_replay = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/stress/archive_replay.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+            },
+        }),
+    });
+    const run_stress_archive_replay = b.addRunArtifact(stress_archive_replay);
+
+    const stress_cluster_failover = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/stress/cluster_failover.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+            },
+        }),
+    });
+    const run_stress_cluster_failover = b.addRunArtifact(stress_cluster_failover);
+
     const stress_step = b.step("stress", "Run stress tests");
     stress_step.dependOn(&run_stress_term_rotation.step);
     stress_step.dependOn(&run_stress_concurrent_pubs.step);
     stress_step.dependOn(&run_stress_reconnect.step);
     stress_step.dependOn(&run_stress_driver_resilience.step);
+    stress_step.dependOn(&run_stress_archive_replay.step);
+    stress_step.dependOn(&run_stress_cluster_failover.step);
 }

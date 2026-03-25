@@ -586,6 +586,145 @@ test "replay rejects length exceeding recording" {
     try std.testing.expectError(ReplayError.LengthExceedsRecording, result);
 }
 
+// ============================================================================
+// Multi-segment edge case tests
+// These tests model a logical recording split across multiple 64-byte segments.
+// The source_data buffer passed to ReplaySession represents the concatenated
+// segments as they would appear after loading from disk.
+// ============================================================================
+
+test "ReplaySession: replay starting mid-segment (non-zero offset)" {
+    // Simulate two 32-byte segments concatenated into one 64-byte source buffer.
+    // The replay request starts at byte offset 20 (mid first segment).
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const seg_size: usize = 32;
+    var data: [64]u8 = undefined;
+    for (0..64) |i| data[i] = @truncate(i);
+
+    const start_pos: i64 = 20;
+    var session = try ReplaySession.init(allocator, 1, 1, start_pos, 0, &data);
+    defer session.deinit();
+
+    // current_position starts at 20
+    try std.testing.expectEqual(start_pos, session.current_position);
+    try std.testing.expectEqual(start_pos, session.start_position);
+
+    // Read all remaining bytes (64 - 20 = 44)
+    const chunk = session.readChunk(100);
+    try std.testing.expect(chunk != null);
+    try std.testing.expectEqual(@as(usize, 64 - @as(usize, @intCast(start_pos))), chunk.?.len);
+    // First byte of chunk should be data[20]
+    try std.testing.expectEqual(data[20], chunk.?[0]);
+
+    _ = seg_size; // suppress unused warning
+}
+
+test "ReplaySession: replay starting exactly at segment boundary" {
+    // Two 32-byte segments; replay starts at the boundary (offset 32).
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var data: [64]u8 = undefined;
+    for (0..64) |i| data[i] = @truncate(i);
+
+    const boundary: i64 = 32;
+    var session = try ReplaySession.init(allocator, 1, 1, boundary, 0, &data);
+    defer session.deinit();
+
+    try std.testing.expectEqual(boundary, session.current_position);
+
+    // Should read only the second segment (32 bytes)
+    const chunk = session.readChunk(100);
+    try std.testing.expect(chunk != null);
+    try std.testing.expectEqual(@as(usize, 32), chunk.?.len);
+    try std.testing.expectEqual(data[32], chunk.?[0]);
+    try std.testing.expectEqual(data[63], chunk.?[31]);
+}
+
+test "ReplaySession: replay spanning multiple segments reads all bytes" {
+    // Three 16-byte segments; replay starts at 0 and should return all 48 bytes.
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var data: [48]u8 = undefined;
+    for (0..48) |i| data[i] = @truncate(i);
+
+    var session = try ReplaySession.init(allocator, 1, 1, 0, 0, &data);
+    defer session.deinit();
+
+    // Read in 16-byte chunks to simulate per-segment reads
+    const c1 = session.readChunk(16);
+    try std.testing.expect(c1 != null);
+    try std.testing.expectEqual(@as(usize, 16), c1.?.len);
+
+    const c2 = session.readChunk(16);
+    try std.testing.expect(c2 != null);
+    try std.testing.expectEqual(@as(usize, 16), c2.?.len);
+
+    const c3 = session.readChunk(16);
+    try std.testing.expect(c3 != null);
+    try std.testing.expectEqual(@as(usize, 16), c3.?.len);
+
+    // No more data
+    try std.testing.expect(session.readChunk(16) == null);
+    try std.testing.expect(session.isComplete());
+}
+
+test "ReplaySession: replay length ends exactly at segment boundary" {
+    // 64-byte source; request to replay exactly 32 bytes (first segment only).
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var data: [64]u8 = undefined;
+    for (0..64) |i| data[i] = @truncate(i);
+
+    const length: i64 = 32; // exactly one segment
+    var session = try ReplaySession.init(allocator, 1, 1, 0, length, &data);
+    defer session.deinit();
+
+    try std.testing.expectEqual(@as(i64, length), session.replay_limit);
+
+    const chunk = session.readChunk(100);
+    try std.testing.expect(chunk != null);
+    try std.testing.expectEqual(@as(usize, 32), chunk.?.len);
+
+    // Replay limit hit — should be complete
+    try std.testing.expect(session.isComplete());
+    try std.testing.expect(session.readChunk(100) == null);
+}
+
+test "ReplaySession: mid-segment start with length ending at next boundary" {
+    // 64-byte source; replay from offset 16, length 32 → bytes [16,48).
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var data: [64]u8 = undefined;
+    for (0..64) |i| data[i] = @truncate(i);
+
+    const start: i64 = 16;
+    const length: i64 = 32;
+    var session = try ReplaySession.init(allocator, 1, 1, start, length, &data);
+    defer session.deinit();
+
+    // replay_limit = start + length = 48
+    try std.testing.expectEqual(@as(i64, 48), session.replay_limit);
+
+    const chunk = session.readChunk(100);
+    try std.testing.expect(chunk != null);
+    try std.testing.expectEqual(@as(usize, 32), chunk.?.len);
+    try std.testing.expectEqual(data[16], chunk.?[0]);
+    try std.testing.expectEqual(data[47], chunk.?[31]);
+
+    try std.testing.expect(session.isComplete());
+}
+
 test "replay accepts valid position and length" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();

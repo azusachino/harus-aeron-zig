@@ -28,6 +28,13 @@ pub const RecordingDescriptorEntry = extern struct {
     }
 };
 
+/// Helper type for segment reconstruction — recording_id + file size pair.
+const SegmentPair = struct { id: i64, size: u64 };
+
+fn segmentPairLessThan(_: void, a: SegmentPair, b: SegmentPair) bool {
+    return a.id < b.id;
+}
+
 /// In-memory recording catalog
 pub const Catalog = struct {
     allocator: std.mem.Allocator,
@@ -214,13 +221,19 @@ pub const Catalog = struct {
     fn loadFromDisk(self: *Catalog) !void {
         const path = self.path orelse return;
         const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
-            error.FileNotFound => return,
+            error.FileNotFound => {
+                // catalog.dat is missing — attempt to reconstruct from segment files
+                try self.reconstructFromSegments();
+                return;
+            },
             else => return err,
         };
         defer file.close();
 
         const file_size = (try file.stat()).size;
         if (file_size == 0) {
+            // Empty catalog file — attempt segment-based reconstruction
+            try self.reconstructFromSegments();
             return;
         }
         if (file_size % @sizeOf(RecordingDescriptorEntry) != 0) {
@@ -239,6 +252,81 @@ pub const Catalog = struct {
             max_recording_id = @max(max_recording_id, entry.recording_id);
         }
         self.next_recording_id = max_recording_id + 1;
+    }
+
+    /// Reconstruct recording descriptors by scanning the archive directory for
+    /// segment files named `<recording_id>.dat`.  Each discovered file produces a
+    /// minimal descriptor so that replay can be served after a restart where
+    /// catalog.dat was lost.
+    ///
+    /// Reference: Catalog.java recoverFromExistingFiles() / verifyAndFixDescriptors()
+    pub fn reconstructFromSegments(self: *Catalog) !void {
+        const archive_dir = blk: {
+            const p = self.path orelse return;
+            // self.path is "<archive_dir>/catalog.dat" — strip the filename
+            const last_sep = std.mem.lastIndexOfScalar(u8, p, '/') orelse return;
+            break :blk p[0..last_sep];
+        };
+
+        var dir = std.fs.cwd().openDir(archive_dir, .{ .iterate = true }) catch return;
+        defer dir.close();
+
+        var it = dir.iterate();
+        var max_recording_id: i64 = 0;
+
+        // Collect (recording_id, file_size) pairs first so we can sort them.
+        var pairs = std.ArrayListUnmanaged(SegmentPair){};
+        defer pairs.deinit(self.allocator);
+
+        while (try it.next()) |entry| {
+            if (entry.kind != .file) continue;
+            // Only process files ending in ".dat" but not "catalog.dat"
+            if (!std.mem.endsWith(u8, entry.name, ".dat")) continue;
+            if (std.mem.eql(u8, entry.name, "catalog.dat")) continue;
+
+            const stem = entry.name[0 .. entry.name.len - 4];
+            const recording_id = std.fmt.parseInt(i64, stem, 10) catch continue;
+            if (recording_id <= 0) continue;
+
+            const seg_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ archive_dir, entry.name });
+            defer self.allocator.free(seg_path);
+
+            const seg_file = std.fs.cwd().openFile(seg_path, .{}) catch continue;
+            const seg_size = (seg_file.stat() catch {
+                seg_file.close();
+                continue;
+            }).size;
+            seg_file.close();
+
+            try pairs.append(self.allocator, .{ .id = recording_id, .size = seg_size });
+        }
+
+        // Sort ascending by recording_id for deterministic next_recording_id.
+        std.mem.sort(SegmentPair, pairs.items, {}, segmentPairLessThan);
+
+        for (pairs.items) |pair| {
+            // Skip if already loaded (shouldn't happen, but defensive).
+            if (self.recordingDescriptor(pair.id) != null) continue;
+
+            var entry: RecordingDescriptorEntry = undefined;
+            @memset(std.mem.asBytes(&entry), 0);
+            entry.recording_id = pair.id;
+            // stop_position reflects the total bytes in the segment file.
+            entry.stop_position = @intCast(pair.size);
+            // Use a non-zero stop_timestamp to signal the recording is complete.
+            entry.stop_timestamp = 1;
+            // Default wire parameters — unknown after catalog loss.
+            entry.segment_file_length = 128 * 1024 * 1024;
+            entry.term_buffer_length = 64 * 1024;
+            entry.mtu_length = 1408;
+
+            try self.entries.append(self.allocator, entry);
+            max_recording_id = @max(max_recording_id, pair.id);
+        }
+
+        if (max_recording_id > 0) {
+            self.next_recording_id = max_recording_id + 1;
+        }
     }
 
     fn persist(self: *Catalog) !void {
@@ -394,4 +482,84 @@ test "findLastMatchingRecording returns null for no match" {
 
     const found = catalog.findLastMatchingRecording(0, "nonexistent", 999);
     try std.testing.expect(found == null);
+}
+
+test "reconstructFromSegments rebuilds descriptors when catalog.dat is missing" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/harus-aeron-recon-{d}", .{std.time.nanoTimestamp()});
+    defer allocator.free(archive_dir);
+    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+
+    // Simulate two segment files left behind after a crash (no catalog.dat).
+    try std.fs.cwd().makePath(archive_dir);
+    const seg1 = try std.fmt.allocPrint(allocator, "{s}/1.dat", .{archive_dir});
+    defer allocator.free(seg1);
+    const seg2 = try std.fmt.allocPrint(allocator, "{s}/3.dat", .{archive_dir});
+    defer allocator.free(seg2);
+
+    {
+        const f = try std.fs.cwd().createFile(seg1, .{});
+        defer f.close();
+        try f.writeAll("frame-data-segment-one");
+    }
+    {
+        const f = try std.fs.cwd().createFile(seg2, .{});
+        defer f.close();
+        try f.writeAll("frame-data-segment-three-longer");
+    }
+
+    // Open the catalog with the archive dir — no catalog.dat present.
+    var catalog = try Catalog.initWithArchiveDir(allocator, archive_dir);
+    defer catalog.deinit();
+
+    // Should have reconstructed two descriptors.
+    try std.testing.expectEqual(@as(usize, 2), catalog.entries.items.len);
+    try std.testing.expectEqual(@as(i64, 4), catalog.next_recording_id);
+
+    const d1 = catalog.recordingDescriptor(1).?;
+    try std.testing.expectEqual(@as(i64, "frame-data-segment-one".len), d1.stop_position);
+    try std.testing.expect(d1.stop_timestamp != 0);
+
+    const d3 = catalog.recordingDescriptor(3).?;
+    try std.testing.expectEqual(@as(i64, "frame-data-segment-three-longer".len), d3.stop_position);
+}
+
+test "reconstructFromSegments skips non-recording files" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/harus-aeron-recon-skip-{d}", .{std.time.nanoTimestamp()});
+    defer allocator.free(archive_dir);
+    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+
+    try std.fs.cwd().makePath(archive_dir);
+
+    // Valid segment
+    const seg1 = try std.fmt.allocPrint(allocator, "{s}/2.dat", .{archive_dir});
+    defer allocator.free(seg1);
+    {
+        const f = try std.fs.cwd().createFile(seg1, .{});
+        defer f.close();
+        try f.writeAll("payload");
+    }
+
+    // Non-numeric — should be ignored
+    const junk = try std.fmt.allocPrint(allocator, "{s}/some-log.dat", .{archive_dir});
+    defer allocator.free(junk);
+    {
+        const f = try std.fs.cwd().createFile(junk, .{});
+        defer f.close();
+        try f.writeAll("junk");
+    }
+
+    var catalog = try Catalog.initWithArchiveDir(allocator, archive_dir);
+    defer catalog.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), catalog.entries.items.len);
+    try std.testing.expectEqual(@as(i64, 3), catalog.next_recording_id);
+    try std.testing.expect(catalog.recordingDescriptor(2) != null);
 }

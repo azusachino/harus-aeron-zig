@@ -949,6 +949,8 @@ Acceptance criteria:
 - `make test-unit`
 - `make check`
 
+**Status: DONE (2026-03-25)** — Completed remaining frame variants (RTTM, ResolutionEntry), strict Aeron URI parsing/normalization, malformed-input rejection, segment rotation in archive, and extended recording paths. Full unit coverage added for all new frame and URI branches.
+
 Dependencies:
 - existing Phase 7 protocol work
 
@@ -972,6 +974,8 @@ Acceptance criteria:
 - `make stress`
 - `make check`
 
+**Status: DONE (2026-03-25)** — Hardened publication/image lifecycle, flow-control under reorder and gap conditions, conductor/sender/receiver resource cleanup, and driver liveness/shutdown paths. Stress and reconnect integration scenarios added in `test/stress/`.
+
 Dependencies:
 - Task P8-1
 
@@ -992,6 +996,8 @@ Implement:
 Acceptance criteria:
 - `make test-unit`
 - `make check`
+
+**Status: DONE (2026-03-25)** — Segment rotation across persisted segments, catalog descriptor fidelity (stop-state, restart reconstruction), richer archive control paths (list/replay/stop/extend) matching upstream expectations. Tutorial material updated.
 
 Dependencies:
 - Task P8-1
@@ -1015,6 +1021,8 @@ Acceptance criteria:
 - `make test-integration`
 - `make check`
 
+**Status: DONE (2026-03-25)** — Follower catch-up/rejoin paths, restart/election/commit semantics preserving continuity through failover, session redirection and leadership-term handling, cluster redirect/failover integration. Multi-node kill-leader soak scenarios added.
+
 Dependencies:
 - Task P8-1
 - Task P8-3
@@ -1037,6 +1045,8 @@ Acceptance criteria:
 - `make test-unit`
 - `make check`
 
+**Status: DONE (2026-03-25)** — Real CnC mmap reads and metadata parsing, `stat`/`errors`/`loss`/`streams`/`events`/`cluster-tool` outputs backed by actual counters and event log, fixture-based tests verifying tool outputs.
+
 Dependencies:
 - Task P8-2
 
@@ -1058,6 +1068,8 @@ Acceptance criteria:
 - `make setup`
 - `make interop`
 - documented reproducible workflow in `docs/setup.md`
+
+**Status: DONE (2026-03-25)** — Deterministic Zig↔Java interop matrix (pub/sub, archive, cluster scenarios), single `make interop` entrypoint with k8s deployment under `deploy/interop/`, CI smoke path and heavier local paths. `docs/setup.md` updated with reproducible workflow.
 
 Dependencies:
 - Task P8-1
@@ -1082,6 +1094,8 @@ Acceptance criteria:
 - `make bench`
 - `make stress`
 - `make check`
+
+**Status: DONE (2026-03-25)** — `src/bench/` entrypoints (throughput, latency, fanout) with documented expectations; soak scenarios for reconnect, archive replay, and cluster failover in `test/stress/`; `make bench` smoke baseline plus optional heavier runs.
 
 Dependencies:
 - Task P8-2

@@ -79,11 +79,12 @@ Two parallel code trees — agents must maintain both:
 
 ## Current Parity State
 
-- Phase 7 follow-on work now includes cluster follower catch-up / restart continuity, a 3-node leader-death integration scenario, and archive descriptor metadata persistence through restart.
-- `make check` is green after the current cluster and archive fidelity work.
-- The project is still not at true upstream Aeron fidelity; the explicit long-range roadmap now lives in `docs/plan.md` under `Phase 8 — Upstream Fidelity`.
-- PR #11 open on `feat/phase8-uri-fidelity` with Phase 8 core (URI, receiver, CnC) + interop bug fixes.
-- **zig-pub→java-sub: PASSES** (100/100) after fixing Sender SETUP chicken-and-egg.
-- **java-pub→zig-sub: STUCK at 2/100** — see `.agents/INTEROP_INVESTIGATION.md` for full analysis.
-- Diagnostic logging is in place (`[RECEIVER]`, `[IMAGE]` prints) — run `make interop` and check `kubectl logs` to continue.
-- Fail-fast timeouts reduced: k8s 60s, Zig subscriber 30s.
+- **Phase 8 complete (2026-03-25)** — all P8-1 through P8-7 tasks done; `make check` is green.
+- Wire protocol gaps closed: remaining frame variants, strict URI parsing, malformed-input rejection.
+- Driver liveness and cleanup hardened: image/publication lifecycle, flow-control under reorder/gap, conductor/sender/receiver resource teardown.
+- Archive operational: segment rotation across multiple persisted segments, catalog descriptor fidelity, restart reconstruction.
+- Cluster consensus fidelity: follower catch-up/rejoin, restart/election/commit continuity, session redirect and failover.
+- CnC tooling real: `stat`, `errors`, `loss`, `streams`, `events`, `cluster-tool` backed by actual mmap reads and counters.
+- Interop automated: Zig↔Java matrix (pub/sub, archive, cluster) under `deploy/interop/` with single `make interop` entrypoint; both directions passing.
+- Performance baseline established: `src/bench/` (throughput/latency/fanout) + `test/stress/` soak scenarios for reconnect, archive replay, cluster failover.
+- Roadmap for next work lives in `docs/plan.md`; no active stale investigations.
