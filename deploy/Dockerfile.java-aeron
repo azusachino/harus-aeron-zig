@@ -9,4 +9,4 @@ FROM eclipse-temurin:21-jre-alpine
 COPY --from=fetcher /aeron-all.jar /aeron-all.jar
 ENV MSG_COUNT=10
 # Default: subscriber (smoke test — java receives from zig)
-CMD ["java", "-cp", "/aeron-all.jar", "io.aeron.samples.AeronSubscriber"]
+CMD ["java", "-cp", "/aeron-all.jar", "io.aeron.samples.BasicSubscriber"]
