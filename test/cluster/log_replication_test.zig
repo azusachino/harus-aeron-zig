@@ -11,13 +11,13 @@ test "LogReplication: follower commit position advances after append" {
     defer follower.deinit();
 
     try std.testing.expectEqual(@as(i64, 0), follower.commitPosition());
-    
+
     // Append data to advance append_position
     _ = try follower.onAppendRequest(1, "test data", 1000);
-    
+
     const pos = follower.appendPosition();
     try std.testing.expect(pos > 0);
-    
+
     follower.onCommitPosition(pos);
     try std.testing.expectEqual(pos, follower.commitPosition());
 }

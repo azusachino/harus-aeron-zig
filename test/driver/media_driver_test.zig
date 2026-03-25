@@ -18,7 +18,7 @@ test "MediaDriver: create and destroy" {
     defer md.destroy();
 
     try std.testing.expect(md.cnc != null);
-    
+
     const dir = try std.fs.openDirAbsolute(ctx.aeron_dir, .{});
     var dir_mutable = dir;
     defer dir_mutable.close();

@@ -24,12 +24,12 @@ test "RecordingWriter: rotates segment" {
     // Write enough to trigger rotation
     const data = [_]u8{0} ** 600;
     _ = try writer.write(&data);
-    
+
     try std.testing.expectEqual(@as(i64, 600), writer.stop_position);
     try std.testing.expectEqual(@as(i64, 0), writer.current_segment_base);
 
     _ = try writer.write(&data); // Total 1200 > 1024
-    
+
     try std.testing.expectEqual(@as(i64, 1200), writer.stop_position);
     // current_segment_base follows stop_position in current implementation
     try std.testing.expectEqual(@as(i64, 1200), writer.current_segment_base);

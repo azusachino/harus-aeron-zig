@@ -8,7 +8,7 @@ const aeron = @import("aeron");
 test "ReplaySession: yields recorded data in order" {
     const allocator = std.testing.allocator;
     const source_data = "hello aeron archive";
-    
+
     var session = try aeron.archive.replayer.ReplaySession.init(
         allocator,
         1, // replay_session_id

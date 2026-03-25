@@ -34,6 +34,6 @@ test "LossReport: records observation" {
 
     var lr = aeron.loss_report.LossReport.init(buf);
     lr.recordObservation(256, 1000000, 1, 10, "127.0.0.1:20121");
-    
+
     try std.testing.expect(lr.entryCount() > 0);
 }

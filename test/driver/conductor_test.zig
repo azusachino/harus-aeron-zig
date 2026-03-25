@@ -43,7 +43,7 @@ test "DriverConductor: handleAddPublication and handleRemovePublication" {
     var cmd_buf = try allocator.alloc(u8, 1024);
     defer allocator.free(cmd_buf);
     @memset(cmd_buf, 0);
-    
+
     std.mem.writeInt(i64, cmd_buf[0..8], 10001, .little); // correlation_id
     std.mem.writeInt(i32, cmd_buf[16..20], 1001, .little); // stream_id
     std.mem.writeInt(i32, cmd_buf[20..24], @as(i32, @intCast(channel.len)), .little);
@@ -58,7 +58,7 @@ test "DriverConductor: handleAddPublication and handleRemovePublication" {
     var remove_cmd: [16]u8 = undefined;
     std.mem.writeInt(i64, remove_cmd[0..8], 10002, .little); // correlation_id
     std.mem.writeInt(i64, remove_cmd[8..16], 10001, .little); // registration_id
-    
+
     conductor.handleRemovePublication(&remove_cmd);
     try std.testing.expectEqual(@as(usize, 0), conductor.publications.items.len);
 }
@@ -101,7 +101,7 @@ test "DriverConductor: handleAddSubscription and handleRemoveSubscription" {
     var cmd_buf = try allocator.alloc(u8, 1024);
     defer allocator.free(cmd_buf);
     @memset(cmd_buf, 0);
-    
+
     std.mem.writeInt(i64, cmd_buf[0..8], 20001, .little); // correlation_id
     std.mem.writeInt(i32, cmd_buf[16..20], 1001, .little); // stream_id
     std.mem.writeInt(i32, cmd_buf[20..24], @as(i32, @intCast(channel.len)), .little);
@@ -116,7 +116,7 @@ test "DriverConductor: handleAddSubscription and handleRemoveSubscription" {
     var remove_cmd: [16]u8 = undefined;
     std.mem.writeInt(i64, remove_cmd[0..8], 20002, .little); // correlation_id
     std.mem.writeInt(i64, remove_cmd[8..16], 20001, .little); // registration_id
-    
+
     conductor.handleRemoveSubscription(&remove_cmd);
     try std.testing.expectEqual(@as(usize, 0), conductor.subscriptions.items.len);
 }
