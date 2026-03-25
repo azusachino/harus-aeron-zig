@@ -85,6 +85,21 @@ pub const CommitPositionCmd = struct {
     log_position: i64,
 };
 
+/// SnapshotBeginCmd — leader signals start of snapshot.
+pub const SnapshotBeginCmd = struct {
+    leadership_term_id: i64,
+    log_position: i64,
+    timestamp: i64,
+    member_id: i32,
+};
+
+/// SnapshotEndCmd — leader signals snapshot is complete.
+pub const SnapshotEndCmd = struct {
+    leadership_term_id: i64,
+    log_position: i64,
+    member_id: i32,
+};
+
 // =============================================================================
 // Command Union
 // =============================================================================
@@ -96,6 +111,8 @@ pub const Command = union(enum) {
     session_message: SessionMessageCmd,
     append_position: AppendPositionCmd,
     commit_position: CommitPositionCmd,
+    snapshot_begin: SnapshotBeginCmd,
+    snapshot_end: SnapshotEndCmd,
 };
 
 // =============================================================================
@@ -159,6 +176,7 @@ pub const ClusterConductor = struct {
     sessions: std.ArrayList(SessionState),
     next_session_id: i64,
     commit_position: i64,
+    snapshot_in_progress: bool = false,
 
     /// Initialize a new ClusterConductor.
     pub fn init(allocator: std.mem.Allocator, member_id: i32) ClusterConductor {
@@ -218,6 +236,12 @@ pub const ClusterConductor = struct {
             },
             .commit_position => |commit_cmd| {
                 try self.handleCommitPosition(commit_cmd);
+            },
+            .snapshot_begin => |snapshot_cmd| {
+                try self.handleSnapshotBegin(snapshot_cmd);
+            },
+            .snapshot_end => |snapshot_cmd| {
+                try self.handleSnapshotEnd(snapshot_cmd);
             },
         }
     }
@@ -316,6 +340,20 @@ pub const ClusterConductor = struct {
     fn handleCommitPosition(self: *ClusterConductor, cmd: CommitPositionCmd) !void {
         self.log.advanceCommitPosition(cmd.log_position);
         self.commit_position = self.log.commitPosition();
+    }
+
+    /// Handle snapshot_begin command.
+    /// Mark snapshot in progress — services must take snapshot before cluster proceeds.
+    fn handleSnapshotBegin(self: *ClusterConductor, cmd: SnapshotBeginCmd) !void {
+        self.snapshot_in_progress = true;
+        _ = cmd; // Note: In a full implementation, would trigger service snapshot handlers
+    }
+
+    /// Handle snapshot_end command.
+    /// Snapshot complete — cluster may resume normal operation.
+    fn handleSnapshotEnd(self: *ClusterConductor, cmd: SnapshotEndCmd) !void {
+        self.snapshot_in_progress = false;
+        _ = cmd; // Note: In a full implementation, would trigger service resume handlers
     }
 
     /// Drain and deliver all queued responses.

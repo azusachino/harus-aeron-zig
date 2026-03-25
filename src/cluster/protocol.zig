@@ -165,6 +165,31 @@ pub const ServiceAck = extern struct {
     pub const MSG_TYPE_ID: i32 = 221;
 };
 
+/// SnapshotBegin — leader signals start of snapshot; all services must take snapshot before cluster can proceed.
+/// Matches upstream aeron-cluster SnapshotBegin codec layout.
+pub const SnapshotBegin = extern struct {
+    leadership_term_id: i64, // current leader's term
+    log_position: i64, // log position at which snapshot is taken
+    timestamp: i64, // wall clock time for the snapshot
+    member_id: i32, // leader member ID
+    _padding: i32 = 0, // explicit padding to reach 32 bytes
+
+    pub const HEADER_LENGTH = @sizeOf(SnapshotBegin);
+    pub const MSG_TYPE_ID: i32 = 231;
+};
+
+/// SnapshotEnd — leader signals snapshot is complete; cluster may resume normal operation.
+/// Matches upstream aeron-cluster SnapshotEnd codec layout.
+pub const SnapshotEnd = extern struct {
+    leadership_term_id: i64, // must match corresponding SnapshotBegin
+    log_position: i64, // same position as SnapshotBegin
+    member_id: i32, // leader member ID
+    _padding: i32 = 0, // explicit padding to reach 24 bytes
+
+    pub const HEADER_LENGTH = @sizeOf(SnapshotEnd);
+    pub const MSG_TYPE_ID: i32 = 232;
+};
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -209,6 +234,12 @@ comptime {
     std.debug.assert(CommitPositionHeader.MSG_TYPE_ID != RequestVoteHeader.MSG_TYPE_ID);
     std.debug.assert(VoteHeader.MSG_TYPE_ID != NewLeadershipTermHeader.MSG_TYPE_ID);
     std.debug.assert(NewLeadershipTermHeader.MSG_TYPE_ID != ServiceAck.MSG_TYPE_ID);
+    std.debug.assert(ServiceAck.MSG_TYPE_ID != SnapshotBegin.MSG_TYPE_ID);
+    std.debug.assert(SnapshotBegin.MSG_TYPE_ID != SnapshotEnd.MSG_TYPE_ID);
+
+    // Verify frame sizes
+    std.debug.assert(@sizeOf(SnapshotBegin) == SnapshotBegin.HEADER_LENGTH);
+    std.debug.assert(@sizeOf(SnapshotEnd) == SnapshotEnd.HEADER_LENGTH);
 
     // Verify EventCode values
     std.debug.assert(@intFromEnum(EventCode.ok) == 0);
@@ -240,6 +271,8 @@ test "header sizes are correct" {
     try std.testing.expectEqual(@as(usize, 40), VoteHeader.HEADER_LENGTH);
     try std.testing.expectEqual(@as(usize, 48), NewLeadershipTermHeader.HEADER_LENGTH);
     try std.testing.expectEqual(@as(usize, 40), ServiceAck.HEADER_LENGTH);
+    try std.testing.expectEqual(@as(usize, 32), SnapshotBegin.HEADER_LENGTH);
+    try std.testing.expectEqual(@as(usize, 24), SnapshotEnd.HEADER_LENGTH);
 }
 
 test "msg_type_ids are unique" {
@@ -254,6 +287,8 @@ test "msg_type_ids are unique" {
     try std.testing.expectEqual(215, VoteHeader.MSG_TYPE_ID);
     try std.testing.expectEqual(216, NewLeadershipTermHeader.MSG_TYPE_ID);
     try std.testing.expectEqual(221, ServiceAck.MSG_TYPE_ID);
+    try std.testing.expectEqual(231, SnapshotBegin.MSG_TYPE_ID);
+    try std.testing.expectEqual(232, SnapshotEnd.MSG_TYPE_ID);
 }
 
 test "event code enum values" {
