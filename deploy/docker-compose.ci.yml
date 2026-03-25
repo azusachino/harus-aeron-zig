@@ -5,14 +5,14 @@ services:
       dockerfile: deploy/Dockerfile
     networks: [aeron]
     volumes:
-      - aeron_data:/aeron_data
+      - aeron_shm:/dev/shm/aeron
     environment:
-      AERON_DIR: /aeron_data
+      AERON_DIR: /dev/shm/aeron
       AERON_TERM_BUFFER_LENGTH: "65536"
     healthcheck:
-      test: ["CMD", "test", "-f", "/aeron_data/cnc.dat"]
-      interval: 2s
-      timeout: 5s
+      test: ["CMD", "test", "-f", "/dev/shm/aeron/cnc.dat"]
+      interval: 1s
+      timeout: 2s
       retries: 10
 
   java-client:
@@ -23,12 +23,12 @@ services:
         AERON_VERSION: "${AERON_VERSION:-1.46.7}"
     networks: [aeron]
     volumes:
-      - aeron_data:/aeron_data
+      - aeron_shm:/dev/shm/aeron
     depends_on:
       zig-driver:
         condition: service_healthy
     environment:
-      AERON_DIR: /aeron_data
+      AERON_DIR: /dev/shm/aeron
       MSG_COUNT: "${MSG_COUNT:-10}"
 
 networks:
@@ -39,4 +39,9 @@ networks:
         - subnet: 172.28.0.0/16
 
 volumes:
-  aeron_data:
+  aeron_shm:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1g"

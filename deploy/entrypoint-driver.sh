@@ -1,13 +1,14 @@
 #!/bin/sh
 set -e
 
-# Ensure /dev/shm/aeron exists (at runtime, not build time)
-mkdir -p /dev/shm/aeron
-mkdir -p /aeron_data
+# Use /dev/shm/aeron as the Aeron standard for Linux
+AERON_DIR_PATH="${AERON_DIR:-/dev/shm/aeron}"
 
-# Create symlinks for Java Aeron client compatibility
-ln -sf /dev/shm/aeron /dev/shm/aeron-root 2>/dev/null || true
-ln -sf /aeron_data /aeron_data_root 2>/dev/null || true
+echo "[DRIVER] Using Aeron Dir: $AERON_DIR_PATH"
+
+# Fail fast if we can't create/access the directory
+mkdir -p "$AERON_DIR_PATH" || { echo "[DRIVER] ERROR: Could not create $AERON_DIR_PATH"; exit 1; }
 
 # Run the driver
-exec /app/aeron-driver
+# Passing --aeron-dir explicitly to be certain
+exec /app/aeron-driver --aeron-dir="$AERON_DIR_PATH"
