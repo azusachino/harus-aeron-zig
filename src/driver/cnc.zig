@@ -9,8 +9,10 @@ const std = @import("std");
 
 // Magic bytes at offset 0 — "SRDN" in little-endian (matches CncFileDescriptor.CNC_FILE_MAGIC in Java)
 pub const CNC_MAGIC: i32 = 0x4e445253;
-// Version number at offset 4 — matches CncFileDescriptor.CNC_VERSION
-pub const CNC_VERSION: i32 = 207;
+// Version number at offset 4 — encoded as [major:8][minor:8][patch:8][unused:8]
+// Format: (major << 24) | (minor << 16) | (patch << 8)
+// Value 1.46.7 matches aeron-all-1.46.7 for interop compatibility
+pub const CNC_VERSION: i32 = (1 << 24) | (46 << 16) | (7 << 8);
 
 pub const CncConfig = struct {
     to_driver_buffer_length: i32,
