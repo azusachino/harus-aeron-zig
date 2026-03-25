@@ -122,6 +122,14 @@ pub const CommitPositionResponse = struct {
     log_position: i64,
 };
 
+/// RedirectResponse — notifies client to reconnect to the current leader.
+/// Matches Aeron SessionEvent with event_code = redirect (2).
+pub const RedirectResponse = struct {
+    cluster_session_id: i64,
+    correlation_id: i64,
+    leader_member_id: i32,
+};
+
 // =============================================================================
 // Response Union
 // =============================================================================
@@ -131,6 +139,7 @@ pub const Response = union(enum) {
     session_event: SessionEventResponse,
     error_response: ErrorResponse,
     commit_position: CommitPositionResponse,
+    redirect: RedirectResponse,
 };
 
 // =============================================================================
@@ -214,7 +223,22 @@ pub const ClusterConductor = struct {
     }
 
     /// Handle session_connect command.
+    /// If this node is not the leader, emit a redirect response pointing to the
+    /// current known leader rather than accepting the session.
     fn handleSessionConnect(self: *ClusterConductor, cmd: SessionConnectCmd) !void {
+        if (self.role != .leader) {
+            // Redirect client to the current leader
+            const response = Response{
+                .redirect = RedirectResponse{
+                    .cluster_session_id = cmd.cluster_session_id,
+                    .correlation_id = cmd.correlation_id,
+                    .leader_member_id = self.leader_member_id,
+                },
+            };
+            try self.response_queue.append(self.allocator, response);
+            return;
+        }
+
         const session = SessionState{
             .cluster_session_id = self.next_session_id,
             .response_stream_id = cmd.response_stream_id,
@@ -314,11 +338,31 @@ pub const ClusterConductor = struct {
         self.leader_ship_term_id = term_id;
     }
 
-    /// Transition to follower role.
+    /// Transition to follower role and emit redirect responses to all open sessions
+    /// so that clients know to reconnect to the new leader.
     pub fn becomeFollower(self: *ClusterConductor, leader_id: i32, term_id: i64) void {
+        const was_leader = self.role == .leader;
         self.role = .follower;
         self.leader_member_id = leader_id;
         self.leader_ship_term_id = term_id;
+        if (was_leader) {
+            self.notifySessionsRedirect(leader_id) catch {};
+        }
+    }
+
+    /// Emit redirect responses for all open sessions, directing clients to new_leader_id.
+    pub fn notifySessionsRedirect(self: *ClusterConductor, new_leader_id: i32) !void {
+        for (self.sessions.items) |*session| {
+            if (session.is_open) {
+                try self.response_queue.append(self.allocator, .{
+                    .redirect = RedirectResponse{
+                        .cluster_session_id = session.cluster_session_id,
+                        .correlation_id = 0,
+                        .leader_member_id = new_leader_id,
+                    },
+                });
+            }
+        }
     }
 
     /// Replace local replicated state with a leader snapshot while preserving local identity.
@@ -432,6 +476,8 @@ test "session connect and close" {
 
     var conductor = ClusterConductor.init(allocator, 0);
     defer conductor.deinit();
+    // Must be leader to accept session connects
+    conductor.becomeLeader(1);
 
     const response_channel = try allocator.dupe(u8, "aeron:udp://localhost:40123");
     defer allocator.free(response_channel);
@@ -616,6 +662,8 @@ test "multiple sessions" {
 
     var conductor = ClusterConductor.init(allocator, 0);
     defer conductor.deinit();
+    // Must be leader to accept session connects
+    conductor.becomeLeader(1);
 
     const response_channel = try allocator.dupe(u8, "aeron:udp://localhost:40123");
     defer allocator.free(response_channel);
@@ -643,6 +691,8 @@ test "poll responses clears queue" {
 
     var conductor = ClusterConductor.init(allocator, 0);
     defer conductor.deinit();
+    // Must be leader to accept session connects
+    conductor.becomeLeader(1);
 
     const response_channel = try allocator.dupe(u8, "aeron:udp://localhost:40123");
     defer allocator.free(response_channel);
@@ -770,4 +820,95 @@ test "conductor state round trip restores leader progress" {
     try std.testing.expectEqual(conductor.next_session_id, restored.next_session_id);
     try std.testing.expectEqual(@as(usize, 1), restored.sessionCount());
     try std.testing.expectEqualSlices(u8, "resume", restored.log.entryAt(0).?.data);
+}
+
+test "follower redirects session_connect to leader" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ClusterConductor.init(allocator, 1);
+    defer conductor.deinit();
+    conductor.becomeFollower(0, 3); // node 0 is leader, term 3
+
+    const response_channel = try allocator.dupe(u8, "aeron:udp://localhost:40200");
+    defer allocator.free(response_channel);
+
+    try conductor.enqueueCommand(.{
+        .session_connect = .{
+            .correlation_id = 55,
+            .cluster_session_id = 10,
+            .response_stream_id = 7,
+            .response_channel = response_channel,
+        },
+    });
+    _ = try conductor.doWork();
+
+    // Follower must not create a session locally
+    try std.testing.expectEqual(@as(usize, 0), conductor.sessionCount());
+
+    // Must emit a redirect pointing to leader 0
+    const CaptureRedirect = struct {
+        pub var got_redirect: bool = false;
+        pub var redirected_to: i32 = -1;
+        pub var corr_id: i64 = -1;
+    };
+    CaptureRedirect.got_redirect = false;
+    _ = conductor.pollResponses(&struct {
+        pub fn handle(response: *const Response) void {
+            if (response.* == .redirect) {
+                CaptureRedirect.got_redirect = true;
+                CaptureRedirect.redirected_to = response.redirect.leader_member_id;
+                CaptureRedirect.corr_id = response.redirect.correlation_id;
+            }
+        }
+    }.handle);
+    try std.testing.expect(CaptureRedirect.got_redirect);
+    try std.testing.expectEqual(@as(i32, 0), CaptureRedirect.redirected_to);
+    try std.testing.expectEqual(@as(i64, 55), CaptureRedirect.corr_id);
+}
+
+test "leader-to-follower transition emits redirect for open sessions" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ClusterConductor.init(allocator, 0);
+    defer conductor.deinit();
+    conductor.becomeLeader(1);
+
+    // Open two sessions while leader
+    const rc1 = try allocator.dupe(u8, "aeron:udp://localhost:40201");
+    defer allocator.free(rc1);
+    const rc2 = try allocator.dupe(u8, "aeron:udp://localhost:40202");
+    defer allocator.free(rc2);
+
+    try conductor.enqueueCommand(.{ .session_connect = .{ .correlation_id = 1, .cluster_session_id = 1, .response_stream_id = 1, .response_channel = rc1 } });
+    _ = try conductor.doWork();
+    try conductor.enqueueCommand(.{ .session_connect = .{ .correlation_id = 2, .cluster_session_id = 2, .response_stream_id = 2, .response_channel = rc2 } });
+    _ = try conductor.doWork();
+    conductor.response_queue.clearRetainingCapacity();
+
+    // Become follower (new leader = node 2)
+    conductor.becomeFollower(2, 2);
+
+    // Should have emitted 2 redirect responses
+    const CaptureLeaderChange = struct {
+        pub var redirect_count: i32 = 0;
+        pub var all_point_to_node2: bool = true;
+    };
+    CaptureLeaderChange.redirect_count = 0;
+    CaptureLeaderChange.all_point_to_node2 = true;
+    _ = conductor.pollResponses(&struct {
+        pub fn handle(response: *const Response) void {
+            if (response.* == .redirect) {
+                CaptureLeaderChange.redirect_count += 1;
+                if (response.redirect.leader_member_id != 2) {
+                    CaptureLeaderChange.all_point_to_node2 = false;
+                }
+            }
+        }
+    }.handle);
+    try std.testing.expectEqual(@as(i32, 2), CaptureLeaderChange.redirect_count);
+    try std.testing.expect(CaptureLeaderChange.all_point_to_node2);
 }

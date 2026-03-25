@@ -138,13 +138,15 @@ pub const ConsensusModule = struct {
             self.conductor.role != conductor_mod.ClusterRole.leader)
         {
             self.conductor.becomeLeader(self.election.leaderShipTermId());
-        } else if (self.election.currentState() == election_mod.ElectionState.follower_ready and
-            self.conductor.role != conductor_mod.ClusterRole.follower)
-        {
-            self.conductor.becomeFollower(
-                self.election.leaderMemberId(),
-                self.election.leaderShipTermId(),
-            );
+        } else if (self.election.currentState() == election_mod.ElectionState.follower_ready) {
+            const new_leader = self.election.leaderMemberId();
+            const new_term = self.election.leaderShipTermId();
+            if (self.conductor.role != conductor_mod.ClusterRole.follower or
+                self.conductor.leader_member_id != new_leader or
+                self.conductor.leader_ship_term_id != new_term)
+            {
+                self.conductor.becomeFollower(new_leader, new_term);
+            }
         }
 
         // Drive conductor
@@ -250,6 +252,7 @@ pub const SessionCloseCmd = conductor_mod.SessionCloseCmd;
 pub const SessionMessageCmd = conductor_mod.SessionMessageCmd;
 pub const ClusterRole = conductor_mod.ClusterRole;
 pub const ElectionState = election_mod.ElectionState;
+pub const RedirectResponse = conductor_mod.RedirectResponse;
 
 // =============================================================================
 // Tests
