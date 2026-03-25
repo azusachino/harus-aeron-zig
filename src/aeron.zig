@@ -40,7 +40,7 @@ pub const AeronContext = struct {
     aeron_dir: []const u8 = "/tmp/aeron",
 };
 
-// LESSON(what-is-aeron): Aeron is a factory and lifecycle container for the client-side API. It holds the CnC.dat file handle, ring buffer and broadcast receiver for driver communication, and hash maps of owned Publication and Subscription instances. The embedded_driver field is optional—clients can spawn their own driver or connect to an existing one via CnC.dat. See docs/tutorial/00-orientation/01-what-is-aeron.md
+// LESSON(what-is-aeron): Aeron is a factory and lifecycle container for the client-side API. It holds the cnc.dat file handle, ring buffer and broadcast receiver for driver communication, and hash maps of owned Publication and Subscription instances. The embedded_driver field is optional—clients can spawn their own driver or connect to an existing one via cnc.dat. See docs/tutorial/00-orientation/01-what-is-aeron.md
 pub const Aeron = struct {
     ctx: AeronContext,
     allocator: std.mem.Allocator,
@@ -55,9 +55,9 @@ pub const Aeron = struct {
     subscriptions: std.AutoHashMapUnmanaged(i64, *Subscription),
     embedded_driver: ?*driver.MediaDriver = null,
 
-    // LESSON(what-is-aeron): Aeron.init opens the CnC.dat file, extracts the shared to-driver ring buffer and to-clients broadcast receiver. The client writes commands (add_publication, add_subscription) to the ring buffer; the driver writes responses (session_id, stream_id) to the broadcast. All subsequent publications and subscriptions reference log buffers allocated by the driver and discoverable via the shared broadcast. See docs/tutorial/00-orientation/01-what-is-aeron.md
+    // LESSON(what-is-aeron): Aeron.init opens the cnc.dat file, extracts the shared to-driver ring buffer and to-clients broadcast receiver. The client writes commands (add_publication, add_subscription) to the ring buffer; the driver writes responses (session_id, stream_id) to the broadcast. All subsequent publications and subscriptions reference log buffers allocated by the driver and discoverable via the shared broadcast. See docs/tutorial/00-orientation/01-what-is-aeron.md
     pub fn init(allocator: std.mem.Allocator, ctx: AeronContext) !Aeron {
-        const cnc_path = try std.fmt.allocPrint(allocator, "{s}/CnC.dat", .{ctx.aeron_dir});
+        const cnc_path = try std.fmt.allocPrint(allocator, "{s}/cnc.dat", .{ctx.aeron_dir});
         defer allocator.free(cnc_path);
 
         var file = try cnc.CncFile.open(allocator, cnc_path);
@@ -232,7 +232,7 @@ test "Aeron init and deinit" {
     const ctx = AeronContext{ .aeron_dir = "/tmp/aeron-test-client" };
     defer std.fs.deleteTreeAbsolute(ctx.aeron_dir) catch {};
 
-    // Need a driver to create CnC.dat first
+    // Need a driver to create cnc.dat first
     var md = try driver.MediaDriver.create(allocator, .{ .aeron_dir = ctx.aeron_dir });
     defer md.destroy();
 

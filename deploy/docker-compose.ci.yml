@@ -5,10 +5,10 @@ services:
       dockerfile: deploy/Dockerfile
     networks: [aeron]
     environment:
-      AERON_DIR: /tmp/aeron
+      AERON_DIR: /dev/shm/aeron
       AERON_TERM_BUFFER_LENGTH: "65536"
     healthcheck:
-      test: ["CMD", "test", "-S", "/tmp/aeron/cnc.dat"]
+      test: ["CMD", "test", "-S", "/dev/shm/aeron/CnC.dat"]
       interval: 2s
       timeout: 5s
       retries: 10
@@ -24,7 +24,7 @@ services:
       zig-driver:
         condition: service_healthy
     environment:
-      AERON_DIR: /tmp/aeron
+      AERON_DIR: /dev/shm/aeron
       MSG_COUNT: "${MSG_COUNT:-10}"
 
 networks:

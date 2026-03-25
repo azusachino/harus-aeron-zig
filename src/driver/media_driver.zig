@@ -76,10 +76,10 @@ pub const MediaDriver = struct {
             if (err != error.PathAlreadyExists) return err;
         };
 
-        const cnc_path = try std.fmt.allocPrint(allocator, "{s}/CnC.dat", .{ctx_.aeron_dir});
+        const cnc_path = try std.fmt.allocPrint(allocator, "{s}/cnc.dat", .{ctx_.aeron_dir});
         defer allocator.free(cnc_path);
 
-        // LESSON(media-driver): CnC.dat is the shared-memory gateway between driver and all clients. It mmap's a single file containing to-driver ring buffer, to-clients broadcast buffer, counters metadata and values. All agents and external client processes read/write via this single file—true zero-copy IPC. See docs/tutorial/03-driver/04-media-driver.md
+        // LESSON(media-driver): cnc.dat is the shared-memory gateway between driver and all clients. It mmap's a single file containing to-driver ring buffer, to-clients broadcast buffer, counters metadata and values. All agents and external client processes read/write via this single file—true zero-copy IPC. See docs/tutorial/03-driver/04-media-driver.md
         const cnc_cfg = @import("cnc.zig").CncConfig{
             .to_driver_buffer_length = 1024 * 1024,
             .to_clients_buffer_length = 1024 * 1024,
@@ -324,7 +324,7 @@ fn receiverThreadFunc(md: *MediaDriver) void {
 
 const testing = std.testing;
 
-test "MediaDriver: create and destroy with CnC.dat" {
+test "MediaDriver: create and destroy with cnc.dat" {
     const allocator = testing.allocator;
     const ctx = MediaDriverContext{
         .aeron_dir = "/tmp/aeron-test-create",
@@ -335,7 +335,7 @@ test "MediaDriver: create and destroy with CnC.dat" {
     defer md.destroy();
 
     try testing.expect(md.cnc != null);
-    try testing.expect(std.fs.cwd().access("/tmp/aeron-test-create/CnC.dat", .{}) == error.FileNotFound or true); // Access check
+    try testing.expect(std.fs.cwd().access("/tmp/aeron-test-create/cnc.dat", .{}) == error.FileNotFound or true); // Access check
 }
 
 test "MediaDriver: init and deinit" {
