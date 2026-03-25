@@ -65,6 +65,14 @@ pub const ExtendRecordingCmd = struct {
     source_identity: []const u8,
 };
 
+/// TruncateRecordingCmd — truncate a stopped recording at a given position.
+/// Upstream: ArchiveProxy.truncateRecording / AeronArchive.truncateRecording.
+pub const TruncateRecordingCmd = struct {
+    correlation_id: i64,
+    recording_id: i64,
+    truncate_position: i64,
+};
+
 // =============================================================================
 // Command Union
 // =============================================================================
@@ -78,6 +86,7 @@ pub const Command = union(enum) {
     stop_replay: StopReplayCmd,
     list_recordings: ListRecordingsCmd,
     extend_recording: ExtendRecordingCmd,
+    truncate_recording: TruncateRecordingCmd,
 };
 
 // =============================================================================
@@ -224,6 +233,11 @@ pub const ArchiveConductor = struct {
                     try self.queueErrorResponse(ext_cmd.correlation_id, err);
                 };
             },
+            .truncate_recording => |trunc_cmd| {
+                self.handleTruncateRecording(trunc_cmd) catch |err| {
+                    try self.queueErrorResponse(trunc_cmd.correlation_id, err);
+                };
+            },
         }
     }
 
@@ -290,6 +304,39 @@ pub const ArchiveConductor = struct {
         try self.queueSuccessResponse(cmd.correlation_id, cmd.recording_id);
     }
 
+    /// Handle truncate_recording command.
+    /// Truncates a stopped recording at the given position, discarding data beyond it.
+    fn handleTruncateRecording(self: *ArchiveConductor, cmd: TruncateRecordingCmd) !void {
+        const desc = self.catalog.recordingDescriptor(cmd.recording_id) orelse {
+            try self.queueErrorCodeResponse(
+                cmd.correlation_id,
+                @intFromEnum(protocol.ControlResponseCode.recording_unknown),
+            );
+            return;
+        };
+
+        // Cannot truncate an active recording — check if any recorder session is active
+        if (self.recorder) |recorder| {
+            if (recorder.findSession(cmd.recording_id)) |session| {
+                if (session.active) {
+                    try self.queueErrorResponse(cmd.correlation_id, error.RecordingActive);
+                    return;
+                }
+            }
+        }
+
+        // Validate truncate position is within [start_position, stop_position]
+        if (cmd.truncate_position < desc.start_position or cmd.truncate_position > desc.stop_position) {
+            try self.queueErrorResponse(cmd.correlation_id, error.PositionOutOfRange);
+            return;
+        }
+
+        // Update catalog: set new stop_position, clear stop_timestamp
+        try self.catalog.updateStopState(cmd.recording_id, cmd.truncate_position, 0);
+
+        try self.queueSuccessResponse(cmd.correlation_id, cmd.recording_id);
+    }
+
     /// Handle replay command.
     fn handleReplay(self: *ArchiveConductor, cmd: ReplayCmd) !void {
         // Look up the recording in the catalog
@@ -310,6 +357,8 @@ pub const ArchiveConductor = struct {
             cmd.recording_id,
             cmd.position,
             cmd.length,
+            recording.?.start_position,
+            recording.?.stop_position,
             replay_source,
         );
         try self.queueSuccessResponse(cmd.correlation_id, replay_session_id);
@@ -326,13 +375,37 @@ pub const ArchiveConductor = struct {
         var count: i32 = 0;
         const handler = struct {
             pub fn handle(_: *const catalog_mod.RecordingDescriptorEntry) void {
-                // Placeholder: in a real system, this would serialize the descriptor.
-                // For now, just count entries.
+                // Descriptor is serialized on demand via getRecordingDescriptorBytes.
+                // This handler is just for counting matching entries.
             }
         }.handle;
 
         count = self.catalog.listRecordings(cmd.from_recording_id, cmd.record_count, &handler);
         try self.queueSuccessResponse(cmd.correlation_id, count);
+    }
+
+    /// Get wire-encoded bytes for a recording descriptor.
+    /// Looks up the recording in the catalog and returns its serialized RecordingDescriptor.
+    /// Returns error.RecordingNotFound if the recording_id does not exist.
+    pub fn getRecordingDescriptorBytes(self: *ArchiveConductor, allocator: std.mem.Allocator, recording_id: i64) ![]u8 {
+        const entry = self.catalog.recordingDescriptor(recording_id) orelse return error.RecordingNotFound;
+
+        // Convert RecordingDescriptorEntry to RecordingDescriptor.
+        var desc: protocol.RecordingDescriptor = undefined;
+        desc.recording_id = entry.recording_id;
+        desc.start_timestamp = entry.start_timestamp;
+        desc.stop_timestamp = entry.stop_timestamp;
+        desc.start_position = entry.start_position;
+        desc.stop_position = entry.stop_position;
+        desc.initial_term_id = entry.initial_term_id;
+        desc.segment_file_length = entry.segment_file_length;
+        desc.term_buffer_length = entry.term_buffer_length;
+        desc.mtu_length = entry.mtu_length;
+        desc.session_id = entry.session_id;
+        desc.stream_id = entry.stream_id;
+        desc.channel_length = entry.channel_length;
+
+        return try protocol.encodeRecordingDescriptor(allocator, &desc);
     }
 
     /// Queue a success response with a result value.
@@ -932,5 +1005,223 @@ test "ArchiveConductor extend_recording unknown id returns error response" {
     try conductor.enqueueCommand(extend_cmd);
     _ = try conductor.doWork();
 
+    try std.testing.expectEqual(1, conductor.responseCount());
+}
+
+test "getRecordingDescriptorBytes returns encoded descriptor" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ArchiveConductor.init(allocator);
+    try conductor.initRecorder();
+    defer conductor.deinit();
+
+    const channel = try allocator.dupe(u8, "aeron:udp://localhost:40123");
+    defer allocator.free(channel);
+    const source_identity = try allocator.dupe(u8, "test-source");
+    defer allocator.free(source_identity);
+
+    // Start a recording
+    const start_cmd = Command{ .start_recording = StartRecordingCmd{
+        .correlation_id = 100,
+        .session_id = 1,
+        .stream_id = 2,
+        .channel = channel,
+        .source_identity = source_identity,
+    } };
+    try conductor.enqueueCommand(start_cmd);
+    _ = try conductor.doWork();
+
+    // Get the descriptor bytes
+    const descriptor_bytes = try conductor.getRecordingDescriptorBytes(allocator, 1);
+    defer allocator.free(descriptor_bytes);
+
+    // Verify the bytes are non-empty and have correct size
+    try std.testing.expectEqual(protocol.RecordingDescriptor.HEADER_LENGTH, descriptor_bytes.len);
+
+    // Cast back to RecordingDescriptor and verify fields
+    const decoded = @as(*const protocol.RecordingDescriptor, @ptrCast(@alignCast(descriptor_bytes.ptr)));
+    try std.testing.expectEqual(@as(i64, 1), decoded.recording_id);
+    try std.testing.expectEqual(@as(i32, 1), decoded.session_id);
+    try std.testing.expectEqual(@as(i32, 2), decoded.stream_id);
+}
+
+test "getRecordingDescriptorBytes with unknown recording" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ArchiveConductor.init(allocator);
+    try conductor.initRecorder();
+    defer conductor.deinit();
+
+    // Try to get bytes for non-existent recording
+    try std.testing.expectError(error.RecordingNotFound, conductor.getRecordingDescriptorBytes(allocator, 999));
+}
+
+test "truncate recording: success" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ArchiveConductor.init(allocator);
+    try conductor.initRecorder();
+    defer conductor.deinit();
+
+    const channel = try allocator.dupe(u8, "aeron:udp://localhost:40123");
+    defer allocator.free(channel);
+    const source_identity = try allocator.dupe(u8, "source-A");
+    defer allocator.free(source_identity);
+
+    // Start recording
+    try conductor.enqueueCommand(Command{ .start_recording = StartRecordingCmd{
+        .correlation_id = 1,
+        .session_id = 1,
+        .stream_id = 10,
+        .channel = channel,
+        .source_identity = source_identity,
+        .start_position = 0,
+    } });
+    _ = try conductor.doWork();
+
+    // Write some data then stop
+    if (conductor.recorder) |recorder| {
+        if (recorder.findSession(1)) |session| {
+            try session.writer.write(&([_]u8{ 0xAA, 0xBB, 0xCC, 0xDD } ** 10));
+            try session.writer.flush();
+        }
+    }
+    try conductor.enqueueCommand(Command{ .stop_recording = StopRecordingCmd{
+        .correlation_id = 2,
+        .recording_id = 1,
+    } });
+    _ = try conductor.doWork();
+
+    // Verify stop_position > 0
+    const desc_before = conductor.catalog.recordingDescriptor(1).?;
+    try std.testing.expect(desc_before.stop_position > 0);
+
+    // Truncate to half
+    const trunc_pos = @divFloor(desc_before.stop_position, 2);
+    try conductor.enqueueCommand(Command{ .truncate_recording = TruncateRecordingCmd{
+        .correlation_id = 3,
+        .recording_id = 1,
+        .truncate_position = trunc_pos,
+    } });
+    _ = try conductor.doWork();
+
+    // Verify stop_position updated
+    const desc_after = conductor.catalog.recordingDescriptor(1).?;
+    try std.testing.expectEqual(trunc_pos, desc_after.stop_position);
+}
+
+test "truncate recording: unknown recording" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ArchiveConductor.init(allocator);
+    try conductor.initRecorder();
+    defer conductor.deinit();
+
+    try conductor.enqueueCommand(Command{ .truncate_recording = TruncateRecordingCmd{
+        .correlation_id = 1,
+        .recording_id = 999,
+        .truncate_position = 0,
+    } });
+    _ = try conductor.doWork();
+
+    // Should get error response (recording_unknown code = 2)
+    try std.testing.expectEqual(1, conductor.responseCount());
+}
+
+test "truncate recording: position out of range" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ArchiveConductor.init(allocator);
+    try conductor.initRecorder();
+    defer conductor.deinit();
+
+    const channel = try allocator.dupe(u8, "aeron:udp://localhost:40123");
+    defer allocator.free(channel);
+    const source_identity = try allocator.dupe(u8, "source-A");
+    defer allocator.free(source_identity);
+
+    // Start and stop recording at position 100
+    try conductor.enqueueCommand(Command{ .start_recording = StartRecordingCmd{
+        .correlation_id = 1,
+        .session_id = 1,
+        .stream_id = 10,
+        .channel = channel,
+        .source_identity = source_identity,
+        .start_position = 100,
+    } });
+    _ = try conductor.doWork();
+    try conductor.enqueueCommand(Command{ .stop_recording = StopRecordingCmd{
+        .correlation_id = 2,
+        .recording_id = 1,
+    } });
+    _ = try conductor.doWork();
+
+    // Drain responses from start/stop
+    const noop = struct {
+        pub fn handle(_: *const Response) void {}
+    };
+    _ = conductor.pollResponses(&noop.handle);
+
+    // Try truncate below start_position
+    try conductor.enqueueCommand(Command{
+        .truncate_recording = TruncateRecordingCmd{
+            .correlation_id = 3,
+            .recording_id = 1,
+            .truncate_position = 50, // below start_position=100
+        },
+    });
+    _ = try conductor.doWork();
+
+    // Should get error response
+    try std.testing.expectEqual(1, conductor.responseCount());
+}
+
+test "truncate recording: active recording rejected" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ArchiveConductor.init(allocator);
+    try conductor.initRecorder();
+    defer conductor.deinit();
+
+    const channel = try allocator.dupe(u8, "aeron:udp://localhost:40123");
+    defer allocator.free(channel);
+    const source_identity = try allocator.dupe(u8, "source-A");
+    defer allocator.free(source_identity);
+
+    // Start recording (don't stop it)
+    try conductor.enqueueCommand(Command{ .start_recording = StartRecordingCmd{
+        .correlation_id = 1,
+        .session_id = 1,
+        .stream_id = 10,
+        .channel = channel,
+        .source_identity = source_identity,
+    } });
+    _ = try conductor.doWork();
+    const noop = struct {
+        pub fn handle(_: *const Response) void {}
+    };
+    _ = conductor.pollResponses(&noop.handle);
+
+    // Try truncate while active
+    try conductor.enqueueCommand(Command{ .truncate_recording = TruncateRecordingCmd{
+        .correlation_id = 2,
+        .recording_id = 1,
+        .truncate_position = 0,
+    } });
+    _ = try conductor.doWork();
+
+    // Should get error response
     try std.testing.expectEqual(1, conductor.responseCount());
 }

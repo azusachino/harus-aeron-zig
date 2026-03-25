@@ -6,6 +6,12 @@
 /// Reference: https://github.com/aeron-io/aeron/blob/master/aeron-archive/src/main/java/io/aeron/archive/Replayer.java
 const std = @import("std");
 
+pub const ReplayError = error{
+    RecordingNotFound,
+    PositionOutOfRange,
+    LengthExceedsRecording,
+};
+
 /// RecordingProgressInfo — plain Zig struct holding replay progress for a session.
 /// Not a wire type; used internally to report current playback state.
 pub const RecordingProgressInfo = struct {
@@ -191,6 +197,8 @@ pub const Replayer = struct {
 
     /// Handle an incoming ReplayRequest: create a new ReplaySession and return its ID.
     /// `source_data` is a reference to the recorded data buffer.
+    /// `start_position` is the start position of the recording in the archive.
+    /// `stop_position` is the stop position of the recording (0 if recording is still active).
     /// Returns the unique replay_session_id that identifies this session.
     /// This ID is used in StopReplayRequest messages from the client.
     pub fn onReplayRequest(
@@ -198,8 +206,27 @@ pub const Replayer = struct {
         recording_id: i64,
         position: i64,
         length: i64,
+        start_position: i64,
+        stop_position: i64,
         source_data: []const u8,
-    ) !i64 {
+    ) (ReplayError || std.mem.Allocator.Error)!i64 {
+        // Validate position is within recording bounds
+        if (position < start_position) {
+            return ReplayError.PositionOutOfRange;
+        }
+
+        // If recording is stopped, validate position and length against stop_position
+        if (stop_position > 0) {
+            if (position >= stop_position) {
+                return ReplayError.PositionOutOfRange;
+            }
+
+            // If length is specified and non-zero, validate position + length doesn't exceed stop_position
+            if (length > 0 and position + length > stop_position) {
+                return ReplayError.LengthExceedsRecording;
+            }
+        }
+
         const session_id = self.next_replay_session_id;
         self.next_replay_session_id += 1;
 
@@ -388,11 +415,11 @@ test "Replayer onReplayRequest creates session with unique ID" {
     defer replayer.deinit();
 
     const data1 = "data1";
-    const session_id1 = try replayer.onReplayRequest(1, 0, 0, data1);
+    const session_id1 = try replayer.onReplayRequest(1, 0, 0, 0, 0, data1);
     try std.testing.expectEqual(@as(i64, 1), session_id1);
 
     const data2 = "data2";
-    const session_id2 = try replayer.onReplayRequest(2, 0, 0, data2);
+    const session_id2 = try replayer.onReplayRequest(2, 0, 0, 0, 0, data2);
     try std.testing.expectEqual(@as(i64, 2), session_id2);
 
     try std.testing.expectEqual(@as(usize, 2), replayer.sessions.items.len);
@@ -407,7 +434,7 @@ test "Replayer onStopReplay closes correct session" {
     defer replayer.deinit();
 
     const data = "test data";
-    const session_id = try replayer.onReplayRequest(1, 0, 0, data);
+    const session_id = try replayer.onReplayRequest(1, 0, 0, 0, 0, data);
 
     try std.testing.expect(replayer.findSession(session_id) != null);
     try std.testing.expect(replayer.findSession(session_id).?.isActive());
@@ -427,10 +454,10 @@ test "Replayer doWork advances all active sessions" {
     defer replayer.deinit();
 
     const data1 = "data1";
-    _ = try replayer.onReplayRequest(1, 0, 0, data1);
+    _ = try replayer.onReplayRequest(1, 0, 0, 0, 0, data1);
 
     const data2 = "data2";
-    _ = try replayer.onReplayRequest(2, 0, 0, data2);
+    _ = try replayer.onReplayRequest(2, 0, 0, 0, 0, data2);
 
     const work = replayer.doWork();
     try std.testing.expectEqual(@as(i32, 2), work);
@@ -457,10 +484,10 @@ test "Replayer findSession returns correct session" {
     defer replayer.deinit();
 
     const data1 = "data1";
-    const session_id1 = try replayer.onReplayRequest(1, 0, 0, data1);
+    const session_id1 = try replayer.onReplayRequest(1, 0, 0, 0, 0, data1);
 
     const data2 = "data2";
-    const session_id2 = try replayer.onReplayRequest(2, 0, 0, data2);
+    const session_id2 = try replayer.onReplayRequest(2, 0, 0, 0, 0, data2);
 
     const found1 = replayer.findSession(session_id1);
     try std.testing.expect(found1 != null);
@@ -485,11 +512,11 @@ test "Replayer activeSessions counts correctly" {
     try std.testing.expectEqual(@as(usize, 0), replayer.activeSessions());
 
     const data1 = "data1";
-    const session_id1 = try replayer.onReplayRequest(1, 0, 0, data1);
+    const session_id1 = try replayer.onReplayRequest(1, 0, 0, 0, 0, data1);
     try std.testing.expectEqual(@as(usize, 1), replayer.activeSessions());
 
     const data2 = "data2";
-    _ = try replayer.onReplayRequest(2, 0, 0, data2);
+    _ = try replayer.onReplayRequest(2, 0, 0, 0, 0, data2);
     try std.testing.expectEqual(@as(usize, 2), replayer.activeSessions());
 
     replayer.onStopReplay(session_id1);
@@ -505,8 +532,8 @@ test "Replayer handles multiple sessions reaching completion" {
     defer replayer.deinit();
 
     const data = "ab";
-    const sid1 = try replayer.onReplayRequest(1, 0, 0, data);
-    const sid2 = try replayer.onReplayRequest(2, 0, 0, data);
+    const sid1 = try replayer.onReplayRequest(1, 0, 0, 0, 0, data);
+    const sid2 = try replayer.onReplayRequest(2, 0, 0, 0, 0, data);
 
     // Each session has 2 bytes of data, so doWork() twice should complete both
     var total_work: i32 = 0;
@@ -518,4 +545,65 @@ test "Replayer handles multiple sessions reaching completion" {
     try std.testing.expect(replayer.findSession(sid2).?.isComplete());
     // After completion, doWork should return 0
     try std.testing.expectEqual(@as(i32, 0), replayer.doWork());
+}
+
+test "replay rejects position before start_position" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var replayer = Replayer.init(allocator);
+    defer replayer.deinit();
+
+    const data = "0123456789";
+    const result = replayer.onReplayRequest(1, 0, 0, 100, 200, data);
+    try std.testing.expectError(ReplayError.PositionOutOfRange, result);
+}
+
+test "replay rejects position beyond stop_position" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var replayer = Replayer.init(allocator);
+    defer replayer.deinit();
+
+    const data = "0123456789";
+    const result = replayer.onReplayRequest(1, 2000, 0, 0, 1000, data);
+    try std.testing.expectError(ReplayError.PositionOutOfRange, result);
+}
+
+test "replay rejects length exceeding recording" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var replayer = Replayer.init(allocator);
+    defer replayer.deinit();
+
+    const data = "0123456789";
+    const result = replayer.onReplayRequest(1, 50, 200, 0, 100, data);
+    try std.testing.expectError(ReplayError.LengthExceedsRecording, result);
+}
+
+test "replay accepts valid position and length" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var replayer = Replayer.init(allocator);
+    defer replayer.deinit();
+
+    var data_array: [1001]u8 = undefined;
+    for (0..1001) |i| {
+        data_array[i] = @intCast(i % 256);
+    }
+
+    const result = replayer.onReplayRequest(1, 100, 500, 0, 1000, &data_array);
+    const session_id = try result;
+    try std.testing.expect(session_id > 0);
+
+    const session = replayer.findSession(session_id);
+    try std.testing.expect(session != null);
+    try std.testing.expectEqual(@as(i64, 100), session.?.start_position);
 }
