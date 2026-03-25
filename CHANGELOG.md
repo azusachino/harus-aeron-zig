@@ -20,7 +20,7 @@ All notable changes to this project will be documented in this file.
 - Image rebuild_position initialization from active_term_id in SETUP handshake
 - Memory leak in aeron.zig: heap *Image pointers now destroyed in deinit
 
-## [1.0.0] - 2026-03-23
+## [0.1.0] - 2026-03-23
 
 ### Added
 - Full Aeron wire protocol implementation in Zig.

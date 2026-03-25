@@ -9,17 +9,17 @@ Aeron is a high-performance messaging system built on UDP. It delivers reliable,
 unicast and multicast transport via memory-mapped log buffers and NAK-based retransmission —
 no brokers, no overhead, just bytes and math.
 
-## Project Status: v1.0.0
+## Project Status: v0.1.0 (Work in Progress)
 
-`harus-aeron-zig` is a **complete, wire-compatible implementation of the Aeron messaging protocol**.
-All three phases are production-ready:
+`harus-aeron-zig` is a **work-in-progress Zig reimplementation of the Aeron messaging protocol**, targeting wire compatibility with [aeron-io/aeron](https://github.com/aeron-io/aeron).
+Current parity: protocol frames (100%), archive protocol (100%), IPC (95%), cluster (90%), URI parser (95%).
+Not yet production-ready — gaps remain before claiming full upstream compatibility.
 
 - **Phase 1-4**: Media Driver (Conductor, Sender, Receiver agents) + Client API (Publication/Subscription)
 - **Phase 5**: Archive (recording, replay, catalog persistence)
 - **Phase 6**: Cluster (Raft consensus, replicated state machine)
 
-See [`docs/plan-phase6.md`](docs/plan-phase6.md) for the complete v1.0 implementation roadmap and
-[`docs/audit-2026-03-23.md`](docs/audit-2026-03-23.md) for wire-compatibility audit against Aeron 1.44.1.
+See [`docs/plan.md`](docs/plan.md) for the complete implementation roadmap.
 
 ## What Is This Repo?
 
@@ -37,7 +37,7 @@ Two things at once:
 - **Client Library**: Publication and Subscription APIs with zero-copy data path.
 - **Archive**: Record and replay Aeron streams with persistent catalogs.
 - **Cluster**: Raft-based consensus for fault-tolerant state machine replication.
-- **Interoperability**: Verified against the Java Aeron driver via Docker smoke tests.
+- **Interoperability**: Interop test infrastructure included (`make interop`) — wire compatibility is a work in progress.
 
 ## Course Roadmap
 

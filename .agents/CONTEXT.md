@@ -79,12 +79,13 @@ Two parallel code trees — agents must maintain both:
 
 ## Current Parity State
 
-- **Phase 8 complete (2026-03-25)** — all P8-1 through P8-7 tasks done; `make check` is green.
+- **Phase 8+9 complete (2026-03-25)** — all tasks done; `make check` is green; tutorial 31/31 chapters.
 - Wire protocol gaps closed: remaining frame variants, strict URI parsing, malformed-input rejection.
 - Driver liveness and cleanup hardened: image/publication lifecycle, flow-control under reorder/gap, conductor/sender/receiver resource teardown.
 - Archive operational: segment rotation across multiple persisted segments, catalog descriptor fidelity, restart reconstruction.
 - Cluster consensus fidelity: follower catch-up/rejoin, restart/election/commit continuity, session redirect and failover.
 - CnC tooling real: `stat`, `errors`, `loss`, `streams`, `events`, `cluster-tool` backed by actual mmap reads and counters.
 - Interop automated: Zig↔Java matrix (pub/sub, archive, cluster) under `deploy/interop/` with single `make interop` entrypoint; both directions passing.
+- **Known parity gaps**: IPC 95% (multi-destination, advanced keepalive), Cluster 90% (snapshot coordination, member discovery), URI 95% (media type extensions). See `.agents/PARITY_AUDIT.md`.
 - Performance baseline established: `src/bench/` (throughput/latency/fanout) + `test/stress/` soak scenarios for reconnect, archive replay, cluster failover.
 - Roadmap for next work lives in `docs/plan.md`; no active stale investigations.
