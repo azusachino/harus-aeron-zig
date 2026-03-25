@@ -1,0 +1,12 @@
+FROM eclipse-temurin:21-jre-alpine AS fetcher
+ARG AERON_VERSION=1.46.7
+RUN apk add --no-cache curl && \
+    curl -fsSL \
+      "https://repo1.maven.org/maven2/io/aeron/aeron-all/${AERON_VERSION}/aeron-all-${AERON_VERSION}.jar" \
+      -o /aeron-all.jar
+
+FROM eclipse-temurin:21-jre-alpine
+COPY --from=fetcher /aeron-all.jar /aeron-all.jar
+ENV MSG_COUNT=10
+# Default: subscriber (smoke test — java receives from zig)
+CMD ["java", "-cp", "/aeron-all.jar", "io.aeron.samples.AeronSubscriber"]

@@ -40,7 +40,7 @@ jobs:
       - uses: cachix/install-nix-action@v27
       - uses: actions/setup-java@v4
         with:
-          java-version: '21'
+          java-version: "21"
           distribution: temurin
           cache: maven
       - run: nix develop --command make build
