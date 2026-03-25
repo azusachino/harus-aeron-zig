@@ -7,6 +7,7 @@ RUN apk add --no-cache curl && \
 
 FROM eclipse-temurin:21-jre-alpine
 COPY --from=fetcher /aeron-all.jar /aeron-all.jar
+RUN mkdir -p /dev/shm/aeron && ln -sf /dev/shm/aeron /dev/shm/aeron-root
 ENV MSG_COUNT=10
 # Default: subscriber (smoke test — java receives from zig)
 CMD ["java", "-cp", "/aeron-all.jar", "io.aeron.samples.BasicSubscriber"]

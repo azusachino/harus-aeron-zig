@@ -4,11 +4,13 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile
     networks: [aeron]
+    volumes:
+      - aeron_data:/aeron_data
     environment:
-      AERON_DIR: /dev/shm/aeron
+      AERON_DIR: /aeron_data
       AERON_TERM_BUFFER_LENGTH: "65536"
     healthcheck:
-      test: ["CMD", "test", "-f", "/dev/shm/aeron/cnc.dat"]
+      test: ["CMD", "test", "-f", "/aeron_data/cnc.dat"]
       interval: 2s
       timeout: 5s
       retries: 10
@@ -20,11 +22,13 @@ services:
       args:
         AERON_VERSION: "${AERON_VERSION:-1.46.7}"
     networks: [aeron]
+    volumes:
+      - aeron_data:/aeron_data
     depends_on:
       zig-driver:
         condition: service_healthy
     environment:
-      AERON_DIR: /dev/shm/aeron
+      AERON_DIR: /aeron_data
       MSG_COUNT: "${MSG_COUNT:-10}"
 
 networks:
@@ -33,3 +37,6 @@ networks:
     ipam:
       config:
         - subnet: 172.28.0.0/16
+
+volumes:
+  aeron_data:
