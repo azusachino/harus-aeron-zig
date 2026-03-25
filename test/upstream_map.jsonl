@@ -124,7 +124,7 @@
   "upstream_class": "ElectionTest",
   "upstream_path": "aeron-cluster/src/test/java/io/aeron/cluster/",
   "aeron_version": "1.46.7",
-  "status": "pending"
+  "status": "done"
 }
 {
   "layer": "cluster",
@@ -132,7 +132,7 @@
   "upstream_class": "ClusterTimerTest",
   "upstream_path": "aeron-cluster/src/test/java/io/aeron/cluster/",
   "aeron_version": "1.46.7",
-  "status": "pending"
+  "status": "done"
 }
 {
   "layer": "cluster",
@@ -140,7 +140,7 @@
   "upstream_class": "LogReplicationTest",
   "upstream_path": "aeron-cluster/src/test/java/io/aeron/cluster/",
   "aeron_version": "1.46.7",
-  "status": "pending"
+  "status": "done"
 }
 {
   "layer": "cluster",
@@ -148,5 +148,5 @@
   "upstream_class": "ClusterNodeTest",
   "upstream_path": "aeron-cluster/src/test/java/io/aeron/cluster/",
   "aeron_version": "1.46.7",
-  "status": "pending"
+  "status": "done"
 }
