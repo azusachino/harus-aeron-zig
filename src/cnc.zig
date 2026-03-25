@@ -7,7 +7,6 @@ const driver_cnc = @import("driver/cnc.zig");
 
 /// Metadata read from the CnC file header.
 pub const CncMetadata = struct {
-    magic: i32,
     version: i32,
     to_driver_buffer_length: i32,
     client_liveness_timeout_ns: i64,
@@ -30,7 +29,6 @@ pub const CncDescriptor = struct {
         /// Read metadata from the mapped CnC header.
         pub fn metadata(self: *const MappedCounters) CncMetadata {
             return .{
-                .magic = self.cnc_file.magic(),
                 .version = self.cnc_file.version(),
                 .to_driver_buffer_length = self.cnc_file.toDriverBufferLength(),
                 .client_liveness_timeout_ns = 0, // not yet in CncFile header
@@ -223,7 +221,6 @@ test "CncDescriptor: MappedCounters metadata reads version and magic" {
     defer mapped.deinit();
 
     const meta = mapped.metadata();
-    try std.testing.expectEqual(driver_cnc.CNC_MAGIC, meta.magic);
     try std.testing.expectEqual(driver_cnc.CNC_VERSION, meta.version);
     try std.testing.expect(meta.to_driver_buffer_length > 0);
 }

@@ -7,11 +7,11 @@
 
 const std = @import("std");
 
-// Magic bytes at offset 0 — "SRDN" in little-endian (matches CncFileDescriptor.CNC_FILE_MAGIC in Java)
-pub const CNC_MAGIC: i32 = 0x4e445253;
-// Version number at offset 4 — encoded as [major:8][minor:8][patch:8][unused:8]
+// Version number at offset 0 — encoded as [major:8][minor:8][patch:8][unused:8]
 // Format: (major << 24) | (minor << 16) | (patch << 8)
 // Value 1.46.7 matches aeron-all-1.46.7 for interop compatibility
+// CRITICAL: Offset must be 0, NOT 4. Java expects version at offset 0. There is NO magic field in Aeron!
+// See: https://github.com/aeron-io/aeron/blob/master/aeron-client/src/main/java/io/aeron/CncFileDescriptor.java
 pub const CNC_VERSION: i32 = (1 << 24) | (46 << 16) | (7 << 8);
 
 pub const CncConfig = struct {
@@ -24,13 +24,12 @@ pub const CncConfig = struct {
 
 // Header layout — matches io.aeron.CncFileDescriptor offsets exactly
 const CNC_HEADER_SIZE = 4096; // padded to page boundary
-const MAGIC_OFFSET = 0; // i32 — 0x4e445253
-const VERSION_OFFSET = 4; // i32 — CNC_VERSION
-const TO_DRIVER_BUF_LEN_OFFSET = 8; // i32
-const TO_CLIENTS_BUF_LEN_OFFSET = 12; // i32
-const COUNTERS_META_BUF_LEN_OFFSET = 16; // i32
-const COUNTERS_VAL_BUF_LEN_OFFSET = 20; // i32
-const CLIENT_LIVENESS_TIMEOUT_OFFSET = 32; // i64 (aligned to 8)
+const VERSION_OFFSET = 0; // i32 — CNC_VERSION (NOT 4!)
+const TO_DRIVER_BUF_LEN_OFFSET = 4; // i32 (was 8)
+const TO_CLIENTS_BUF_LEN_OFFSET = 8; // i32 (was 12)
+const COUNTERS_META_BUF_LEN_OFFSET = 12; // i32 (was 16)
+const COUNTERS_VAL_BUF_LEN_OFFSET = 16; // i32 (was 20)
+const CLIENT_LIVENESS_TIMEOUT_OFFSET = 24; // i64 (was 32, aligned to 8)
 
 pub const CncFile = struct {
     mapped: []align(std.heap.page_size_min) u8,
@@ -52,7 +51,6 @@ pub const CncFile = struct {
         const mapped = @as([*]align(std.heap.page_size_min) u8, @ptrCast(ptr))[0..total];
 
         // Write header fields
-        std.mem.writeInt(i32, mapped[MAGIC_OFFSET..][0..4], CNC_MAGIC, .little);
         std.mem.writeInt(i32, mapped[VERSION_OFFSET..][0..4], CNC_VERSION, .little);
         std.mem.writeInt(i32, mapped[TO_DRIVER_BUF_LEN_OFFSET..][0..4], cfg.to_driver_buffer_length, .little);
         std.mem.writeInt(i32, mapped[TO_CLIENTS_BUF_LEN_OFFSET..][0..4], cfg.to_clients_buffer_length, .little);
@@ -86,10 +84,6 @@ pub const CncFile = struct {
     pub fn deinit(self: *CncFile) void {
         std.posix.munmap(self.mapped);
         self.allocator.free(self.path);
-    }
-
-    pub fn magic(self: *const CncFile) i32 {
-        return std.mem.readInt(i32, self.mapped[MAGIC_OFFSET..][0..4], .little);
     }
 
     pub fn version(self: *const CncFile) i32 {
@@ -144,9 +138,7 @@ test "CnC: file created with correct magic, version, and buffer sizes" {
     var cnc = try CncFile.create(allocator, path, cfg);
     defer cnc.deinit();
 
-    // CNC_MAGIC at offset 0 (4 bytes: 0x4e445253 LE = "SRDN")
-    try std.testing.expectEqual(CNC_MAGIC, cnc.magic());
-    // CNC_VERSION at offset 4
+    // CNC_VERSION at offset 0 (4 bytes, semantic version [major:8][minor:8][patch:8][unused:8])
     try std.testing.expectEqual(@as(i32, CNC_VERSION), cnc.version());
     // Buffer lengths readable
     try std.testing.expectEqual(cfg.to_driver_buffer_length, cnc.toDriverBufferLength());
