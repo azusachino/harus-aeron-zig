@@ -74,7 +74,7 @@ pub const StatusMessage = extern struct {
     consumption_term_offset: i32,
     receiver_window: i32,
     // LESSON(frame-codec): Aeron's C header uses #pragma pack(4), so i64 fields
-    // at non-8-aligned offsets need align(4) in Zig to match the wire layout.
+    // at non-8-aligned offsets need align(4) in Zig to match the wire layout. See docs/tutorial/01-foundations/01-frame-codec.md
     receiver_id: i64 align(4),
 
     pub const LENGTH = @sizeOf(StatusMessage);
@@ -103,7 +103,7 @@ pub const RttMeasurement = extern struct {
     type: u16,
     echo_timestamp: i64 align(4),
     reception_delta: i64 align(4),
-    // LESSON(frame-codec/aeron): receiver_id was present from the start in C header
+    // LESSON(frame-codec): receiver_id was present from the start in C header. See docs/tutorial/01-foundations/01-frame-codec.md
     // (aeron_udp_protocol.h). Total frame size = 32 bytes.
     receiver_id: i64 align(4),
 

@@ -1,9 +1,9 @@
 // CnC.dat (Command 'n' Control) file — the rendezvous point between Aeron clients and driver.
-// LESSON(conductor/zig): We mmap a file and cast a pointer to our header struct. The file
-// acts as shared memory between processes without needing SysV IPC or POSIX shm_open.
-// LESSON(conductor/aeron): CnC.dat has a fixed header (4096 bytes) followed immediately by
+// LESSON(conductor): We mmap a file and cast a pointer to our header struct. The file
+// acts as shared memory between processes without needing SysV IPC or POSIX shm_open. See docs/tutorial/03-driver/03-conductor.md
+// LESSON(conductor): CnC.dat has a fixed header (4096 bytes) followed immediately by
 // the to-driver ring buffer and to-clients broadcast buffer. Java clients find these by
-// reading the length fields from the header and computing byte offsets.
+// reading the length fields from the header and computing byte offsets. See docs/tutorial/03-driver/03-conductor.md
 
 const std = @import("std");
 

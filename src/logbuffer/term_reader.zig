@@ -4,7 +4,7 @@
 const std = @import("std");
 const frame = @import("../protocol/frame.zig");
 
-// LESSON(term-reader/zig): FragmentHandler is a typed function pointer that accepts header, payload, and a type-erased context.
+// LESSON(term-reader): FragmentHandler is a typed function pointer that accepts header, payload, and a type-erased context.
 // Callers cast their concrete state to *anyopaque; the callback casts back with @ptrCast + @alignCast. See docs/tutorial/02-data-path/02-term-reader.md
 pub const FragmentHandler = *const fn (header: *const frame.DataHeader, buffer: []const u8, ctx: *anyopaque) void;
 
@@ -40,7 +40,7 @@ pub const TermReader = struct {
                 break;
             }
 
-            // LESSON(term-reader/aeron): frame_length is the commit signal. Appender writes it last with store-release semantics.
+            // LESSON(term-reader): frame_length is the commit signal. Appender writes it last with store-release semantics.
             // Reader sees either zero (not yet committed) or positive (complete frame). See docs/tutorial/02-data-path/02-term-reader.md
             // Read frame_length (i32, little-endian) at current_offset
             const frame_length_bytes = term[offset_usize .. offset_usize + 4];
@@ -52,7 +52,7 @@ pub const TermReader = struct {
             }
 
             // Compute aligned length (pad to FRAME_ALIGNMENT)
-            // LESSON(term-reader/zig): Alignment is computed at read time, not stored. Frames are always aligned, so we compute padding needed.
+            // LESSON(term-reader): Alignment is computed at read time, not stored. Frames are always aligned, so we compute padding needed.
             // All operations use wrapping arithmetic for overflow safety. See docs/tutorial/02-data-path/02-term-reader.md
             const frame_len_u32 = @as(u32, @intCast(frame_length));
             const aligned_len_u32 = (frame_len_u32 + 31) & ~@as(u32, 31);
@@ -70,7 +70,7 @@ pub const TermReader = struct {
             const type_bytes = term[offset_usize + 6 .. offset_usize + 8];
             const frame_type_raw = std.mem.readInt(u16, type_bytes[0..2], .little);
 
-            // LESSON(term-reader/aeron): Padding frames are written by appender at term end to signal rotation.
+            // LESSON(term-reader): Padding frames are written by appender at term end to signal rotation. See docs/tutorial/02-data-path/02-term-reader.md
             // Reader skips them; they don't count toward fragments_limit. See docs/tutorial/02-data-path/02-term-reader.md
             // Check if this is a padding frame
             const is_padding = frame_type_raw == @intFromEnum(frame.FrameType.padding);
@@ -79,7 +79,7 @@ pub const TermReader = struct {
                 // This is a DATA frame (or other non-padding frame)
                 // Call handler with DataHeader pointer and payload slice
                 if (offset_usize + frame.DataHeader.LENGTH <= term.len) {
-                    // LESSON(term-reader/zig): Header pointer requires @ptrCast + @alignCast because we read from an arbitrary slice offset.
+                    // LESSON(term-reader): Header pointer requires @ptrCast + @alignCast because we read from an arbitrary slice offset. See docs/tutorial/02-data-path/02-term-reader.md
                     // Alignment is guaranteed by the appender's 32-byte alignment, but the type system doesn't know that. See docs/tutorial/02-data-path/02-term-reader.md
                     const header_ptr = @as(*const frame.DataHeader, @ptrCast(@alignCast(&term[offset_usize])));
 

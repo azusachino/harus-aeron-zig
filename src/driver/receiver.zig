@@ -66,7 +66,7 @@ pub const Image = struct {
     // Write an incoming DATA frame into the log buffer at the correct partition+offset
     // Returns true if written, false if out-of-bounds or duplicate
     pub fn insertFrame(self: *Image, counters_map: *counters.CountersMap, header: *const protocol.DataHeader, payload: []const u8) bool {
-        // LESSON(receiver/zig): Write header then payload to term buffer, then write frame_length last (atomic commit signal). See docs/tutorial/03-driver/02-receiver.md
+        // LESSON(receiver): Write header then payload to term buffer, then write frame_length last (atomic commit signal). See docs/tutorial/03-driver/02-receiver.md
         // Compute active partition for header.term_id
         const term_count = header.term_id - self.initial_term_id;
         const partition = @as(usize, @intCast(@mod(term_count, 3)));
@@ -484,7 +484,7 @@ pub const Receiver = struct {
 
     // Send a NAK frame back to source_address for the given image's gaps
     pub fn sendNak(self: *Receiver, image: *Image) !void {
-        // LESSON(receiver/aeron): NAK generation coalesces gaps then sends one NAK per gap after 1ms delay. See docs/tutorial/03-driver/02-receiver.md
+        // LESSON(receiver): NAK generation coalesces gaps then sends one NAK per gap after 1ms delay. See docs/tutorial/03-driver/02-receiver.md
         for (image.nak_state.gaps()) |gap| {
             var nak_header: protocol.NakHeader = undefined;
             nak_header.frame_length = protocol.NakHeader.LENGTH;

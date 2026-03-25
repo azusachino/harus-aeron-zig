@@ -1,6 +1,6 @@
 // Shared-memory counters for position tracking and metrics.
 // Reference: https://github.com/aeron-io/aeron aeron-driver/src/main/java/org/agrona/concurrent/status/CountersMap.java
-// LESSON(counters/aeron): Counters isolate shared position state (publisher-limit, sender-pos, subscriber-pos) in separate cache-line slots. See docs/tutorial/01-foundations/04-counters.md
+// LESSON(counters): Counters isolate shared position state (publisher-limit, sender-pos, subscriber-pos) in separate cache-line slots. See docs/tutorial/01-foundations/04-counters.md
 const std = @import("std");
 
 pub const PUBLISHER_LIMIT: i32 = 0;
@@ -14,7 +14,7 @@ pub const RECORD_ALLOCATED: i32 = 1;
 pub const RECORD_RECLAIMED: i32 = -1;
 
 pub const METADATA_LENGTH: usize = 1024;
-// LESSON(counters/aeron): 64-byte slots prevent false sharing: a write to counter N doesn't invalidate counter N+1's cache line.
+// LESSON(counters): 64-byte slots prevent false sharing: a write to counter N doesn't invalidate counter N+1's cache line. See docs/tutorial/01-foundations/04-counters.md
 pub const COUNTER_LENGTH: usize = 64; // Cache line size
 
 pub const RECORD_STATE_OFFSET: usize = 0;
@@ -93,8 +93,8 @@ pub const CountersMap = struct {
         @atomicStore(i32, state_ptr, RECORD_RECLAIMED, .release);
     }
 
-    // LESSON(counters/zig): @atomicLoad with .acquire ensures this thread sees all writes prior to a .release store by another thread.
-    // LESSON(counters/aeron): Read-acquire pairs with write-release to maintain visibility across CPU cores without a full barrier.
+    // LESSON(counters): @atomicLoad with .acquire ensures this thread sees all writes prior to a .release store by another thread. See docs/tutorial/01-foundations/04-counters.md
+    // LESSON(counters): Read-acquire pairs with write-release to maintain visibility across CPU cores without a full barrier. See docs/tutorial/01-foundations/04-counters.md
     pub fn get(self: *const CountersMap, counter_id: i32) i64 {
         if (counter_id < 0 or counter_id >= @as(i32, @intCast(self.max_counters))) return 0;
         const offset = @as(usize, @intCast(counter_id)) * COUNTER_LENGTH;
@@ -102,7 +102,7 @@ pub const CountersMap = struct {
         return @atomicLoad(i64, ptr, .acquire);
     }
 
-    // LESSON(counters/zig): @atomicStore with .release ensures all prior writes in this thread are visible to readers that acquire after.
+    // LESSON(counters): @atomicStore with .release ensures all prior writes in this thread are visible to readers that acquire after. See docs/tutorial/01-foundations/04-counters.md
     pub fn set(self: *CountersMap, counter_id: i32, value: i64) void {
         if (counter_id < 0 or counter_id >= @as(i32, @intCast(self.max_counters))) return;
         const offset = @as(usize, @intCast(counter_id)) * COUNTER_LENGTH;

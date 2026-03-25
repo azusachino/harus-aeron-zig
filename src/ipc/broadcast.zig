@@ -1,6 +1,5 @@
 // One-writer-many-reader broadcast buffer for driver→client notifications.
-// LESSON(broadcast-buffer): lock-free broadcast using a shared ring buffer with atomic cursors.
-// See docs/tutorial/part/broadcast.md
+// LESSON(broadcast-buffer): lock-free broadcast using a shared ring buffer with atomic cursors. See docs/tutorial/01-foundations/03-broadcast.md
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-client/src/main/java/org/agrona/concurrent/broadcast/
 
 const std = @import("std");

@@ -71,7 +71,7 @@ pub const Sender = struct {
     }
 
     pub fn doWork(self: *Sender) i32 {
-        // LESSON(sender/zig): Main work loop dispatches to publication processing and retransmit handling. See docs/tutorial/03-driver/01-sender.md
+        // LESSON(sender): Main work loop dispatches to publication processing and retransmit handling. See docs/tutorial/03-driver/01-sender.md
         var work_count: i32 = 0;
 
         // Process active publications
@@ -86,7 +86,7 @@ pub const Sender = struct {
     }
 
     fn processPublication(self: *Sender, publication: *NetworkPublication) i32 {
-        // LESSON(sender/aeron): SETUP must be sent unconditionally to establish the connection.
+        // LESSON(sender): SETUP must be sent unconditionally to establish the connection. See docs/tutorial/03-driver/01-sender.md
         // Only after a subscriber responds with STATUS does publisher_limit advance, enabling data flow.
         var work_count: i32 = 0;
 
@@ -115,7 +115,7 @@ pub const Sender = struct {
     }
 
     fn sendSetupFrame(_: *Sender, publication: *NetworkPublication) bool {
-        // LESSON(sender/zig): Align buffer to protocol struct for C-compatible casting without copying. See docs/tutorial/03-driver/01-sender.md
+        // LESSON(sender): Align buffer to protocol struct for C-compatible casting without copying. See docs/tutorial/03-driver/01-sender.md
         var frame_buffer: [protocol.SetupHeader.LENGTH]u8 align(@alignOf(protocol.SetupHeader)) = undefined;
         const header: *protocol.SetupHeader = @ptrCast(&frame_buffer);
 
@@ -155,7 +155,7 @@ pub const Sender = struct {
     }
 
     fn sendDataFrames(self: *Sender, publication: *NetworkPublication, sender_pos: i64, pub_limit: i64) i32 {
-        // LESSON(sender/aeron): Retransmission strategy via term-relative offsets. Sender scans log buffer for committed frames and sends up to flow control limit. See docs/tutorial/03-driver/01-sender.md
+        // LESSON(sender): Retransmission strategy via term-relative offsets. Sender scans log buffer for committed frames and sends up to flow control limit. See docs/tutorial/03-driver/01-sender.md
         var work_count: i32 = 0;
         var current_pos: i64 = sender_pos;
 
@@ -221,7 +221,7 @@ pub const Sender = struct {
     }
 
     fn processRetransmits(self: *Sender) i32 {
-        // LESSON(sender/aeron): NAK processing—on NAK receipt, queue retransmit request and drain in doWork. See docs/tutorial/03-driver/01-sender.md
+        // LESSON(sender): NAK processing—on NAK receipt, queue retransmit request and drain in doWork. See docs/tutorial/03-driver/01-sender.md
         var work_count: i32 = 0;
 
         var i: usize = 0;
@@ -330,9 +330,9 @@ pub const Sender = struct {
         consumption_term_offset: i32,
         receiver_window: i32,
     ) void {
-        // LESSON(sender/aeron): STATUS is the receiver-driven flow-control signal. The sender
+        // LESSON(sender): STATUS is the receiver-driven flow-control signal. The sender
         // translates the receiver's consumption position plus advertised window into a
-        // publisher-limit counter that both the driver and client publication observe.
+        // publisher-limit counter that both the driver and client publication observe. See docs/tutorial/03-driver/01-sender.md
         for (self.publications.items) |publication| {
             if (publication.session_id == session_id and publication.stream_id == stream_id) {
                 const receiver_position = @as(i64, consumption_term_id - publication.initial_term_id) * publication.log_buffer.term_length +

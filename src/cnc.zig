@@ -1,5 +1,5 @@
-// LESSON(conductor/aeron): CnC (Command and Control) file reader and descriptor.
-// LESSON(conductor/zig): Maps the driver's shared memory to read counters, errors, loss reports, and events.
+// LESSON(conductor): CnC (Command and Control) file reader and descriptor. See docs/tutorial/03-driver/03-conductor.md
+// LESSON(conductor): Maps the driver's shared memory to read counters, errors, loss reports, and events. See docs/tutorial/03-driver/03-conductor.md
 // Reference: https://github.com/aeron-io/aeron
 const std = @import("std");
 const counters_mod = @import("ipc/counters.zig");
