@@ -188,3 +188,103 @@ docker run --rm -it \
 # Then run our integration tests
 make test-integration
 ```
+
+---
+
+## Interop Testing (Zig↔Java Wire Compatibility)
+
+Interop tests validate Aeron wire compatibility between this Zig implementation and
+the official Java Aeron library. Tests run as Kubernetes Jobs in the local k3s cluster.
+
+### Test Matrix
+
+| Scenario | Publisher | Subscriber | Label |
+|----------|-----------|------------|-------|
+| `zig-pub-java-sub` | Zig | Java | `interop` |
+| `java-pub-zig-sub` | Java | Zig | `interop` |
+| `smoke-zig-pub-java-sub` | Zig | Java | `interop-smoke` |
+| `smoke-java-pub-zig-sub` | Java | Zig | `interop-smoke` |
+
+Full suite sends 100 messages per scenario; smoke suite sends 10 messages per scenario.
+
+### Prerequisites
+
+1. Colima running with containerd + k3s (`make colima-up`)
+2. Aeron JAR fetched (`make setup-interop`)
+
+### Quick Start — Smoke Test (CI-friendly)
+
+```bash
+# 1. Start cluster (if not already running)
+make colima-up
+
+# 2. Fetch Aeron JAR (first time only)
+make setup-interop
+
+# 3. Run smoke test (~1–2 minutes)
+make interop-smoke
+```
+
+### Full Interop Test
+
+```bash
+# Run all scenarios with 100 messages each (~3–4 minutes)
+make interop
+```
+
+### Check Status of Running Jobs
+
+```bash
+# See job and pod status without re-running
+make interop-status
+```
+
+### Interop Targets Reference
+
+| Target | Description |
+|--------|-------------|
+| `make interop` | Full suite — build images, deploy all jobs, wait, report |
+| `make interop-smoke` | Smoke suite — same flow but 10 msgs, 45s timeout |
+| `make interop-status` | Show status of current/recent interop jobs |
+| `make interop-build` | Build OCI images only (no job deployment) |
+| `make interop-run` | Deploy + wait for full interop jobs (no image rebuild) |
+| `make setup-interop` | Fetch Aeron JAR and set up local helpers |
+
+### How It Works
+
+1. `make interop` calls `test/interop/k8s-verify.sh`
+2. The script builds OCI images (Nix for Zig, Docker for Java) and imports them into containerd
+3. Jobs are deleted before re-creation (idempotent — safe to re-run)
+4. The script polls job status and exits 0 on full success, 1 on any failure
+5. On failure, logs from all pods are printed for debugging
+
+### Job Specs
+
+- Full suite: `deploy/interop/kustomization.yaml` (jobs in `deploy/interop/`)
+- Smoke suite: `deploy/interop/smoke/kustomization.yaml` (jobs in `deploy/interop/smoke/`)
+- All jobs use `backoffLimit: 0` — no retries on failure
+- All jobs use `restartPolicy: Never`
+- Full jobs: `activeDeadlineSeconds: 60`; smoke jobs: `activeDeadlineSeconds: 45`
+
+### Troubleshooting
+
+**Jobs stuck in Pending**
+
+```bash
+kubectl describe pod -n aeron <pod-name>
+# Look for: image pull errors, resource limits, node pressure
+```
+
+**Image not found**
+
+```bash
+# Verify image is in k8s.io namespace
+colima ssh -- sudo ctr -n k8s.io images ls | grep -E 'harus|java-aeron'
+# Re-import if missing
+make interop-build
+```
+
+**Subscriber receives 0 messages**
+
+The `java-pub→zig-sub` path may need the zig subscriber to start before the Java
+publisher. Check `docs/interop-investigation.md` for known issues and workarounds.

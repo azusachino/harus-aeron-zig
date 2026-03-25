@@ -52,6 +52,10 @@ make run              # run media driver
 - `src/aeron.zig` — client library root
 - `src/protocol/frame.zig` — all Aeron wire frame structs
 - `src/driver/conductor.zig` — DriverConductor (command/control core)
+- `src/bench/` — throughput, latency, fanout benchmark entrypoints (`make bench`)
+- `src/fuzz/` — fuzz targets for frame codec, URI parser, ring buffer, log buffer, catalog
+- `test/stress/` — long-running soak scenarios for reconnect, archive replay, cluster failover (`make stress`)
+- `deploy/interop/` — Zig↔Java interop matrix deployment; `make interop` entrypoint
 - `docs/plan.md` — phased implementation roadmap
 - `docs/architecture.md` — system architecture
 

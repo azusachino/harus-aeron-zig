@@ -90,6 +90,20 @@ pub const ExtendRecordingRequest = extern struct {
     pub const MSG_TYPE_ID: i32 = 6;
 };
 
+/// TruncateRecordingRequest — truncate a stopped recording at a given position
+pub const TruncateRecordingRequest = extern struct {
+    correlation_id: i64,
+    recording_id: i64,
+    truncate_position: i64,
+
+    pub const HEADER_LENGTH = @sizeOf(TruncateRecordingRequest);
+    pub const MSG_TYPE_ID: i32 = 7;
+};
+
+comptime {
+    std.debug.assert(@sizeOf(TruncateRecordingRequest) == 24);
+}
+
 // ============================================================================
 // Control Responses (archive -> client)
 // ============================================================================
@@ -175,6 +189,18 @@ pub fn decodeChannel(buf: []const u8) ?[]const u8 {
         return null;
     }
     return buf[4 .. 4 + @as(usize, @intCast(channel_len))];
+}
+
+/// Encode a RecordingDescriptor to wire-format bytes, including the variable-length channel.
+/// Returns a heap-allocated slice that the caller must free.
+pub fn encodeRecordingDescriptor(allocator: std.mem.Allocator, desc: *const RecordingDescriptor, channel: []const u8) ![]u8 {
+    var header = desc.*;
+    header.channel_length = @intCast(channel.len);
+
+    const bytes = try allocator.alloc(u8, RecordingDescriptor.HEADER_LENGTH + channel.len);
+    @memcpy(bytes[0..RecordingDescriptor.HEADER_LENGTH], std.mem.asBytes(&header));
+    @memcpy(bytes[RecordingDescriptor.HEADER_LENGTH..], channel);
+    return bytes;
 }
 
 // ============================================================================
@@ -266,4 +292,39 @@ test "encodeChannel with buffer too small" {
 test "source location enum values" {
     try std.testing.expectEqual(@as(i32, 0), @intFromEnum(SourceLocation.local));
     try std.testing.expectEqual(@as(i32, 1), @intFromEnum(SourceLocation.remote));
+}
+
+test "encodeRecordingDescriptor round-trip" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var desc: RecordingDescriptor = undefined;
+    desc.recording_id = 42;
+    desc.start_timestamp = 1000;
+    desc.stop_timestamp = 2000;
+    desc.start_position = 0;
+    desc.stop_position = 10000;
+    desc.initial_term_id = 1;
+    desc.segment_file_length = 128 * 1024 * 1024;
+    desc.term_buffer_length = 64 * 1024;
+    desc.mtu_length = 1408;
+    desc.session_id = 123;
+    desc.stream_id = 456;
+    const channel = "aeron:udp?endpoint=localhost:40123";
+    desc.channel_length = @intCast(channel.len);
+
+    const encoded = try encodeRecordingDescriptor(allocator, &desc, channel);
+    defer allocator.free(encoded);
+
+    try std.testing.expectEqual(RecordingDescriptor.HEADER_LENGTH + channel.len, encoded.len);
+
+    const decoded = @as(*const RecordingDescriptor, @ptrCast(@alignCast(encoded.ptr)));
+    try std.testing.expectEqual(desc.recording_id, decoded.recording_id);
+    try std.testing.expectEqual(desc.start_timestamp, decoded.start_timestamp);
+    try std.testing.expectEqual(desc.stop_timestamp, decoded.stop_timestamp);
+    try std.testing.expectEqual(desc.session_id, decoded.session_id);
+    try std.testing.expectEqual(desc.stream_id, decoded.stream_id);
+    try std.testing.expectEqual(@as(i32, @intCast(channel.len)), decoded.channel_length);
+    try std.testing.expectEqualSlices(u8, channel, encoded[RecordingDescriptor.HEADER_LENGTH..]);
 }

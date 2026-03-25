@@ -51,6 +51,15 @@ pub const SubscriptionEntry = struct {
     channel: []u8,
 };
 
+/// Tracks per-client liveness for timeout eviction.
+pub const ClientEntry = struct {
+    client_id: i64,
+    last_keepalive_ms: i64,
+};
+
+/// Default client liveness timeout: 5 seconds (matches upstream Aeron defaults).
+pub const CLIENT_LIVENESS_TIMEOUT_MS: i64 = 5_000;
+
 pub const DriverConductor = struct {
     ring_buffer: *ManyToOneRingBuffer,
     broadcaster: *BroadcastTransmitter,
@@ -60,9 +69,11 @@ pub const DriverConductor = struct {
     allocator: std.mem.Allocator,
     publications: std.ArrayList(PublicationEntry),
     subscriptions: std.ArrayList(SubscriptionEntry),
+    clients: std.ArrayList(ClientEntry),
     next_session_id: i32,
     recv_endpoint: *endpoint_mod.ReceiveChannelEndpoint,
     recv_bound: bool,
+    current_time_ms: i64,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -85,7 +96,9 @@ pub const DriverConductor = struct {
             .allocator = allocator,
             .publications = .{},
             .subscriptions = .{},
+            .clients = .{},
             .next_session_id = 1,
+            .current_time_ms = 0,
         };
     }
 
@@ -106,12 +119,37 @@ pub const DriverConductor = struct {
             self.allocator.free(sub_entry.channel);
         }
         self.subscriptions.deinit(self.allocator);
+        self.clients.deinit(self.allocator);
+    }
+
+    /// Advance the logical clock used for liveness checks. Call from the driver duty cycle.
+    pub fn setCurrentTimeMs(self: *DriverConductor, now_ms: i64) void {
+        self.current_time_ms = now_ms;
+    }
+
+    /// Evict clients that have not sent a keepalive within CLIENT_LIVENESS_TIMEOUT_MS.
+    /// In upstream Aeron this triggers publication/subscription cleanup for the dead client.
+    /// Here we remove the client entry; full resource teardown is left to explicit REMOVE commands.
+    pub fn checkClientLiveness(self: *DriverConductor) void {
+        const deadline = self.current_time_ms - CLIENT_LIVENESS_TIMEOUT_MS;
+        var i: usize = 0;
+        while (i < self.clients.items.len) {
+            if (self.clients.items[i].last_keepalive_ms < deadline) {
+                std.debug.print("[CONDUCTOR] Evicting timed-out client_id={d}\n", .{self.clients.items[i].client_id});
+                _ = self.clients.swapRemove(i);
+            } else {
+                i += 1;
+            }
+        }
     }
 
     pub fn doWork(self: *DriverConductor) i32 {
         // LESSON(conductor/zig): Command dispatch via ring buffer polling + SETUP signal processing in one work cycle. See docs/tutorial/03-driver/03-conductor.md
         var work: i32 = 0;
         work += self.ring_buffer.read(handleMessage, @ptrCast(self), 10);
+
+        // Check client liveness and evict timed-out clients
+        self.checkClientLiveness();
 
         // Drain receiver SETUP signals
         const setups = self.receiver.drainPendingSetups();
@@ -187,6 +225,15 @@ pub const DriverConductor = struct {
         }
 
         return work;
+    }
+
+    fn sendImageClose(self: *DriverConductor, session_id: i32, stream_id: i32, registration_id: i64) void {
+        var buf: [20]u8 = undefined;
+        std.mem.writeInt(i64, buf[0..8], registration_id, .little);
+        std.mem.writeInt(i32, buf[8..12], session_id, .little);
+        std.mem.writeInt(i32, buf[12..16], stream_id, .little);
+        std.mem.writeInt(i32, buf[16..20], 0, .little); // reserved
+        self.broadcaster.transmit(RESPONSE_ON_IMAGE_CLOSE, &buf);
     }
 
     fn sendImageReady(self: *DriverConductor, session_id: i32, stream_id: i32, registration_id: i64, initial_term_id: i32) void {
@@ -382,7 +429,7 @@ pub const DriverConductor = struct {
         self.sendSubscriptionReady(correlation_id, stream_id);
     }
 
-    fn handleRemoveSubscription(self: *DriverConductor, data: []const u8) void {
+    pub fn handleRemoveSubscription(self: *DriverConductor, data: []const u8) void {
         if (data.len < 16) return;
 
         const registration_id = std.mem.readInt(i64, data[8..16], .little);
@@ -397,16 +444,51 @@ pub const DriverConductor = struct {
 
         if (found_index) |idx| {
             const removed = self.subscriptions.swapRemove(idx);
+            // Also remove any Images on the receiver that were created for this subscription.
+            // Images are keyed by stream_id; walk the receiver and remove matching images.
+            // This mirrors upstream DriverConductor.removeSubscription -> ReceiverProxy.removeSubscription.
+            // We hold no receiver mutex here since this runs on the conductor thread (same thread as
+            // the receiver duty cycle when single-threaded). In a multi-threaded driver the receiver
+            // would be signalled via an inter-agent command queue instead.
+            self.receiver.mutex.lock();
+            var j: usize = 0;
+            while (j < self.receiver.images.items.len) {
+                const image = self.receiver.images.items[j];
+                if (image.stream_id == removed.stream_id) {
+                    self.receiver.mutex.unlock();
+                    // Notify clients that the image has closed
+                    self.sendImageClose(image.session_id, image.stream_id, registration_id);
+                    self.receiver.mutex.lock();
+                    // Free the image resources; log_buffer was allocated by conductor on SETUP
+                    image.log_buffer.deinit();
+                    self.allocator.destroy(image.log_buffer);
+                    self.allocator.destroy(image);
+                    _ = self.receiver.images.swapRemove(j);
+                    // don't increment j — swapRemove replaces index j with last element
+                } else {
+                    j += 1;
+                }
+            }
+            self.receiver.mutex.unlock();
             self.allocator.free(removed.channel);
         }
     }
 
     fn handleClientKeepalive(self: *DriverConductor, data: []const u8) void {
         if (data.len < 8) return;
-        const _client_id = std.mem.readInt(i64, data[0..8], .little);
-        // Liveness tracking is future work; no-op for now
-        _ = _client_id;
-        _ = self;
+        const client_id = std.mem.readInt(i64, data[0..8], .little);
+        // Update or register client liveness timestamp
+        for (self.clients.items) |*client| {
+            if (client.client_id == client_id) {
+                client.last_keepalive_ms = self.current_time_ms;
+                return;
+            }
+        }
+        // New client: register with current time
+        self.clients.append(self.allocator, .{
+            .client_id = client_id,
+            .last_keepalive_ms = self.current_time_ms,
+        }) catch {};
     }
 
     fn handleAddCounter(self: *DriverConductor, data: []const u8) void {
@@ -698,4 +780,164 @@ test "DriverConductor REMOVE_PUBLICATION cleans up entry" {
     conductor.handleRemovePublication(&remove_buf);
 
     try testing.expectEqual(@as(usize, 0), conductor.publications.items.len);
+}
+
+// Helper to build a minimal DriverConductor for tests — reduces boilerplate.
+fn makeTestConductor(
+    allocator: std.mem.Allocator,
+    rb: *ManyToOneRingBuffer,
+    bcast: *BroadcastTransmitter,
+    cm: *CountersMap,
+    receiver: *Receiver,
+    sender: *sender_mod.Sender,
+    recv_ep: *endpoint_mod.ReceiveChannelEndpoint,
+) !DriverConductor {
+    const conductor = try DriverConductor.init(allocator, rb, bcast, cm, receiver, sender, recv_ep, true);
+    return conductor;
+}
+
+test "DriverConductor client keepalive registers and updates client" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var ring_buf: [4096]u8 = undefined;
+    var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
+    var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
+    defer bcast.deinit(allocator);
+    var meta_buf: [4096]u8 = undefined;
+    var values_buf: [4096]u8 = undefined;
+    var cm = counters.CountersMap.init(&meta_buf, &values_buf);
+    const dummy_socket: std.posix.socket_t = undefined;
+    var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
+        .socket = dummy_socket,
+        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+    };
+    var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{ .socket = dummy_socket };
+    var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &cm, null);
+    defer receiver.deinit();
+    var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
+    defer sender.deinit();
+    var conductor = try makeTestConductor(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep);
+    defer conductor.deinit();
+
+    conductor.setCurrentTimeMs(1000);
+
+    // Send keepalive for client 7
+    var ka_buf: [8]u8 = undefined;
+    std.mem.writeInt(i64, &ka_buf, 7, .little);
+    conductor.handleClientKeepalive(&ka_buf);
+
+    try testing.expectEqual(@as(usize, 1), conductor.clients.items.len);
+    try testing.expectEqual(@as(i64, 7), conductor.clients.items[0].client_id);
+    try testing.expectEqual(@as(i64, 1000), conductor.clients.items[0].last_keepalive_ms);
+
+    // Advance time and send another keepalive — timestamp should update
+    conductor.setCurrentTimeMs(2000);
+    conductor.handleClientKeepalive(&ka_buf);
+    try testing.expectEqual(@as(usize, 1), conductor.clients.items.len);
+    try testing.expectEqual(@as(i64, 2000), conductor.clients.items[0].last_keepalive_ms);
+}
+
+test "DriverConductor checkClientLiveness evicts stale clients" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var ring_buf: [4096]u8 = undefined;
+    var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
+    var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
+    defer bcast.deinit(allocator);
+    var meta_buf: [4096]u8 = undefined;
+    var values_buf: [4096]u8 = undefined;
+    var cm = counters.CountersMap.init(&meta_buf, &values_buf);
+    const dummy_socket: std.posix.socket_t = undefined;
+    var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
+        .socket = dummy_socket,
+        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+    };
+    var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{ .socket = dummy_socket };
+    var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &cm, null);
+    defer receiver.deinit();
+    var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
+    defer sender.deinit();
+    var conductor = try makeTestConductor(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep);
+    defer conductor.deinit();
+
+    // Register two clients at time 0
+    conductor.setCurrentTimeMs(0);
+    var ka1: [8]u8 = undefined;
+    var ka2: [8]u8 = undefined;
+    std.mem.writeInt(i64, &ka1, 1, .little);
+    std.mem.writeInt(i64, &ka2, 2, .little);
+    conductor.handleClientKeepalive(&ka1);
+    conductor.handleClientKeepalive(&ka2);
+
+    // Advance time — client 1 sends a keepalive, client 2 does not
+    conductor.setCurrentTimeMs(3000);
+    conductor.handleClientKeepalive(&ka1);
+
+    // Move past timeout for client 2 (last keepalive was at t=0, timeout=5000ms)
+    conductor.setCurrentTimeMs(6000);
+    conductor.checkClientLiveness();
+
+    // client 2 should be evicted, client 1 should remain
+    try testing.expectEqual(@as(usize, 1), conductor.clients.items.len);
+    try testing.expectEqual(@as(i64, 1), conductor.clients.items[0].client_id);
+}
+
+test "DriverConductor REMOVE_SUBSCRIPTION closes associated image" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var ring_buf: [4096]u8 = undefined;
+    var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
+    var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
+    defer bcast.deinit(allocator);
+    var meta_buf: [4096]u8 = undefined;
+    var values_buf: [4096]u8 = undefined;
+    var cm = counters.CountersMap.init(&meta_buf, &values_buf);
+    const dummy_socket: std.posix.socket_t = undefined;
+    var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
+        .socket = dummy_socket,
+        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+    };
+    var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{ .socket = dummy_socket };
+    var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &cm, null);
+    defer receiver.deinit();
+    var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
+    defer sender.deinit();
+    var conductor = try makeTestConductor(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep);
+    defer conductor.deinit();
+
+    const stream_id: i32 = 77;
+    const reg_id: i64 = 9900;
+
+    // Add a subscription
+    conductor.subscriptions.append(allocator, .{
+        .registration_id = reg_id,
+        .stream_id = stream_id,
+        .channel = try allocator.dupe(u8, "aeron:udp"),
+    }) catch unreachable;
+
+    // Manually add an Image for that subscription to the receiver
+    const lb = try allocator.create(@import("../logbuffer/log_buffer.zig").LogBuffer);
+    lb.* = try @import("../logbuffer/log_buffer.zig").LogBuffer.init(allocator, 64 * 1024);
+    const hwm_handle = cm.allocate(counters.RECEIVER_HWM, "hwm");
+    const sub_pos_handle = cm.allocate(counters.SUBSCRIBER_POSITION, "sub-pos");
+    const image = try allocator.create(Image);
+    image.* = Image.init(42, stream_id, 64 * 1024, 1408, 0, 0, lb, hwm_handle, sub_pos_handle, std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0));
+    try receiver.images.append(allocator, image);
+
+    try testing.expectEqual(@as(usize, 1), receiver.images.items.len);
+
+    // Remove the subscription — expect image to be cleaned up
+    var remove_buf: [16]u8 = undefined;
+    std.mem.writeInt(i64, remove_buf[0..8], 0, .little);
+    std.mem.writeInt(i64, remove_buf[8..16], reg_id, .little);
+    conductor.handleRemoveSubscription(&remove_buf);
+
+    try testing.expectEqual(@as(usize, 0), conductor.subscriptions.items.len);
+    try testing.expectEqual(@as(usize, 0), receiver.images.items.len);
 }

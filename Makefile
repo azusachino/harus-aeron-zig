@@ -1,4 +1,4 @@
-NIX_RUN := $(if $(filter $(IN_NIX_SHELL),),nix develop --command ,)
+NIX_RUN := $(if $(IN_NIX_SHELL),,nix develop --command )
 export ZIG_GLOBAL_CACHE_DIR := $(CURDIR)/.zig-global-cache
 export ZIG_LOCAL_CACHE_DIR := $(CURDIR)/.zig-cache
 AERON_VERSION := 1.46.7
@@ -9,7 +9,7 @@ AERON_ALL_JAR_SHA256 := ded2ed3c5b73991e31c439a7562a294e5d5566f955c3a9e81089a28a
        fuzz bench stress \
        nix-image k8s-up k8s-down k8s-status k8s-logs colima-up colima-down \
        setup setup-interop \
-       interop test-interop interop-build interop-run
+       interop interop-smoke interop-status interop-build interop-run test-interop
 
 fmt:
 	$(NIX_RUN) zig fmt .
@@ -141,8 +141,19 @@ stress:  ## Run stress tests
 # - Waits for completion and reports results
 # See: test/interop/k8s-verify.sh
 
-interop:  ## Run full interop test suite
+interop:  ## Run full interop test suite (100 messages, all scenarios)
 	bash test/interop/k8s-verify.sh
+
+interop-smoke:  ## Run quick smoke interop test (10 messages, CI-friendly)
+	bash test/interop/k8s-verify.sh --smoke
+
+interop-status:  ## Show status of running interop jobs
+	@echo "=== Interop Jobs ==="
+	kubectl get jobs -n aeron -l 'app.kubernetes.io/part-of in (interop,interop-smoke)' -o wide 2>/dev/null || \
+		echo "(no interop jobs found — run 'make interop' or 'make interop-smoke')"
+	@echo ""
+	@echo "=== Interop Pods ==="
+	kubectl get pods -n aeron -l 'app.kubernetes.io/part-of in (interop,interop-smoke)' -o wide 2>/dev/null || true
 
 test-interop: interop  ## Backward-compatible alias for interop
 
@@ -154,7 +165,8 @@ interop-build: nix-image  ## Build interop test images
 	nerdctl -n k8s.io image import $$(docker save java-aeron:latest | nerdctl -n k8s.io image load 2>&1 | grep -oP 'sha256:\S+') || \
 		docker save java-aeron:latest | nerdctl -n k8s.io image load
 
-interop-run:  ## Run interop test jobs in k3s
+interop-run:  ## Run interop test jobs in k3s (delete-before-create, idempotent)
+	kubectl create namespace aeron --dry-run=client -o yaml | kubectl apply -f -
 	kubectl delete jobs -n aeron -l app.kubernetes.io/part-of=interop --ignore-not-found
 	kubectl apply -k deploy/interop/
 	@echo "Waiting for interop jobs to complete..."
