@@ -6,6 +6,10 @@ const std = @import("std");
 pub const INSUFFICIENT_CAPACITY: i32 = -1;
 pub const PADDING_MSG_TYPE_ID: i32 = -1;
 
+// Upstream command message types (client → driver)
+pub const CLIENT_KEEPALIVE_MSG_TYPE: i32 = 0x05;
+pub const TERMINATE_DRIVER_MSG_TYPE: i32 = 0x08;
+
 // Metadata positions (last 128 bytes of buffer)
 pub const TAIL_POSITION_OFFSET: usize = 0;
 pub const HEAD_CACHE_POSITION_OFFSET: usize = 8;

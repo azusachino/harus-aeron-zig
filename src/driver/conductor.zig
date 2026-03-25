@@ -11,6 +11,7 @@ const sender_mod = @import("sender.zig");
 const logbuffer = @import("../logbuffer/log_buffer.zig");
 const transport_uri = @import("../transport/udp_channel.zig");
 const endpoint_mod = @import("../transport/endpoint.zig");
+const signal = @import("../signal.zig");
 
 const ManyToOneRingBuffer = ring_buffer.ManyToOneRingBuffer;
 const BroadcastTransmitter = broadcast.BroadcastTransmitter;
@@ -26,6 +27,7 @@ pub const CMD_REMOVE_SUBSCRIPTION: i32 = 0x04;
 pub const CMD_CLIENT_KEEPALIVE: i32 = 0x05;
 pub const CMD_ADD_COUNTER: i32 = 0x06;
 pub const CMD_REMOVE_COUNTER: i32 = 0x07;
+pub const CMD_TERMINATE_DRIVER: i32 = 0x08;
 
 // Response type IDs
 pub const RESPONSE_ON_PUBLICATION_READY: i32 = 0x10;
@@ -525,6 +527,12 @@ pub const DriverConductor = struct {
         _ = correlation_id;
     }
 
+    fn handleTerminateDriver(self: *DriverConductor) void {
+        signal.running.store(false, .release);
+        std.debug.print("[CONDUCTOR] TERMINATE_DRIVER received — initiating graceful shutdown\n", .{});
+        _ = self;
+    }
+
     fn sendPublicationReady(self: *DriverConductor, correlation_id: i64, session_id: i32, stream_id: i32, pub_limit_counter_id: i32) void {
         // LESSON(conductor): Broadcast response to clients via shared-memory broadcast buffer—clients poll for readiness. See docs/tutorial/03-driver/03-conductor.md
         var buf: [20]u8 = undefined;
@@ -582,6 +590,7 @@ fn handleMessage(msg_type_id: i32, data: []const u8, ctx: *anyopaque) void {
         CMD_CLIENT_KEEPALIVE => self.handleClientKeepalive(data),
         CMD_ADD_COUNTER => self.handleAddCounter(data),
         CMD_REMOVE_COUNTER => self.handleRemoveCounter(data),
+        CMD_TERMINATE_DRIVER => self.handleTerminateDriver(),
         else => {},
     }
 }
@@ -940,4 +949,40 @@ test "DriverConductor REMOVE_SUBSCRIPTION closes associated image" {
 
     try testing.expectEqual(@as(usize, 0), conductor.subscriptions.items.len);
     try testing.expectEqual(@as(usize, 0), receiver.images.items.len);
+}
+
+test "DriverConductor TERMINATE_DRIVER stops signal" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var ring_buf: [4096]u8 = undefined;
+    var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
+    var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
+    defer bcast.deinit(allocator);
+    var meta_buf: [4096]u8 = undefined;
+    var values_buf: [4096]u8 = undefined;
+    var cm = counters.CountersMap.init(&meta_buf, &values_buf);
+    const dummy_socket: std.posix.socket_t = undefined;
+    var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
+        .socket = dummy_socket,
+        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+    };
+    var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{ .socket = dummy_socket };
+    var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &cm, null);
+    defer receiver.deinit();
+    var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
+    defer sender.deinit();
+    var conductor = try makeTestConductor(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep);
+    defer conductor.deinit();
+
+    // Verify signal is initially running
+    signal.running.store(true, .release);
+    try testing.expect(signal.isRunning() == true);
+
+    // Send TERMINATE_DRIVER command
+    conductor.handleTerminateDriver();
+
+    // Verify signal is now stopped
+    try testing.expect(signal.isRunning() == false);
 }
