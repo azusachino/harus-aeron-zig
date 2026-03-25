@@ -105,13 +105,13 @@ pub const ManyToOneRingBuffer = struct {
 
         // Check if record would wrap around buffer end
         if (record_index + aligned_length > self.capacity) {
-            // Insert padding record
+            // Insert padding record — Agrona layout: length@0, type@4
             const padding_length = @as(i32, @intCast(self.capacity - record_index));
             const padding_addr = self.buffer.ptr + record_index;
-            const msg_type_ptr: *i32 = @ptrCast(@alignCast(padding_addr));
-            msg_type_ptr.* = PADDING_MSG_TYPE_ID;
-            const length_ptr: *i32 = @ptrCast(@alignCast(padding_addr + 4));
-            length_ptr.* = padding_length;
+            const pad_len_ptr: *i32 = @ptrCast(@alignCast(padding_addr));
+            pad_len_ptr.* = padding_length; // length at offset 0
+            const pad_type_ptr: *i32 = @ptrCast(@alignCast(padding_addr + 4));
+            pad_type_ptr.* = PADDING_MSG_TYPE_ID; // type at offset 4
 
             tail += padding_length;
             record_index = 0;
@@ -123,11 +123,13 @@ pub const ManyToOneRingBuffer = struct {
             tail = self.loadTail();
         }
 
-        // Write header
+        // Write header — Agrona layout: length@0 (negative sentinel), type@4
         const record_addr = self.buffer.ptr + record_index;
-        const msg_type_ptr: *i32 = @ptrCast(@alignCast(record_addr));
-        msg_type_ptr.* = msg_type_id;
-        const length_ptr: *i32 = @ptrCast(@alignCast(record_addr + 4));
+        const record_length = @as(i32, @intCast(RecordDescriptor.HEADER_LENGTH + data.len));
+        const length_ptr: *i32 = @ptrCast(@alignCast(record_addr));
+        @atomicStore(i32, length_ptr, -record_length, .release); // in-progress sentinel
+        const msg_type_ptr: *i32 = @ptrCast(@alignCast(record_addr + 4));
+        msg_type_ptr.* = msg_type_id; // type at offset 4
 
         // Copy payload
         if (data.len > 0) {
@@ -135,8 +137,8 @@ pub const ManyToOneRingBuffer = struct {
             @memcpy(payload_addr[0..data.len], data);
         }
 
-        // Commit with ordered store of actual length (header + payload, not aligned)
-        length_ptr.* = @as(i32, @intCast(RecordDescriptor.HEADER_LENGTH + data.len));
+        // Commit: write positive length (ordered store signals record is ready to read)
+        @atomicStore(i32, length_ptr, record_length, .release);
         return true;
     }
 
@@ -149,25 +151,26 @@ pub const ManyToOneRingBuffer = struct {
             const index = @as(usize, @intCast(head)) % self.capacity;
 
             const record_addr = self.buffer.ptr + index;
-            const msg_type_ptr: *i32 = @ptrCast(@alignCast(record_addr));
+
+            // Agrona layout: length@0 (negative=in-progress, 0=empty, positive=ready), type@4
+            const length_ptr: *i32 = @ptrCast(@alignCast(record_addr));
+            const record_length = @atomicLoad(i32, length_ptr, .acquire);
+
+            if (record_length <= 0) {
+                // Empty slot or writer in progress — no more records to read
+                break;
+            }
+
+            const msg_type_ptr: *i32 = @ptrCast(@alignCast(record_addr + 4));
             const msg_type_id = msg_type_ptr.*;
 
             if (msg_type_id == PADDING_MSG_TYPE_ID) {
-                // Skip padding
-                const length_ptr: *i32 = @ptrCast(@alignCast(record_addr + 4));
-                const record_length = length_ptr.*;
+                // Skip padding — advance head by the stored record length
                 head += record_length;
                 i += 1;
                 continue;
             }
 
-            if (msg_type_id == 0) {
-                // No more records
-                break;
-            }
-
-            const length_ptr: *i32 = @ptrCast(@alignCast(record_addr + 4));
-            const record_length = length_ptr.*;
             const msg_length = record_length - RecordDescriptor.HEADER_LENGTH;
 
             const payload_addr = record_addr + RecordDescriptor.HEADER_LENGTH;

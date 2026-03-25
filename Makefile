@@ -12,11 +12,11 @@ AERON_ALL_JAR_SHA256 := ded2ed3c5b73991e31c439a7562a294e5d5566f955c3a9e81089a28a
        interop interop-smoke interop-status test-protocol test-driver test-archive test-cluster test-scenarios status
 
 fmt:
-	$(NIX_RUN) zig fmt .
+	$(NIX_RUN) zig fmt src/ build.zig
 	$(NIX_RUN) prettier --write "**/*.{json,yaml,yml}"
 
 fmt-check:
-	$(NIX_RUN) zig fmt --check .
+	$(NIX_RUN) zig fmt --check src/ build.zig
 	$(NIX_RUN) prettier --check "**/*.{json,yaml,yml}"
 
 build:
