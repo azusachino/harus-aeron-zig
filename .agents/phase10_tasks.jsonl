@@ -1,0 +1,10 @@
+{"task": 1, "name": "Clean Slate", "steps": ["Delete obsolete dirs", "Move k8s to root", "Update Makefile"], "status": "pending"}
+{"task": 2, "name": "Agent-First Data Files", "steps": ["Create upstream_map.jsonl", "Create parity_status.jsonl", "Create chapter_status.jsonl", "Add make status"], "status": "pending"}
+{"task": 3, "name": "Build System Wiring", "steps": ["Update build.zig", "Update Makefile", "Create root test placeholders"], "status": "pending"}
+{"task": 4, "name": "Protocol Scenarios", "steps": ["frame_codec_test", "uri_parser_test", "flow_control_test"], "status": "pending"}
+{"task": 5, "name": "Driver Scenarios", "steps": ["session_establishment", "lifecycle_tests", "conductor_ipc", "loss_recovery"], "status": "pending"}
+{"task": 6, "name": "Archive Scenarios", "steps": ["catalog_test", "record_replay", "segment_rotation"], "status": "pending"}
+{"task": 7, "name": "Cluster Scenarios", "steps": ["election_test", "log_replication", "failover_test"], "status": "pending"}
+{"task": 8, "name": "CI Workflows", "steps": ["Create ci.yml", "Create interop.yml"], "status": "pending"}
+{"task": 9, "name": "CI Infrastructure", "steps": ["Create docker-compose.ci.yml", "Create Dockerfiles"], "status": "pending"}
+{"task": 10, "name": "Final Verification", "steps": ["make check", "verify upstream_map", "verify CI artifacts"], "status": "pending"}

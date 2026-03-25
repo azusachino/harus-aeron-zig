@@ -14,7 +14,7 @@ Establish behavioural parity with the upstream `aeron-io/aeron` test suite by:
 2. Running the real Java Aeron 1.46.7 client against our driver in GitHub Actions CI
 3. Replacing the existing k8s-based interop infrastructure with a lightweight, CI-native approach
 
-This is not line-coverage chasing. Success means every scenario in `test/UPSTREAM_MAP.md` has a Zig test and a CI green tick.
+This is not line-coverage chasing. Success means every scenario in `test/upstream_map.jsonl` has a Zig test and a CI green tick.
 
 ---
 
