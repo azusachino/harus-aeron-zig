@@ -62,6 +62,9 @@ fn parseSegmentFileName(name: []const u8) ?struct { recording_id: i64, base_posi
 }
 
 /// In-memory recording catalog
+// LESSON(catalog): The catalog is a flat binary file of fixed-size RecordingDescriptor
+// entries; recording_id * descriptor_size gives the file offset for O(1) lookup.
+// See docs/tutorial/05-archive/02-catalog.md
 pub const Catalog = struct {
     allocator: std.mem.Allocator,
     entries: std.ArrayList(RecordingDescriptorEntry),
@@ -186,6 +189,9 @@ pub const Catalog = struct {
     }
 
     /// Lookup recording descriptor by ID
+    // LESSON(catalog): Fast lookup by recording_id enables clients to query recording metadata
+    // (channel, session, stream) to reconstruct the replay stream.
+    // See docs/tutorial/05-archive/02-catalog.md
     pub fn recordingDescriptor(self: *const Catalog, recording_id: i64) ?*const RecordingDescriptorEntry {
         for (self.entries.items) |*entry| {
             if (entry.recording_id == recording_id) {

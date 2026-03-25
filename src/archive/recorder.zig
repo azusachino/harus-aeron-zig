@@ -18,6 +18,9 @@ pub const RecordingMetadata = struct {
 /// RecordingWriter — buffers raw frame data for a single recording and mirrors it to disk.
 /// Supports segment rotation: when a segment fills up, the writer closes the current file
 /// and opens a new one named `{recording_id}-{segment_base}.dat`.
+// LESSON(recorder): Recorder writes Aeron fragments to a segmented log file;
+// each segment is a power-of-2 size to keep seek arithmetic simple.
+// See docs/tutorial/05-archive/03-recorder.md
 pub const RecordingWriter = struct {
     allocator: std.mem.Allocator,
     recording_id: i64,
@@ -98,6 +101,9 @@ pub const RecordingWriter = struct {
 
     /// Write raw frame data to the buffer and advance stop_position.
     /// Rotates to a new segment file when the current segment is full.
+    // LESSON(recorder): Writing to both memory buffer and disk file ensures
+    // the recording is immediately durable while buffering offers fast in-memory access.
+    // See docs/tutorial/05-archive/03-recorder.md
     pub fn write(self: *RecordingWriter, data: []const u8) !void {
         try self.buffer.appendSlice(self.allocator, data);
         if (self.file) |*file| {

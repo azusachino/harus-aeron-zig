@@ -168,6 +168,7 @@ Frame types: DATA(0x01), SETUP(0x03), STATUS(0x04), NAK(0x05), RTT(0x0B)
 
 ## Phase History
 
+- **Phase 8 (2026-03-25)**: Upstream fidelity pass — wire protocol gaps closed, archive/cluster hardened, CnC tooling live, interop automated.
 - **v1.0.0**: Media Driver, Client API, Archive, and Cluster complete. Java interop verified.
 - **v0.5.0**: Initial preview. Basic IPC pub/sub working.
 

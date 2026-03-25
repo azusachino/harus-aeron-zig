@@ -46,6 +46,9 @@ pub const ClusterLogState = struct {
 // =============================================================================
 
 /// ClusterLog — leader-side log for appending entries and tracking commit position.
+// LESSON(log-replication): The leader sends AppendRequest; followers ACK with
+// AppendPosition; the commit index advances only when a quorum has ACKed.
+// See docs/tutorial/06-cluster/03-log-replication.md
 pub const ClusterLog = struct {
     /// All log entries
     entries: std.ArrayList(LogEntry),
@@ -86,6 +89,9 @@ pub const ClusterLog = struct {
     /// Append a new entry to the log.
     /// Deep-copies the data and advances append_position by data.len.
     /// Returns the log position of the appended entry.
+    // LESSON(log-replication): Appended entries are first durable on the leader, then
+    // replicated to followers via AppendRequest; commit_position lags append_position.
+    // See docs/tutorial/06-cluster/03-log-replication.md
     pub fn append(self: *ClusterLog, data: []const u8, timestamp: i64) !i64 {
         const owned_data = try self.allocator.dupe(u8, data);
         const entry = LogEntry{

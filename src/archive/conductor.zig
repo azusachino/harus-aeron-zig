@@ -115,6 +115,9 @@ pub const Response = struct {
 /// ArchiveConductor — command dispatcher and response aggregator.
 /// Owns the Catalog, Recorder, and Replayer. Routes client commands to them
 /// and collects responses for delivery back to clients.
+// LESSON(archive-conductor): ArchiveConductor uses the same duty-cycle pattern as the
+// media driver conductor — poll IPC commands, dispatch to recording/replay sessions.
+// See docs/tutorial/05-archive/05-archive-conductor.md
 pub const ArchiveConductor = struct {
     allocator: std.mem.Allocator,
     archive_dir: []const u8,
@@ -188,6 +191,9 @@ pub const ArchiveConductor = struct {
 
     /// Process all pending commands and queue responses.
     /// Returns the number of commands processed.
+    // LESSON(archive-conductor): doWork() executes one control loop: drain all pending commands,
+    // send responses, and check for timeouts (e.g. idle recordings to truncate).
+    // See docs/tutorial/05-archive/05-archive-conductor.md
     pub fn doWork(self: *ArchiveConductor) !i32 {
         // Initialize recorder on first doWork (after all fields are ready).
         try self.initRecorder();

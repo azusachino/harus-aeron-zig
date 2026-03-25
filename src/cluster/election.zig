@@ -60,6 +60,9 @@ pub const MemberState = struct {
 // =============================================================================
 
 /// Election — Raft election state machine for cluster leader selection.
+// LESSON(election): Raft election timeout is randomized per member to avoid split-vote
+// deadlocks; a Follower becomes Candidate when its timer fires without a heartbeat.
+// See docs/tutorial/06-cluster/02-election.md
 pub const Election = struct {
     /// Current election state
     state: ElectionState,
@@ -218,6 +221,9 @@ pub const Election = struct {
 
     /// Process a RequestVote RPC from a candidate.
     /// Returns true if this node grants the vote.
+    // LESSON(election): RequestVote safety rules: grant only if candidate's log is at least
+    // as up-to-date as ours, and we haven't voted for a different candidate this term.
+    // See docs/tutorial/06-cluster/02-election.md
     pub fn onRequestVote(
         self: *Election,
         candidate_term_id: i64,
