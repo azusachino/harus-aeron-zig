@@ -22,5 +22,5 @@ test "MediaDriver: create and destroy" {
     const dir = try std.fs.openDirAbsolute(ctx.aeron_dir, .{});
     var dir_mutable = dir;
     defer dir_mutable.close();
-    try dir_mutable.access("CnC.dat", .{});
+    try dir_mutable.access("cnc.dat", .{});
 }
