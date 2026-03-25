@@ -55,3 +55,17 @@ pub const ReceiveChannelEndpoint = struct {
         @panic("TODO: implement ReceiveChannelEndpoint.close (Chapter C-5)");
     }
 };
+
+test "SendChannelEndpoint: open and close" {
+    var ch = try UdpChannel.parse(std.testing.allocator, "aeron:udp?endpoint=127.0.0.1:0");
+    defer ch.deinit(std.testing.allocator);
+    var ep = try SendChannelEndpoint.open(&ch);
+    ep.close();
+}
+
+test "ReceiveChannelEndpoint: open and close" {
+    var ch = try UdpChannel.parse(std.testing.allocator, "aeron:udp?endpoint=127.0.0.1:0");
+    defer ch.deinit(std.testing.allocator);
+    var ep = try ReceiveChannelEndpoint.open(&ch);
+    ep.close();
+}

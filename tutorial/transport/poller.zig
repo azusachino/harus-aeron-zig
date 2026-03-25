@@ -40,3 +40,9 @@ pub const Poller = struct {
         @panic("TODO: implement Poller.readyFds (Chapter C-5)");
     }
 };
+
+test "Poller.init: starts with no ready fds" {
+    var p = Poller.init(std.testing.allocator);
+    defer p.deinit();
+    try std.testing.expectEqual(@as(usize, 0), p.readyFds().len);
+}

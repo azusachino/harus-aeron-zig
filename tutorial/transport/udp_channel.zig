@@ -30,3 +30,15 @@ pub const UdpChannel = struct {
         @panic("TODO: implement UdpChannel.isMulticast (Chapter C-5)");
     }
 };
+
+test "UdpChannel.parse: unicast address is not multicast" {
+    var ch = try UdpChannel.parse(std.testing.allocator, "aeron:udp?endpoint=127.0.0.1:40123");
+    defer ch.deinit(std.testing.allocator);
+    try std.testing.expect(!ch.isMulticast());
+}
+
+test "UdpChannel.parse: multicast address detected" {
+    var ch = try UdpChannel.parse(std.testing.allocator, "aeron:udp?endpoint=224.0.1.1:40123");
+    defer ch.deinit(std.testing.allocator);
+    try std.testing.expect(ch.isMulticast());
+}

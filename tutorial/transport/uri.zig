@@ -87,3 +87,25 @@ pub const AeronUri = struct {
         @panic("TODO");
     }
 };
+
+test "AeronUri.parse: basic udp endpoint" {
+    var uri = try AeronUri.parse(std.testing.allocator, "aeron:udp?endpoint=localhost:20121");
+    defer uri.deinit();
+    const ep = uri.endpoint() orelse return error.NoEndpoint;
+    try std.testing.expectEqualStrings("localhost:20121", ep);
+}
+
+test "AeronUri.parse: ipc channel has no endpoint" {
+    var uri = try AeronUri.parse(std.testing.allocator, "aeron:ipc");
+    defer uri.deinit();
+    try std.testing.expect(uri.endpoint() == null);
+}
+
+test "ControlMode.fromString: known values" {
+    try std.testing.expectEqual(ControlMode.dynamic, ControlMode.fromString("dynamic"));
+    try std.testing.expectEqual(ControlMode.manual, ControlMode.fromString("manual"));
+}
+
+test "ControlMode.fromString: unknown value returns null" {
+    try std.testing.expect(ControlMode.fromString("bogus") == null);
+}
