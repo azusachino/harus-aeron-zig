@@ -1,0 +1,5 @@
+{"layer":"protocol","completeness_pct":100,"gaps":[],"reference":"aeron_udp_protocol.h","updated":"2026-03-25"}
+{"layer":"ipc","completeness_pct":95,"gaps":["multi-destination","advanced-keepalive"],"reference":"ControlProtocolEvents.java","updated":"2026-03-25"}
+{"layer":"archive","completeness_pct":100,"gaps":[],"reference":"aeron-archive/","updated":"2026-03-25"}
+{"layer":"cluster","completeness_pct":90,"gaps":["snapshot-coordination","member-discovery"],"reference":"aeron-cluster/codecs/","updated":"2026-03-25"}
+{"layer":"uri","completeness_pct":95,"gaps":["media-type-extensions"],"reference":"ChannelUri.java","updated":"2026-03-25"}

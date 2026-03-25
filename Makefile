@@ -44,6 +44,16 @@ lesson-lint:  ## Verify all LESSON annotation slugs have a matching docs/tutoria
 
 check: fmt-check build test
 
+status:  ## Show parity and chapter status from JSONL sources
+	@echo "=== Parity Gaps ==="
+	@jq -r '"\(.layer): \(.completeness_pct)% — gaps: \(.gaps | join(", "))"' .agents/parity_status.jsonl
+	@echo ""
+	@echo "=== Upstream Map — pending ==="
+	@jq -r 'select(.status == "pending") | "\(.layer)/\(.upstream_class)"' test/upstream_map.jsonl
+	@echo ""
+	@echo "=== Chapter Status — incomplete ==="
+	@jq -r 'select(.status != "done") | "\(.id) \(.slug): \(.status)"' .agents/chapter_status.jsonl
+
 run:
 	$(NIX_RUN) zig build run
 
