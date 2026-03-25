@@ -4,21 +4,32 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-03-25 — Phase 10: Upstream Test Parity & CI
+
 ### Added
-- Strict Aeron URI parsing/normalization with all upstream channel forms
-- Remaining wire frame variants: RTTM, ResolutionEntry with full codec coverage
-- Malformed-input rejection in frame decoder (no panics on untrusted UDP data)
-- STATUS flow control: receiver window management, position feedback loop
-- Live CnC tooling: stat/errors/loss/streams/events/cluster-tool backed by real mmap reads
-- Archive operational fidelity: segment rotation, catalog descriptor persistence, restart reconstruction
-- Cluster consensus fidelity: follower catch-up/rejoin, election continuity, session redirect/failover
-- Interop automation: Zig↔Java matrix (pub/sub, archive, cluster) via single `make interop`
-- Performance baseline: throughput/latency/fanout benchmarks + soak test scenarios
+- **Scenario testing framework**: 14 scenario tests across protocol, driver, archive, cluster (test/)
+- **CI automation**: GitHub Actions matrix (Linux + macOS), interop smoke gate with Docker Compose
+- **Interop infrastructure**: docker-compose.ci.yml for lightweight Java↔Zig smoke tests
+- **Local CI verification**: Podman support in nix devShell with podman-compose integration
+- **Wire protocol compliance**: cnc.dat filename lowercase (matches Aeron C++/Java implementations)
+
+### Changed
+- Dockerfile: enable nix-command and flakes experimental features for container builds
+- Makefile: interop targets now use podman-compose with proper env vars and exit-code gating
+- Architecture: streamlined k8s deployment from deploy/k8s/ to k8s/ at project root
 
 ### Fixed
-- Multi-frame processing in processDatagram (receiver now walks all Aeron frames per UDP datagram)
-- Image rebuild_position initialization from active_term_id in SETUP handshake
-- Memory leak in aeron.zig: heap *Image pointers now destroyed in deinit
+- cnc.dat filename case sensitivity (was CnC.dat, now lowercase for full Aeron parity)
+- Phase 9: Strict Aeron URI parsing/normalization with all upstream channel forms
+- Phase 9: Remaining wire frame variants (RTTM, ResolutionEntry) with full codec coverage
+- Phase 9: Malformed-input rejection in frame decoder (no panics on untrusted UDP data)
+- Phase 8: STATUS flow control with receiver window management and position feedback loop
+- Phase 8: Live CnC tooling (stat/errors/loss/streams/events/cluster-tool) backed by real mmap
+- Phase 8: Archive operational fidelity (segment rotation, catalog persistence, restart reconstruction)
+- Phase 8: Cluster consensus fidelity (follower catch-up/rejoin, election continuity, failover)
+- Phase 8: Multi-frame processing in processDatagram (receiver walks all Aeron frames per UDP)
+- Phase 8: Image rebuild_position initialization from active_term_id in SETUP handshake
+- Phase 8: Memory leak in aeron.zig (heap *Image pointers now destroyed in deinit)
 
 ## [0.1.0] - 2026-03-23
 
