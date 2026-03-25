@@ -186,9 +186,14 @@ pub fn readAllSegmentsFromDisk(
     var result: std.ArrayListUnmanaged(u8) = .{};
     errdefer result.deinit(allocator);
 
-    const eff_segment_len: i64 = if (segment_file_length > 0) segment_file_length else stop_position - start_position + 1;
+    if (stop_position <= start_position) {
+        return try allocator.alloc(u8, 0);
+    }
+
+    const end_position = stop_position;
+    const eff_segment_len: i64 = if (segment_file_length > 0) segment_file_length else end_position - start_position;
     var base: i64 = start_position;
-    while (base <= stop_position or base == start_position) {
+    while (base < end_position) {
         const seg_path = try RecordingWriter.segmentFilePath(allocator, archive_dir, recording_id, base);
         defer allocator.free(seg_path);
 
@@ -199,15 +204,20 @@ pub fn readAllSegmentsFromDisk(
         defer file.close();
 
         const file_size = (try file.stat()).size;
-        if (file_size > 0) {
+        const remaining = end_position - base;
+        const bytes_to_read = @min(file_size, remaining);
+        if (bytes_to_read > 0) {
             const old_len = result.items.len;
-            try result.resize(allocator, old_len + file_size);
-            _ = try file.readAll(result.items[old_len..]);
+            const read_len: usize = @as(usize, @intCast(bytes_to_read));
+            try result.resize(allocator, old_len + read_len);
+            const actual = try file.readAll(result.items[old_len .. old_len + read_len]);
+            if (actual < read_len) {
+                try result.resize(allocator, old_len + actual);
+            }
         }
 
         if (segment_file_length <= 0) break;
         base += eff_segment_len;
-        if (base > stop_position) break;
     }
 
     return result.toOwnedSlice(allocator);
@@ -402,6 +412,17 @@ pub const Recorder = struct {
                 return;
             }
         }
+    }
+
+    /// Reopen a stopped recording session so the archive can continue appending
+    /// to the same logical recording_id.
+    pub fn onExtendRecording(self: *Recorder, recording_id: i64) !void {
+        const session = self.findSession(recording_id) orelse return error.RecordingNotFound;
+        if (session.isActive()) {
+            return error.RecordingActive;
+        }
+
+        session.active = true;
     }
 
     /// Poll all active sessions and return count of active recordings.
@@ -618,6 +639,47 @@ test "Recorder onStopRecording closes session and updates catalog" {
     try std.testing.expectEqual(110, cat_entry.stop_position); // 100 + 10 bytes written
 }
 
+test "Recorder onExtendRecording reactivates stopped session" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var catalog = catalog_mod.Catalog.init(allocator);
+    defer catalog.deinit();
+
+    var recorder = Recorder.init(allocator, &catalog);
+    defer recorder.deinit();
+
+    const recording_id = try recorder.onStartRecording(
+        321,
+        654,
+        "ch-extend",
+        "src-extend",
+        .{
+            .start_position = 0,
+            .start_timestamp = 9000,
+        },
+    );
+
+    var session = recorder.findSession(recording_id).?;
+    try session.onFragment("abc");
+    try recorder.onStopRecording(recording_id, 9100);
+
+    try std.testing.expect(!session.isActive());
+    try std.testing.expectEqual(@as(i64, 3), catalog.recordingDescriptor(recording_id).?.stop_position);
+
+    try recorder.onExtendRecording(recording_id);
+    try std.testing.expect(session.isActive());
+    try std.testing.expectEqual(@as(usize, 1), recorder.sessions.items.len);
+    try std.testing.expectEqual(@as(usize, 1), recorder.activeSessions());
+
+    try session.onFragment("defg");
+    try recorder.onStopRecording(recording_id, 9200);
+
+    try std.testing.expectEqual(@as(i64, 7), catalog.recordingDescriptor(recording_id).?.stop_position);
+    try std.testing.expectEqual(@as(usize, 1), recorder.sessions.items.len);
+}
+
 test "Recorder doWork returns active session count" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -716,6 +778,31 @@ test "readAllSegmentsFromDisk reads across multiple segments" {
     try std.testing.expectEqualSlices(u8, "0123456789", all[0..10]);
     try std.testing.expectEqualSlices(u8, "abcdefghij", all[10..20]);
     try std.testing.expectEqualSlices(u8, "ABCDE", all[20..25]);
+}
+
+test "readAllSegmentsFromDisk truncates final segment at stop_position" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/harus-seg-trunc-{d}", .{std.time.nanoTimestamp()});
+    defer allocator.free(archive_dir);
+    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+
+    var writer = try RecordingWriter.initWithSegment(allocator, 77, 0, 10, archive_dir);
+    defer writer.deinit();
+
+    try writer.write("0123456789");
+    try writer.write("abcdefghij");
+    try writer.write("ABCDE");
+    try writer.flush();
+
+    const clipped = try readAllSegmentsFromDisk(allocator, archive_dir, 77, 0, 15, 10);
+    defer allocator.free(clipped);
+
+    try std.testing.expectEqual(@as(usize, 15), clipped.len);
+    try std.testing.expectEqualSlices(u8, "0123456789", clipped[0..10]);
+    try std.testing.expectEqualSlices(u8, "abcde", clipped[10..15]);
 }
 
 test "Recorder findSession returns correct session" {

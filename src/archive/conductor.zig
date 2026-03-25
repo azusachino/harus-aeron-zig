@@ -281,25 +281,11 @@ pub const ArchiveConductor = struct {
             return;
         };
 
-        // Resume from the last known stop_position
-        const resume_position = desc.stop_position;
-        _ = try recorder.onStartRecording(
-            cmd.session_id,
-            cmd.stream_id,
-            cmd.channel,
-            cmd.source_identity,
-            .{
-                .initial_term_id = desc.initial_term_id,
-                .segment_file_length = desc.segment_file_length,
-                .term_buffer_length = desc.term_buffer_length,
-                .mtu_length = desc.mtu_length,
-                .start_position = resume_position,
-                .start_timestamp = std.time.milliTimestamp(),
-            },
-        );
+        try recorder.onExtendRecording(cmd.recording_id);
 
-        // Update catalog: clear stop state so recording appears active again
-        try self.catalog.updateStopState(cmd.recording_id, resume_position, 0);
+        // Clear stop timestamp while keeping the current stop_position as the
+        // resume point for the same logical recording_id.
+        try self.catalog.updateStopState(cmd.recording_id, desc.stop_position, 0);
 
         try self.queueSuccessResponse(cmd.correlation_id, cmd.recording_id);
     }
@@ -331,8 +317,8 @@ pub const ArchiveConductor = struct {
             return;
         }
 
-        // Update catalog: set new stop_position, clear stop_timestamp
-        try self.catalog.updateStopState(cmd.recording_id, cmd.truncate_position, 0);
+        // Update catalog: set the new stop_position and preserve the stopped state.
+        try self.catalog.updateStopState(cmd.recording_id, cmd.truncate_position, desc.stop_timestamp);
 
         try self.queueSuccessResponse(cmd.correlation_id, cmd.recording_id);
     }
@@ -405,7 +391,7 @@ pub const ArchiveConductor = struct {
         desc.stream_id = entry.stream_id;
         desc.channel_length = entry.channel_length;
 
-        return try protocol.encodeRecordingDescriptor(allocator, &desc);
+        return try protocol.encodeRecordingDescriptor(allocator, &desc, catalog_mod.Catalog.copyChannel(entry));
     }
 
     /// Queue a success response with a result value.
@@ -925,7 +911,7 @@ test "ArchiveConductor pollResponses drains queue" {
     try std.testing.expectEqual(0, conductor.responseCount());
 }
 
-test "ArchiveConductor extend_recording reopens stopped recording" {
+test "ArchiveConductor extend_recording reuses existing recording" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -964,6 +950,9 @@ test "ArchiveConductor extend_recording reopens stopped recording" {
         pub fn handle(_: *const Response) void {}
     }.handle);
 
+    try std.testing.expectEqual(@as(usize, 1), conductor.catalog.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 1), conductor.recorder.?.sessions.items.len);
+
     // Extend recording
     const extend_cmd = Command{ .extend_recording = ExtendRecordingCmd{
         .correlation_id = 102,
@@ -976,7 +965,11 @@ test "ArchiveConductor extend_recording reopens stopped recording" {
     try conductor.enqueueCommand(extend_cmd);
     _ = try conductor.doWork();
 
-    try std.testing.expectEqual(1, conductor.responseCount());
+    try std.testing.expectEqual(@as(usize, 1), conductor.responseCount());
+    try std.testing.expectEqual(@as(usize, 1), conductor.catalog.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 1), conductor.recorder.?.sessions.items.len);
+    try std.testing.expect(conductor.recorder.?.findSession(1).?.isActive());
+    try std.testing.expectEqual(@as(i64, 1), conductor.catalog.recordingDescriptor(1).?.recording_id);
 }
 
 test "ArchiveConductor extend_recording unknown id returns error response" {
@@ -1037,14 +1030,16 @@ test "getRecordingDescriptorBytes returns encoded descriptor" {
     const descriptor_bytes = try conductor.getRecordingDescriptorBytes(allocator, 1);
     defer allocator.free(descriptor_bytes);
 
-    // Verify the bytes are non-empty and have correct size
-    try std.testing.expectEqual(protocol.RecordingDescriptor.HEADER_LENGTH, descriptor_bytes.len);
+    // Verify the bytes include the fixed header and variable-length channel bytes.
+    try std.testing.expectEqual(protocol.RecordingDescriptor.HEADER_LENGTH + channel.len, descriptor_bytes.len);
 
     // Cast back to RecordingDescriptor and verify fields
     const decoded = @as(*const protocol.RecordingDescriptor, @ptrCast(@alignCast(descriptor_bytes.ptr)));
     try std.testing.expectEqual(@as(i64, 1), decoded.recording_id);
     try std.testing.expectEqual(@as(i32, 1), decoded.session_id);
     try std.testing.expectEqual(@as(i32, 2), decoded.stream_id);
+    try std.testing.expectEqual(@as(i32, @intCast(channel.len)), decoded.channel_length);
+    try std.testing.expectEqualSlices(u8, channel, descriptor_bytes[protocol.RecordingDescriptor.HEADER_LENGTH..]);
 }
 
 test "getRecordingDescriptorBytes with unknown recording" {
@@ -1114,6 +1109,7 @@ test "truncate recording: success" {
     // Verify stop_position updated
     const desc_after = conductor.catalog.recordingDescriptor(1).?;
     try std.testing.expectEqual(trunc_pos, desc_after.stop_position);
+    try std.testing.expect(desc_after.stop_timestamp != 0);
 }
 
 test "truncate recording: unknown recording" {

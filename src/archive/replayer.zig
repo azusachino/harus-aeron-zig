@@ -39,6 +39,8 @@ pub const ReplaySession = struct {
     replay_limit: i64,
     /// Owned copy of the recorded data buffer.
     source_data: []u8,
+    /// Absolute archive position represented by source_data[0].
+    recording_start_position: i64,
     /// Whether this session is actively replaying (not closed by client).
     active: bool,
     /// Initial position where replay started (for progress tracking).
@@ -53,16 +55,19 @@ pub const ReplaySession = struct {
         recording_id: i64,
         position: i64,
         length: i64,
+        recording_start_position: i64,
         source_data: []const u8,
     ) !ReplaySession {
         const owned_data = try allocator.dupe(u8, source_data);
+        const source_end_position = recording_start_position + @as(i64, @intCast(owned_data.len));
         return ReplaySession{
             .allocator = allocator,
             .replay_session_id = replay_session_id,
             .recording_id = recording_id,
             .current_position = position,
-            .replay_limit = if (length == 0) @intCast(owned_data.len) else position + length,
+            .replay_limit = if (length == 0) source_end_position else position + length,
             .source_data = owned_data,
+            .recording_start_position = recording_start_position,
             .active = true,
             .start_position = position,
         };
@@ -83,17 +88,18 @@ pub const ReplaySession = struct {
         }
 
         const source_len = @as(i64, @intCast(self.source_data.len));
+        const source_end_position = self.recording_start_position + source_len;
         const effective_limit = if (self.replay_limit > 0)
-            @min(self.replay_limit, source_len)
+            @min(self.replay_limit, source_end_position)
         else
-            source_len;
+            source_end_position;
 
-        const start_position = if (self.current_position < 0) 0 else @min(self.current_position, effective_limit);
-        if (start_position >= effective_limit) {
+        const absolute_position = @max(self.current_position, self.recording_start_position);
+        if (absolute_position >= effective_limit) {
             return null;
         }
 
-        const bytes_available = effective_limit - start_position;
+        const bytes_available = effective_limit - absolute_position;
 
         if (bytes_available <= 0) {
             return null;
@@ -108,7 +114,7 @@ pub const ReplaySession = struct {
             return null;
         }
 
-        const start = @as(usize, @intCast(start_position));
+        const start = @as(usize, @intCast(absolute_position - self.recording_start_position));
         const chunk = self.source_data[start .. start + chunk_size];
         self.current_position += @as(i64, @intCast(chunk_size));
 
@@ -147,10 +153,11 @@ pub const ReplaySession = struct {
     ///   - current_position >= source_data.len (if no limit)
     pub fn isComplete(self: *const ReplaySession) bool {
         const source_len = @as(i64, @intCast(self.source_data.len));
+        const source_end_position = self.recording_start_position + source_len;
         const effective_limit = if (self.replay_limit > 0)
-            @min(self.replay_limit, source_len)
+            @min(self.replay_limit, source_end_position)
         else
-            source_len;
+            source_end_position;
         return self.current_position >= effective_limit;
     }
 
@@ -230,7 +237,7 @@ pub const Replayer = struct {
         const session_id = self.next_replay_session_id;
         self.next_replay_session_id += 1;
 
-        const session = try ReplaySession.init(self.allocator, session_id, recording_id, position, length, source_data);
+        const session = try ReplaySession.init(self.allocator, session_id, recording_id, position, length, start_position, source_data);
         try self.sessions.append(self.allocator, session);
 
         return session_id;
@@ -288,7 +295,7 @@ test "ReplaySession reads chunks sequentially" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var session = try ReplaySession.init(allocator, 1, 1, 0, 0, data);
+    var session = try ReplaySession.init(allocator, 1, 1, 0, 0, 0, data);
     defer session.deinit();
 
     // Read first chunk
@@ -315,7 +322,7 @@ test "ReplaySession respects replay_limit" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var session = try ReplaySession.init(allocator, 1, 1, 0, 10, data);
+    var session = try ReplaySession.init(allocator, 1, 1, 0, 10, 0, data);
     defer session.deinit();
 
     const chunk1 = session.readChunk(20);
@@ -334,7 +341,7 @@ test "ReplaySession detects completion" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var session = try ReplaySession.init(allocator, 1, 1, 0, 0, data);
+    var session = try ReplaySession.init(allocator, 1, 1, 0, 0, 0, data);
     defer session.deinit();
 
     try std.testing.expect(!session.isComplete());
@@ -348,7 +355,7 @@ test "ReplaySession close marks inactive" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var session = try ReplaySession.init(allocator, 1, 1, 0, 0, data);
+    var session = try ReplaySession.init(allocator, 1, 1, 0, 0, 0, data);
     defer session.deinit();
 
     try std.testing.expect(session.isActive());
@@ -366,7 +373,7 @@ test "ReplaySession doWork returns 1 when active" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var session = try ReplaySession.init(allocator, 1, 1, 0, 0, data);
+    var session = try ReplaySession.init(allocator, 1, 1, 0, 0, 0, data);
     defer session.deinit();
 
     const work = session.doWork();
@@ -379,7 +386,7 @@ test "ReplaySession doWork returns 0 when inactive" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var session = try ReplaySession.init(allocator, 1, 1, 0, 0, data);
+    var session = try ReplaySession.init(allocator, 1, 1, 0, 0, 0, data);
     defer session.deinit();
     session.close();
 
@@ -393,7 +400,7 @@ test "ReplaySession progress tracking" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var session = try ReplaySession.init(allocator, 1, 42, 2, 0, data);
+    var session = try ReplaySession.init(allocator, 1, 42, 2, 0, 0, data);
     defer session.deinit();
 
     var prog = session.progress();
@@ -605,7 +612,7 @@ test "ReplaySession: replay starting mid-segment (non-zero offset)" {
     for (0..64) |i| data[i] = @truncate(i);
 
     const start_pos: i64 = 20;
-    var session = try ReplaySession.init(allocator, 1, 1, start_pos, 0, &data);
+    var session = try ReplaySession.init(allocator, 1, 1, start_pos, 0, 0, &data);
     defer session.deinit();
 
     // current_position starts at 20
@@ -632,7 +639,7 @@ test "ReplaySession: replay starting exactly at segment boundary" {
     for (0..64) |i| data[i] = @truncate(i);
 
     const boundary: i64 = 32;
-    var session = try ReplaySession.init(allocator, 1, 1, boundary, 0, &data);
+    var session = try ReplaySession.init(allocator, 1, 1, boundary, 0, 0, &data);
     defer session.deinit();
 
     try std.testing.expectEqual(boundary, session.current_position);
@@ -654,7 +661,7 @@ test "ReplaySession: replay spanning multiple segments reads all bytes" {
     var data: [48]u8 = undefined;
     for (0..48) |i| data[i] = @truncate(i);
 
-    var session = try ReplaySession.init(allocator, 1, 1, 0, 0, &data);
+    var session = try ReplaySession.init(allocator, 1, 1, 0, 0, 0, &data);
     defer session.deinit();
 
     // Read in 16-byte chunks to simulate per-segment reads
@@ -685,7 +692,7 @@ test "ReplaySession: replay length ends exactly at segment boundary" {
     for (0..64) |i| data[i] = @truncate(i);
 
     const length: i64 = 32; // exactly one segment
-    var session = try ReplaySession.init(allocator, 1, 1, 0, length, &data);
+    var session = try ReplaySession.init(allocator, 1, 1, 0, length, 0, &data);
     defer session.deinit();
 
     try std.testing.expectEqual(@as(i64, length), session.replay_limit);
@@ -710,7 +717,7 @@ test "ReplaySession: mid-segment start with length ending at next boundary" {
 
     const start: i64 = 16;
     const length: i64 = 32;
-    var session = try ReplaySession.init(allocator, 1, 1, start, length, &data);
+    var session = try ReplaySession.init(allocator, 1, 1, start, length, 0, &data);
     defer session.deinit();
 
     // replay_limit = start + length = 48
@@ -745,4 +752,24 @@ test "replay accepts valid position and length" {
     const session = replayer.findSession(session_id);
     try std.testing.expect(session != null);
     try std.testing.expectEqual(@as(i64, 100), session.?.start_position);
+}
+
+test "replay reads from non-zero recording start position" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var replayer = Replayer.init(allocator);
+    defer replayer.deinit();
+
+    const recording_start: i64 = 100;
+    const data = "abcdefghij";
+
+    const session_id = try replayer.onReplayRequest(7, 103, 4, recording_start, recording_start + data.len, data);
+    const session = replayer.findSession(session_id).?;
+
+    const chunk = session.readChunk(16).?;
+    try std.testing.expectEqualSlices(u8, "defg", chunk);
+    try std.testing.expectEqual(@as(i64, 107), session.current_position);
+    try std.testing.expect(session.isComplete());
 }

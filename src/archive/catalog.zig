@@ -28,11 +28,37 @@ pub const RecordingDescriptorEntry = extern struct {
     }
 };
 
-/// Helper type for segment reconstruction — recording_id + file size pair.
-const SegmentPair = struct { id: i64, size: u64 };
+/// Helper type for segment reconstruction — recording_id + segment base + file size.
+const SegmentFile = struct {
+    recording_id: i64,
+    base_position: i64,
+    size: u64,
+};
 
-fn segmentPairLessThan(_: void, a: SegmentPair, b: SegmentPair) bool {
-    return a.id < b.id;
+fn segmentFileLessThan(_: void, a: SegmentFile, b: SegmentFile) bool {
+    if (a.recording_id != b.recording_id) {
+        return a.recording_id < b.recording_id;
+    }
+    return a.base_position < b.base_position;
+}
+
+fn parseSegmentFileName(name: []const u8) ?struct { recording_id: i64, base_position: i64 } {
+    if (!std.mem.endsWith(u8, name, ".dat")) return null;
+    if (std.mem.eql(u8, name, "catalog.dat")) return null;
+
+    const stem = name[0 .. name.len - 4];
+    if (stem.len == 0) return null;
+
+    if (std.mem.lastIndexOfScalar(u8, stem, '-')) |dash| {
+        const recording_id = std.fmt.parseInt(i64, stem[0..dash], 10) catch return null;
+        const base_position = std.fmt.parseInt(i64, stem[dash + 1 ..], 10) catch return null;
+        if (recording_id <= 0 or base_position < 0) return null;
+        return .{ .recording_id = recording_id, .base_position = base_position };
+    }
+
+    const recording_id = std.fmt.parseInt(i64, stem, 10) catch return null;
+    if (recording_id <= 0) return null;
+    return .{ .recording_id = recording_id, .base_position = 0 };
 }
 
 /// In-memory recording catalog
@@ -255,8 +281,9 @@ pub const Catalog = struct {
     }
 
     /// Reconstruct recording descriptors by scanning the archive directory for
-    /// segment files named `<recording_id>.dat`.  Each discovered file produces a
-    /// minimal descriptor so that replay can be served after a restart where
+    /// segment files named `<recording_id>-<base_position>.dat`.
+    /// Each recording_id is folded into a single descriptor spanning all of its
+    /// discovered segment files so replay can resume after a restart where
     /// catalog.dat was lost.
     ///
     /// Reference: Catalog.java recoverFromExistingFiles() / verifyAndFixDescriptors()
@@ -274,19 +301,13 @@ pub const Catalog = struct {
         var it = dir.iterate();
         var max_recording_id: i64 = 0;
 
-        // Collect (recording_id, file_size) pairs first so we can sort them.
-        var pairs = std.ArrayListUnmanaged(SegmentPair){};
-        defer pairs.deinit(self.allocator);
+        // Collect segment files first so we can sort and fold them per recording.
+        var segments = std.ArrayListUnmanaged(SegmentFile){};
+        defer segments.deinit(self.allocator);
 
         while (try it.next()) |entry| {
             if (entry.kind != .file) continue;
-            // Only process files ending in ".dat" but not "catalog.dat"
-            if (!std.mem.endsWith(u8, entry.name, ".dat")) continue;
-            if (std.mem.eql(u8, entry.name, "catalog.dat")) continue;
-
-            const stem = entry.name[0 .. entry.name.len - 4];
-            const recording_id = std.fmt.parseInt(i64, stem, 10) catch continue;
-            if (recording_id <= 0) continue;
+            const parsed = parseSegmentFileName(entry.name) orelse continue;
 
             const seg_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ archive_dir, entry.name });
             defer self.allocator.free(seg_path);
@@ -298,30 +319,76 @@ pub const Catalog = struct {
             }).size;
             seg_file.close();
 
-            try pairs.append(self.allocator, .{ .id = recording_id, .size = seg_size });
+            try segments.append(self.allocator, .{
+                .recording_id = parsed.recording_id,
+                .base_position = parsed.base_position,
+                .size = seg_size,
+            });
         }
 
-        // Sort ascending by recording_id for deterministic next_recording_id.
-        std.mem.sort(SegmentPair, pairs.items, {}, segmentPairLessThan);
+        // Sort ascending by recording_id, then base_position, for deterministic folding.
+        std.mem.sort(SegmentFile, segments.items, {}, segmentFileLessThan);
 
-        for (pairs.items) |pair| {
+        var i: usize = 0;
+        while (i < segments.items.len) {
+            const recording_id = segments.items[i].recording_id;
+
             // Skip if already loaded (shouldn't happen, but defensive).
-            if (self.recordingDescriptor(pair.id) != null) continue;
+            if (self.recordingDescriptor(recording_id) != null) {
+                while (i < segments.items.len and segments.items[i].recording_id == recording_id) : (i += 1) {}
+                continue;
+            }
+
+            const start_position = segments.items[i].base_position;
+            var stop_position = start_position;
+            var segment_file_length: i32 = 0;
+            var segment_count: usize = 0;
+            var first_base: i64 = start_position;
+            var second_base: ?i64 = null;
+            var previous_base: ?i64 = null;
+            while (i < segments.items.len and segments.items[i].recording_id == recording_id) : (i += 1) {
+                const seg = segments.items[i];
+                if (segment_count == 0) {
+                    first_base = seg.base_position;
+                } else if (segment_count == 1) {
+                    second_base = seg.base_position;
+                }
+                const seg_end = seg.base_position + @as(i64, @intCast(seg.size));
+                stop_position = @max(stop_position, seg_end);
+
+                if (previous_base) |base| {
+                    const delta = seg.base_position - base;
+                    if (delta > 0 and segment_file_length == 0) {
+                        segment_file_length = @intCast(delta);
+                    }
+                }
+                previous_base = seg.base_position;
+                segment_count += 1;
+            }
+
+            if (segment_file_length == 0) {
+                if (second_base) |base| {
+                    const inferred = base - first_base;
+                    if (inferred > 0) {
+                        segment_file_length = @intCast(inferred);
+                    }
+                }
+            }
 
             var entry: RecordingDescriptorEntry = undefined;
             @memset(std.mem.asBytes(&entry), 0);
-            entry.recording_id = pair.id;
-            // stop_position reflects the total bytes in the segment file.
-            entry.stop_position = @intCast(pair.size);
+            entry.recording_id = recording_id;
+            entry.start_position = start_position;
+            entry.stop_position = stop_position;
             // Use a non-zero stop_timestamp to signal the recording is complete.
             entry.stop_timestamp = 1;
             // Default wire parameters — unknown after catalog loss.
-            entry.segment_file_length = 128 * 1024 * 1024;
+            entry.segment_file_length = if (segment_file_length > 0) segment_file_length else 128 * 1024 * 1024;
             entry.term_buffer_length = 64 * 1024;
             entry.mtu_length = 1408;
 
             try self.entries.append(self.allocator, entry);
-            max_recording_id = @max(max_recording_id, pair.id);
+            max_recording_id = @max(max_recording_id, recording_id);
         }
 
         if (max_recording_id > 0) {
@@ -495,36 +562,46 @@ test "reconstructFromSegments rebuilds descriptors when catalog.dat is missing" 
 
     // Simulate two segment files left behind after a crash (no catalog.dat).
     try std.fs.cwd().makePath(archive_dir);
-    const seg1 = try std.fmt.allocPrint(allocator, "{s}/1.dat", .{archive_dir});
+    const seg1 = try std.fmt.allocPrint(allocator, "{s}/1-0.dat", .{archive_dir});
     defer allocator.free(seg1);
-    const seg2 = try std.fmt.allocPrint(allocator, "{s}/3.dat", .{archive_dir});
+    const seg2 = try std.fmt.allocPrint(allocator, "{s}/1-4.dat", .{archive_dir});
     defer allocator.free(seg2);
+    const seg3 = try std.fmt.allocPrint(allocator, "{s}/3-0.dat", .{archive_dir});
+    defer allocator.free(seg3);
 
     {
         const f = try std.fs.cwd().createFile(seg1, .{});
         defer f.close();
-        try f.writeAll("frame-data-segment-one");
+        try f.writeAll("abcd");
     }
     {
         const f = try std.fs.cwd().createFile(seg2, .{});
         defer f.close();
-        try f.writeAll("frame-data-segment-three-longer");
+        try f.writeAll("efghij");
+    }
+    {
+        const f = try std.fs.cwd().createFile(seg3, .{});
+        defer f.close();
+        try f.writeAll("klmno");
     }
 
     // Open the catalog with the archive dir — no catalog.dat present.
     var catalog = try Catalog.initWithArchiveDir(allocator, archive_dir);
     defer catalog.deinit();
 
-    // Should have reconstructed two descriptors.
+    // Should have reconstructed one descriptor per recording_id.
     try std.testing.expectEqual(@as(usize, 2), catalog.entries.items.len);
     try std.testing.expectEqual(@as(i64, 4), catalog.next_recording_id);
 
     const d1 = catalog.recordingDescriptor(1).?;
-    try std.testing.expectEqual(@as(i64, "frame-data-segment-one".len), d1.stop_position);
+    try std.testing.expectEqual(@as(i64, 0), d1.start_position);
+    try std.testing.expectEqual(@as(i64, 10), d1.stop_position);
     try std.testing.expect(d1.stop_timestamp != 0);
+    try std.testing.expectEqual(@as(i32, 4), d1.segment_file_length);
 
     const d3 = catalog.recordingDescriptor(3).?;
-    try std.testing.expectEqual(@as(i64, "frame-data-segment-three-longer".len), d3.stop_position);
+    try std.testing.expectEqual(@as(i64, 0), d3.start_position);
+    try std.testing.expectEqual(@as(i64, 5), d3.stop_position);
 }
 
 test "reconstructFromSegments skips non-recording files" {
@@ -539,7 +616,7 @@ test "reconstructFromSegments skips non-recording files" {
     try std.fs.cwd().makePath(archive_dir);
 
     // Valid segment
-    const seg1 = try std.fmt.allocPrint(allocator, "{s}/2.dat", .{archive_dir});
+    const seg1 = try std.fmt.allocPrint(allocator, "{s}/2-0.dat", .{archive_dir});
     defer allocator.free(seg1);
     {
         const f = try std.fs.cwd().createFile(seg1, .{});

@@ -191,12 +191,15 @@ pub fn decodeChannel(buf: []const u8) ?[]const u8 {
     return buf[4 .. 4 + @as(usize, @intCast(channel_len))];
 }
 
-/// Encode a RecordingDescriptor to wire-format bytes.
-/// The descriptor struct is an extern struct — its memory layout IS the wire format.
+/// Encode a RecordingDescriptor to wire-format bytes, including the variable-length channel.
 /// Returns a heap-allocated slice that the caller must free.
-pub fn encodeRecordingDescriptor(allocator: std.mem.Allocator, desc: *const RecordingDescriptor) ![]u8 {
-    const bytes = try allocator.alloc(u8, RecordingDescriptor.HEADER_LENGTH);
-    @memcpy(bytes, std.mem.asBytes(desc));
+pub fn encodeRecordingDescriptor(allocator: std.mem.Allocator, desc: *const RecordingDescriptor, channel: []const u8) ![]u8 {
+    var header = desc.*;
+    header.channel_length = @intCast(channel.len);
+
+    const bytes = try allocator.alloc(u8, RecordingDescriptor.HEADER_LENGTH + channel.len);
+    @memcpy(bytes[0..RecordingDescriptor.HEADER_LENGTH], std.mem.asBytes(&header));
+    @memcpy(bytes[RecordingDescriptor.HEADER_LENGTH..], channel);
     return bytes;
 }
 
@@ -308,12 +311,13 @@ test "encodeRecordingDescriptor round-trip" {
     desc.mtu_length = 1408;
     desc.session_id = 123;
     desc.stream_id = 456;
-    desc.channel_length = 0;
+    const channel = "aeron:udp?endpoint=localhost:40123";
+    desc.channel_length = @intCast(channel.len);
 
-    const encoded = try encodeRecordingDescriptor(allocator, &desc);
+    const encoded = try encodeRecordingDescriptor(allocator, &desc, channel);
     defer allocator.free(encoded);
 
-    try std.testing.expectEqual(RecordingDescriptor.HEADER_LENGTH, encoded.len);
+    try std.testing.expectEqual(RecordingDescriptor.HEADER_LENGTH + channel.len, encoded.len);
 
     const decoded = @as(*const RecordingDescriptor, @ptrCast(@alignCast(encoded.ptr)));
     try std.testing.expectEqual(desc.recording_id, decoded.recording_id);
@@ -321,4 +325,6 @@ test "encodeRecordingDescriptor round-trip" {
     try std.testing.expectEqual(desc.stop_timestamp, decoded.stop_timestamp);
     try std.testing.expectEqual(desc.session_id, decoded.session_id);
     try std.testing.expectEqual(desc.stream_id, decoded.stream_id);
+    try std.testing.expectEqual(@as(i32, @intCast(channel.len)), decoded.channel_length);
+    try std.testing.expectEqualSlices(u8, channel, encoded[RecordingDescriptor.HEADER_LENGTH..]);
 }
