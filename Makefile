@@ -9,7 +9,7 @@ AERON_ALL_JAR_SHA256 := ded2ed3c5b73991e31c439a7562a294e5d5566f955c3a9e81089a28a
        fuzz bench stress \
        nix-image k8s-up k8s-down k8s-status k8s-logs colima-up colima-down \
        setup setup-interop \
-       interop interop-smoke interop-status interop-build interop-run test-interop
+       interop interop-smoke interop-status status
 
 fmt:
 	$(NIX_RUN) zig fmt .
@@ -37,9 +37,6 @@ test-unit:
 test-integration:
 	$(NIX_RUN) zig build test-integration
 
-test-interop:
-	bash test/interop/run.sh
-
 lint: fmt-check
 
 lesson-lint:  ## Verify all LESSON annotation slugs have a matching docs/tutorial/ chapter file
@@ -59,23 +56,11 @@ clean:
 setup: setup-interop  ## Prepare local helper artifacts for interop and benchmarks
 
 setup-interop:
-	@mkdir -p test/interop vendor
+	@mkdir -p vendor
 	@std_dir="$$( $(NIX_RUN) zig env | sed -n 's/.*"std_dir": *"\([^"]*\)".*/\1/p' )"; \
 	if [ -n "$$std_dir" ]; then \
 		ln -sfn "$$std_dir" vendor/zig-std; \
 	fi
-	@tmp="$$(mktemp)"; \
-	curl -fsSL "$(AERON_ALL_JAR_URL)" -o "$$tmp"; \
-	if command -v shasum >/dev/null 2>&1; then \
-		printf '%s  %s\n' "$(AERON_ALL_JAR_SHA256)" "$$tmp" | shasum -a 256 -c - >/dev/null; \
-	elif command -v sha256sum >/dev/null 2>&1; then \
-		printf '%s  %s\n' "$(AERON_ALL_JAR_SHA256)" "$$tmp" | sha256sum -c - >/dev/null; \
-	else \
-		echo "No sha256 checker found (need shasum or sha256sum)" >&2; \
-		rm -f "$$tmp"; \
-		exit 1; \
-	fi; \
-	mv "$$tmp" test/interop/aeron-all.jar
 	@if [ ! -s throughput ]; then \
 		printf '%s\n' \
 			'#!/usr/bin/env sh' \
@@ -105,10 +90,10 @@ nix-image:
 	docker save harus-aeron-zig:latest | colima ssh -- sudo ctr -n k8s.io images import -
 
 k8s-up: nix-image
-	kubectl apply -k deploy/k8s/
+	kubectl apply -k k8s/
 
 k8s-down:
-	kubectl delete -k deploy/k8s/ --ignore-not-found
+	kubectl delete -k k8s/ --ignore-not-found
 
 k8s-status:
 	@echo "=== Pods ==="
@@ -137,18 +122,12 @@ stress:  ## Run stress tests
 # =============================================================================
 # Interop Testing
 # =============================================================================
-# Consolidated into single `make interop` target that:
-# - Builds OCI image (nix-image dependency)
-# - Compiles Java Aeron interop apps
-# - Deploys K8s jobs (java-pub-zig-sub, zig-pub-java-sub)
-# - Waits for completion and reports results
-# See: test/interop/k8s-verify.sh
 
 interop:  ## Run full interop test suite (100 messages, all scenarios)
-	bash test/interop/k8s-verify.sh
+	docker compose -f deploy/docker-compose.ci.yml up --abort-on-container-exit
 
 interop-smoke:  ## Run quick smoke interop test (10 messages, CI-friendly)
-	bash test/interop/k8s-verify.sh --smoke
+	docker compose -f deploy/docker-compose.ci.yml up --abort-on-container-exit
 
 interop-status:  ## Show status of running interop jobs
 	@echo "=== Interop Jobs ==="
@@ -158,22 +137,3 @@ interop-status:  ## Show status of running interop jobs
 	@echo "=== Interop Pods ==="
 	kubectl get pods -n aeron -l 'app.kubernetes.io/part-of in (interop,interop-smoke)' -o wide 2>/dev/null || true
 
-test-interop: interop  ## Backward-compatible alias for interop
-
-interop-build: nix-image  ## Build interop test images
-	docker build -t java-aeron:latest \
-		--build-arg AERON_VERSION=$(AERON_VERSION) \
-		--build-arg AERON_ALL_JAR_SHA256=$(AERON_ALL_JAR_SHA256) \
-		-f deploy/interop/Dockerfile.java-aeron deploy/interop/
-	nerdctl -n k8s.io image import $$(docker save java-aeron:latest | nerdctl -n k8s.io image load 2>&1 | grep -oP 'sha256:\S+') || \
-		docker save java-aeron:latest | nerdctl -n k8s.io image load
-
-interop-run:  ## Run interop test jobs in k3s (delete-before-create, idempotent)
-	kubectl create namespace aeron --dry-run=client -o yaml | kubectl apply -f -
-	kubectl delete jobs -n aeron -l app.kubernetes.io/part-of=interop --ignore-not-found
-	kubectl apply -k deploy/interop/
-	@echo "Waiting for interop jobs to complete..."
-	kubectl wait --for=condition=complete --timeout=180s jobs -n aeron -l app.kubernetes.io/part-of=interop || \
-		{ kubectl get jobs -n aeron -l app.kubernetes.io/part-of=interop -o wide >&2; \
-		  echo "Interop jobs did not complete (timeout or failure)" >&2; exit 1; }
-	@echo "All interop tests passed!"

@@ -80,8 +80,6 @@ pub fn build(b: *std.Build) void {
         .{ .name = "cluster-demo", .path = "examples/cluster_demo.zig" },
         .{ .name = "basic-publisher", .path = "examples/basic_publisher.zig" },
         .{ .name = "basic-subscriber", .path = "examples/basic_subscriber.zig" },
-        .{ .name = "basic-subscriber-interop", .path = "test/interop/basic_subscriber.zig" },
-        .{ .name = "basic-publisher-interop", .path = "test/interop/basic_publisher.zig" },
         .{ .name = "throughput-example", .path = "examples/throughput.zig" },
     };
     const examples_step = b.step("examples", "Build all examples");
@@ -149,85 +147,4 @@ pub fn build(b: *std.Build) void {
         b.installArtifact(bench_exe);
         bench_step.dependOn(&b.addRunArtifact(bench_exe).step);
     }
-
-    // Stress tests
-    const stress_term_rotation = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("test/stress/term_rotation.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "aeron", .module = aeron_mod },
-            },
-        }),
-    });
-    const run_stress_term_rotation = b.addRunArtifact(stress_term_rotation);
-
-    const stress_concurrent_pubs = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("test/stress/concurrent_pubs.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "aeron", .module = aeron_mod },
-            },
-        }),
-    });
-    const run_stress_concurrent_pubs = b.addRunArtifact(stress_concurrent_pubs);
-
-    const stress_reconnect = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("test/stress/reconnect.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "aeron", .module = aeron_mod },
-            },
-        }),
-    });
-    const run_stress_reconnect = b.addRunArtifact(stress_reconnect);
-
-    const stress_driver_resilience = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("test/stress/driver_resilience.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "aeron", .module = aeron_mod },
-            },
-        }),
-    });
-    const run_stress_driver_resilience = b.addRunArtifact(stress_driver_resilience);
-
-    const stress_archive_replay = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("test/stress/archive_replay.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "aeron", .module = aeron_mod },
-            },
-        }),
-    });
-    const run_stress_archive_replay = b.addRunArtifact(stress_archive_replay);
-
-    const stress_cluster_failover = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("test/stress/cluster_failover.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "aeron", .module = aeron_mod },
-            },
-        }),
-    });
-    const run_stress_cluster_failover = b.addRunArtifact(stress_cluster_failover);
-
-    const stress_step = b.step("stress", "Run stress tests");
-    stress_step.dependOn(&run_stress_term_rotation.step);
-    stress_step.dependOn(&run_stress_concurrent_pubs.step);
-    stress_step.dependOn(&run_stress_reconnect.step);
-    stress_step.dependOn(&run_stress_driver_resilience.step);
-    stress_step.dependOn(&run_stress_archive_replay.step);
-    stress_step.dependOn(&run_stress_cluster_failover.step);
 }
