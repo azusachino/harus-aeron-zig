@@ -14,7 +14,11 @@ pub const FrameType = enum(u16) {
     setup = 0x05,
     rtt_measurement = 0x06,
     resolution_entry = 0x07,
+    ats_data = 0x08,
+    ats_setup = 0x09,
+    ats_status = 0x0A,
     response_setup = 0x0B,
+    ext = 0xFFFF,
 };
 
 /// Base frame header — 8 bytes, present in every frame
@@ -207,7 +211,14 @@ pub const DecodedFrame = union(FrameType) {
     setup: *const SetupHeader,
     rtt_measurement: *const RttMeasurement,
     resolution_entry: *const ResolutionEntry,
+    ats_data: struct {
+        header: *const DataHeader,
+        payload: []const u8,
+    },
+    ats_setup: *const SetupHeader,
+    ats_status: *const StatusMessage,
     response_setup: *const ResponseSetupHeader,
+    ext: void,
 };
 
 /// Decode the first Aeron frame from `buf`.
@@ -241,6 +252,12 @@ pub fn decode(buf: []const u8) DecodeError!DecodedFrame {
             const payload = buf[DataHeader.LENGTH..@as(usize, @intCast(frame_len))];
             return .{ .data = .{ .header = data_hdr, .payload = payload } };
         },
+        .ats_data => {
+            if (@as(usize, @intCast(frame_len)) < DataHeader.LENGTH) return DecodeError.BufferTooShort;
+            const data_hdr = @as(*const DataHeader, @ptrCast(@alignCast(buf.ptr)));
+            const payload = buf[DataHeader.LENGTH..@as(usize, @intCast(frame_len))];
+            return .{ .ats_data = .{ .header = data_hdr, .payload = payload } };
+        },
         .nak => {
             if (@as(usize, @intCast(frame_len)) < NakHeader.LENGTH) return DecodeError.BufferTooShort;
             return .{ .nak = @as(*const NakHeader, @ptrCast(@alignCast(buf.ptr))) };
@@ -248,6 +265,10 @@ pub fn decode(buf: []const u8) DecodeError!DecodedFrame {
         .status => {
             if (@as(usize, @intCast(frame_len)) < StatusMessage.LENGTH) return DecodeError.BufferTooShort;
             return .{ .status = @as(*const StatusMessage, @ptrCast(@alignCast(buf.ptr))) };
+        },
+        .ats_status => {
+            if (@as(usize, @intCast(frame_len)) < StatusMessage.LENGTH) return DecodeError.BufferTooShort;
+            return .{ .ats_status = @as(*const StatusMessage, @ptrCast(@alignCast(buf.ptr))) };
         },
         .err => {
             if (@as(usize, @intCast(frame_len)) < ErrorHeader.LENGTH) return DecodeError.BufferTooShort;
@@ -265,6 +286,10 @@ pub fn decode(buf: []const u8) DecodeError!DecodedFrame {
             if (@as(usize, @intCast(frame_len)) < SetupHeader.LENGTH) return DecodeError.BufferTooShort;
             return .{ .setup = @as(*const SetupHeader, @ptrCast(@alignCast(buf.ptr))) };
         },
+        .ats_setup => {
+            if (@as(usize, @intCast(frame_len)) < SetupHeader.LENGTH) return DecodeError.BufferTooShort;
+            return .{ .ats_setup = @as(*const SetupHeader, @ptrCast(@alignCast(buf.ptr))) };
+        },
         .rtt_measurement => {
             if (@as(usize, @intCast(frame_len)) < RttMeasurement.LENGTH) return DecodeError.BufferTooShort;
             return .{ .rtt_measurement = @as(*const RttMeasurement, @ptrCast(@alignCast(buf.ptr))) };
@@ -277,6 +302,7 @@ pub fn decode(buf: []const u8) DecodeError!DecodedFrame {
             if (@as(usize, @intCast(frame_len)) < ResponseSetupHeader.LENGTH) return DecodeError.BufferTooShort;
             return .{ .response_setup = @as(*const ResponseSetupHeader, @ptrCast(@alignCast(buf.ptr))) };
         },
+        .ext => return DecodeError.UnknownFrameType,
     }
 }
 
@@ -317,7 +343,11 @@ test "frame type numeric values match aeron udp protocol" {
     try std.testing.expectEqual(@as(u16, 0x05), @intFromEnum(FrameType.setup));
     try std.testing.expectEqual(@as(u16, 0x06), @intFromEnum(FrameType.rtt_measurement));
     try std.testing.expectEqual(@as(u16, 0x07), @intFromEnum(FrameType.resolution_entry));
+    try std.testing.expectEqual(@as(u16, 0x08), @intFromEnum(FrameType.ats_data));
+    try std.testing.expectEqual(@as(u16, 0x09), @intFromEnum(FrameType.ats_setup));
+    try std.testing.expectEqual(@as(u16, 0x0A), @intFromEnum(FrameType.ats_status));
     try std.testing.expectEqual(@as(u16, 0x0B), @intFromEnum(FrameType.response_setup));
+    try std.testing.expectEqual(@as(u16, 0xFFFF), @intFromEnum(FrameType.ext));
 }
 
 test "wire field offsets match aeron udp protocol" {
@@ -440,6 +470,26 @@ test "decode: decodes DATA frame" {
     try std.testing.expectEqualSlices(u8, payload_str, frame.data.payload);
 }
 
+test "decode: decodes ATS_DATA frame using data layout" {
+    var buf align(8) = [_]u8{0} ** 64;
+    const payload_str = "ats";
+    const total_len = DataHeader.LENGTH + payload_str.len;
+    std.mem.writeInt(i32, buf[0..4], @as(i32, @intCast(total_len)), .little);
+    buf[4] = VERSION;
+    buf[5] = DataHeader.BEGIN_FLAG;
+    std.mem.writeInt(u16, buf[6..8], @intFromEnum(FrameType.ats_data), .little);
+    std.mem.writeInt(i32, buf[8..12], 64, .little);
+    std.mem.writeInt(i32, buf[12..16], 1, .little);
+    std.mem.writeInt(i32, buf[16..20], 2, .little);
+    std.mem.writeInt(i32, buf[20..24], 3, .little);
+    @memcpy(buf[DataHeader.LENGTH..][0..payload_str.len], payload_str);
+
+    const frame = try decode(&buf);
+    try std.testing.expectEqual(FrameType.ats_data, std.meta.activeTag(frame));
+    try std.testing.expectEqual(@as(i32, 1), frame.ats_data.header.session_id);
+    try std.testing.expectEqualSlices(u8, payload_str, frame.ats_data.payload);
+}
+
 test "decode: decodes SETUP frame" {
     var buf align(8) = [_]u8{0} ** 64;
     std.mem.writeInt(i32, buf[0..4], @as(i32, SetupHeader.LENGTH), .little);
@@ -468,6 +518,26 @@ test "decode: decodes SETUP frame" {
     try std.testing.expectEqual(@as(i32, 3), frame.setup.ttl);
 }
 
+test "decode: decodes ATS_SETUP frame using setup layout" {
+    var buf align(8) = [_]u8{0} ** 64;
+    std.mem.writeInt(i32, buf[0..4], @as(i32, SetupHeader.LENGTH), .little);
+    buf[4] = VERSION;
+    std.mem.writeInt(u16, buf[6..8], @intFromEnum(FrameType.ats_setup), .little);
+    std.mem.writeInt(i32, buf[8..12], 11, .little);
+    std.mem.writeInt(i32, buf[12..16], 22, .little);
+    std.mem.writeInt(i32, buf[16..20], 33, .little);
+    std.mem.writeInt(i32, buf[20..24], 44, .little);
+    std.mem.writeInt(i32, buf[24..28], 55, .little);
+    std.mem.writeInt(i32, buf[28..32], 65536, .little);
+    std.mem.writeInt(i32, buf[32..36], 1408, .little);
+    std.mem.writeInt(i32, buf[36..40], 1, .little);
+
+    const frame = try decode(&buf);
+    try std.testing.expectEqual(FrameType.ats_setup, std.meta.activeTag(frame));
+    try std.testing.expectEqual(@as(i32, 22), frame.ats_setup.session_id);
+    try std.testing.expectEqual(@as(i32, 55), frame.ats_setup.active_term_id);
+}
+
 test "decode: decodes STATUS frame" {
     var buf align(8) = [_]u8{0} ** 64;
     std.mem.writeInt(i32, buf[0..4], @as(i32, StatusMessage.LENGTH), .little);
@@ -489,6 +559,24 @@ test "decode: decodes STATUS frame" {
     try std.testing.expectEqual(@as(i32, 2048), frame.status.consumption_term_offset);
     try std.testing.expectEqual(@as(i32, 65536), frame.status.receiver_window);
     try std.testing.expectEqual(@as(i64, 0x0102_0304_0506_0708), frame.status.receiver_id);
+}
+
+test "decode: decodes ATS_SM frame using status layout" {
+    var buf align(8) = [_]u8{0} ** 64;
+    std.mem.writeInt(i32, buf[0..4], @as(i32, StatusMessage.LENGTH), .little);
+    buf[4] = VERSION;
+    std.mem.writeInt(u16, buf[6..8], @intFromEnum(FrameType.ats_status), .little);
+    std.mem.writeInt(i32, buf[8..12], 101, .little);
+    std.mem.writeInt(i32, buf[12..16], 202, .little);
+    std.mem.writeInt(i32, buf[16..20], 303, .little);
+    std.mem.writeInt(i32, buf[20..24], 404, .little);
+    std.mem.writeInt(i32, buf[24..28], 505, .little);
+    std.mem.writeInt(i64, buf[28..36], 606, .little);
+
+    const frame = try decode(&buf);
+    try std.testing.expectEqual(FrameType.ats_status, std.meta.activeTag(frame));
+    try std.testing.expectEqual(@as(i32, 101), frame.ats_status.session_id);
+    try std.testing.expectEqual(@as(i64, 606), frame.ats_status.receiver_id);
 }
 
 test "decode: decodes ERR frame with message" {
