@@ -254,7 +254,7 @@ test "Aeron init and deinit" {
 test "Aeron addSubscription encodes upstream SubscriptionMessageFlyweight layout" {
     const allocator = std.testing.allocator;
 
-    var ring_storage: [512]u8 = undefined;
+    var ring_storage align(8) = [_]u8{0} ** 512;
     @memset(&ring_storage, 0);
 
     var aeron = Aeron{
@@ -303,7 +303,7 @@ test "Aeron addSubscription encodes upstream SubscriptionMessageFlyweight layout
 test "Aeron addPublication encodes upstream PublicationMessageFlyweight layout" {
     const allocator = std.testing.allocator;
 
-    var ring_storage: [512]u8 = undefined;
+    var ring_storage align(8) = [_]u8{0} ** 512;
     @memset(&ring_storage, 0);
 
     var aeron = Aeron{
