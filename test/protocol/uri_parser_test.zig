@@ -38,3 +38,13 @@ test "ChannelUri: parse aeron-spy prefix" {
     try std.testing.expect(parsed.isSpy());
     try std.testing.expectEqual(aeron.transport.AeronUri.MediaType.ipc, parsed.media_type);
 }
+
+test "ChannelUri: create destination uri" {
+    const uri = try aeron.transport.AeronUri.createDestinationUri(
+        std.testing.allocator,
+        "aeron:udp?interface=eth0|term-length=64k|ttl=0|endpoint=some",
+        "vm1",
+    );
+    defer std.testing.allocator.free(uri);
+    try std.testing.expectEqualStrings("aeron:udp?endpoint=vm1|interface=eth0", uri);
+}

@@ -1,5 +1,7 @@
 const std = @import("std");
 
+pub const INVALID_TAG: i64 = -1;
+
 // LESSON(udp-transport): Aeron URIs define the channel medium and parameters (e.g. aeron:udp?endpoint=...). See docs/tutorial/02-data-path/03-udp-transport.md
 pub const AeronUri = struct {
     prefix: ?Prefix,
@@ -220,6 +222,10 @@ pub const AeronUri = struct {
         return self.params.get("endpoint");
     }
 
+    pub fn prefixKind(self: *const AeronUri) ?Prefix {
+        return self.prefix;
+    }
+
     pub fn isSpy(self: *const AeronUri) bool {
         return self.prefix == .spy;
     }
@@ -314,6 +320,40 @@ pub const AeronUri = struct {
 
     pub fn get(self: *const AeronUri, key: []const u8) ?[]const u8 {
         return self.params.get(key);
+    }
+
+    pub fn isTagged(param_value: []const u8) bool {
+        return std.mem.startsWith(u8, param_value, "tag:");
+    }
+
+    pub fn getTag(param_value: []const u8) i64 {
+        if (!isTagged(param_value)) return INVALID_TAG;
+        return std.fmt.parseInt(i64, param_value["tag:".len..], 10) catch INVALID_TAG;
+    }
+
+    pub fn createDestinationUri(
+        allocator: std.mem.Allocator,
+        channel: []const u8,
+        target_endpoint: []const u8,
+    ) (ParseError || std.mem.Allocator.Error)![]u8 {
+        var channel_uri = try parse(allocator, channel);
+        defer channel_uri.deinit();
+
+        var uri = try std.fmt.allocPrint(allocator, "aeron:{s}?endpoint={s}", .{
+            switch (channel_uri.media_type) {
+                .udp => "udp",
+                .ipc => "ipc",
+            },
+            target_endpoint,
+        });
+
+        if (channel_uri.interfaceName()) |network_interface| {
+            const with_interface = try std.fmt.allocPrint(allocator, "{s}|interface={s}", .{ uri, network_interface });
+            allocator.free(uri);
+            uri = with_interface;
+        }
+
+        return uri;
     }
 
     fn validateKnownParam(key: []const u8, value: []const u8) ParseError!void {
@@ -643,6 +683,28 @@ test "AeronUri: reject invalid linger value" {
 test "AeronUri: reject invalid tagged session-id" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(error.InvalidParam, AeronUri.parse(allocator, "aeron:ipc?session-id=tag:abc"));
+}
+
+test "AeronUri: tagged helpers" {
+    try std.testing.expect(AeronUri.isTagged("tag:123"));
+    try std.testing.expectEqual(@as(i64, 123), AeronUri.getTag("tag:123"));
+    try std.testing.expectEqual(INVALID_TAG, AeronUri.getTag("plain"));
+}
+
+test "AeronUri: createDestinationUri keeps only media endpoint and interface" {
+    const allocator = std.testing.allocator;
+
+    const uri1 = try AeronUri.createDestinationUri(allocator, "aeron:udp?endpoint=poison|interface=iface|mtu=4444", "dest1");
+    defer allocator.free(uri1);
+    try std.testing.expectEqualStrings("aeron:udp?endpoint=dest1|interface=iface", uri1);
+
+    const uri2 = try AeronUri.createDestinationUri(allocator, "aeron:ipc", "dest2");
+    defer allocator.free(uri2);
+    try std.testing.expectEqualStrings("aeron:ipc?endpoint=dest2", uri2);
+
+    const uri3 = try AeronUri.createDestinationUri(allocator, "aeron-spy:aeron:udp?eol=true|interface=none", "abc");
+    defer allocator.free(uri3);
+    try std.testing.expectEqualStrings("aeron:udp?endpoint=abc|interface=none", uri3);
 }
 
 test "AeronUri: reject invalid socket-sndbuf value" {
