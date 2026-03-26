@@ -9,12 +9,19 @@ AERON_UPSTREAM_DIR ?= vendor/aeron
 ZIG_UPSTREAM_REPO ?= https://codeberg.org/ziglang/zig
 ZIG_UPSTREAM_REF ?= 0.15.2
 ZIG_UPSTREAM_DIR ?= vendor/zig
+INTEROP_ZIG_BUILD_ENV_IMAGE ?= harus-aeron-zig-build-env:latest
+
+ifeq ($(origin CONTAINER_ENGINE), undefined)
+CONTAINER_ENGINE := $(shell if command -v docker >/dev/null 2>&1; then printf '%s' 'docker'; \
+	elif command -v podman >/dev/null 2>&1; then printf '%s' 'podman'; \
+	else printf '%s' 'docker'; fi)
+endif
 
 .PHONY: fmt fmt-check build test lint check clean run tutorial-check lesson-lint \
        fuzz bench stress \
        nix-image k8s-up k8s-down k8s-status k8s-logs colima-up colima-down \
-       setup setup-interop setup-upstream-aeron setup-upstream-zig \
-       interop interop-smoke interop-status test-protocol test-driver test-archive test-cluster test-scenarios status
+       setup setup-interop setup-interop-base setup-upstream-aeron setup-upstream-zig \
+       interop interop-smoke interop-status interop-preflight test-protocol test-driver test-archive test-cluster test-scenarios status
 
 fmt:
 	$(NIX_RUN) zig fmt src/ build.zig
@@ -99,6 +106,15 @@ setup-interop:
 			chmod +x throughput; \
 		fi
 
+setup-interop-base:
+	@$(MAKE) interop-preflight
+	@if $(CONTAINER_ENGINE) image inspect "$(INTEROP_ZIG_BUILD_ENV_IMAGE)" >/dev/null 2>&1; then \
+		echo "Using cached interop build env image: $(INTEROP_ZIG_BUILD_ENV_IMAGE)"; \
+	else \
+		echo "Building interop build env image: $(INTEROP_ZIG_BUILD_ENV_IMAGE)"; \
+		$(CONTAINER_ENGINE) build -f deploy/Dockerfile --target build-env -t "$(INTEROP_ZIG_BUILD_ENV_IMAGE)" .; \
+	fi
+
 setup-upstream-aeron:
 	@mkdir -p vendor
 	@if [ -d "$(AERON_UPSTREAM_DIR)/.git" ]; then \
@@ -175,13 +191,41 @@ stress:  ## Run stress tests
 # Interop Testing
 # =============================================================================
 
-COMPOSE ?= podman-compose
+ifeq ($(origin COMPOSE), undefined)
+COMPOSE := $(shell if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then printf '%s' 'docker compose'; \
+	elif command -v podman-compose >/dev/null 2>&1; then printf '%s' 'podman-compose'; \
+	else printf '%s' 'docker compose'; fi)
+endif
+
+interop-preflight:
+	@if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then \
+		docker info >/dev/null 2>&1 || { \
+			echo "Docker daemon is not reachable. Start any Docker-compatible daemon, or point DOCKER_HOST at a live daemon."; \
+			exit 1; \
+		}; \
+	elif command -v podman-compose >/dev/null 2>&1; then \
+		command -v podman >/dev/null 2>&1 || { \
+			echo "podman-compose is installed but podman is not available."; \
+			exit 1; \
+		}; \
+		podman info >/dev/null 2>&1 || { \
+			echo "Podman is not reachable. Start the podman machine or set COMPOSE=\"docker compose\"."; \
+			exit 1; \
+		}; \
+	else \
+		echo "No supported compose runtime found. Install a Compose-compatible client such as Docker Compose or podman-compose."; \
+		exit 1; \
+	fi
 
 interop:  ## Run full interop test suite (100 messages, all scenarios)
-	AERON_VERSION=1.50.2 MSG_COUNT=100 $(COMPOSE) -f deploy/docker-compose.ci.yml up --abort-on-container-exit --exit-code-from java-client
+	@$(MAKE) interop-preflight
+	@$(MAKE) setup-interop-base
+	AERON_VERSION=1.50.2 ZIG_BUILD_ENV_IMAGE=$(INTEROP_ZIG_BUILD_ENV_IMAGE) MSG_COUNT=100 $(COMPOSE) -f deploy/docker-compose.ci.yml up --build --abort-on-container-exit --exit-code-from java-client
 
 interop-smoke:  ## Run quick smoke interop test (10 messages, CI-friendly)
-	AERON_VERSION=1.50.2 MSG_COUNT=10 $(COMPOSE) -f deploy/docker-compose.ci.yml up --abort-on-container-exit --exit-code-from java-client
+	@$(MAKE) interop-preflight
+	@$(MAKE) setup-interop-base
+	AERON_VERSION=1.50.2 ZIG_BUILD_ENV_IMAGE=$(INTEROP_ZIG_BUILD_ENV_IMAGE) MSG_COUNT=10 $(COMPOSE) -f deploy/docker-compose.ci.yml up --build --abort-on-container-exit --exit-code-from java-client
 
 interop-status:  ## Show status of running interop jobs
 	@echo "=== Interop Jobs ==="

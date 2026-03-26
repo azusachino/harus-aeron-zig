@@ -39,7 +39,7 @@ jobs:
       - run: nix develop --command make build
       - run: docker compose -f deploy/docker-compose.ci.yml up --abort-on-container-exit --exit-code-from java-client
         env:
-          AERON_VERSION: "1.46.7"
+          AERON_VERSION: "1.50.2"
 
   core-pipeline:
     if: always()

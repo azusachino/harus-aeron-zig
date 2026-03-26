@@ -83,6 +83,7 @@ concept with one Zig concept. Audience: engineers from C/C++/Rust, Go, or Java b
 - **Task runner**: `make`
 - **Interop pin**: Aeron `1.50.2`
 - **Reference**: [aeron-io/aeron](https://github.com/aeron-io/aeron)
+- **Build linkage**: executables/tests explicitly link libc because the driver records `getpid()` in `cnc.dat`; local development is on macOS, while deployment still targets Linux
 
 ## Upstream Source
 
@@ -96,3 +97,4 @@ concept with one Zig concept. Audience: engineers from C/C++/Rust, Go, or Java b
 - Shadow clone the Zig upstream tag with `make setup-upstream-zig`.
 - Default upstream ref is `0.15.2`, cloned into `vendor/zig`.
 - Interop jars and upstream test/doc references in this repo are pinned to Aeron `1.50.2`.
+- For local interop iteration, warm the reusable Zig Nix build-env image once with `make setup-interop-base`.

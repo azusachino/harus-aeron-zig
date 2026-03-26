@@ -1,0 +1,12 @@
+.git
+.github
+.agents
+.claude
+.zig-cache
+.zig-global-cache
+zig-out
+vendor
+nix-shell.*
+result
+tmp
+coverage

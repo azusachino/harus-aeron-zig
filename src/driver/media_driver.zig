@@ -255,6 +255,9 @@ pub const MediaDriver = struct {
         work_count += self.conductor_agent.doWork();
         work_count += self.sender_agent.doWork();
         work_count += self.receiver_agent.doWork();
+        if (self.cnc) |*c| {
+            c.setDriverHeartbeat(std.time.milliTimestamp());
+        }
         return work_count;
     }
 
@@ -357,6 +360,29 @@ test "MediaDriver: init and deinit" {
     defer md.deinit();
 
     try testing.expect(md.running.load(.acquire) == false);
+}
+
+test "MediaDriver: doWork updates cnc heartbeat in embedded mode" {
+    const allocator = testing.allocator;
+    const ctx = MediaDriverContext{
+        .aeron_dir = "/tmp/aeron-test-heartbeat",
+    };
+    defer std.fs.deleteTreeAbsolute(ctx.aeron_dir) catch {};
+
+    const md = try MediaDriver.create(allocator, ctx);
+    defer md.destroy();
+
+    const cnc_mod = @import("cnc.zig");
+    const data_capacity = @as(usize, @intCast(md.cnc.?.toDriverBufferLength())) - @as(usize, cnc_mod.RING_BUFFER_TRAILER_LENGTH);
+    const heartbeat_off = cnc_mod.CNC_HEADER_SIZE + data_capacity + cnc_mod.CONSUMER_HEARTBEAT_OFFSET;
+
+    const before = std.mem.readInt(i64, md.cnc.?.mapped[heartbeat_off..][0..8], .little);
+    std.Thread.sleep(2 * std.time.ns_per_ms);
+    _ = md.doWork();
+    const after = std.mem.readInt(i64, md.cnc.?.mapped[heartbeat_off..][0..8], .little);
+
+    try testing.expect(after >= before);
+    try testing.expect(after > before);
 }
 
 test "MediaDriver: agents are initialized" {

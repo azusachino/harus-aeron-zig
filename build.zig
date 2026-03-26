@@ -23,6 +23,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    driver_exe.root_module.link_libc = true;
     b.installArtifact(driver_exe);
 
     const run_cmd = b.addRunArtifact(driver_exe);
@@ -38,6 +39,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    unit_tests.root_module.link_libc = true;
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const unit_test_step = b.step("test-unit", "Run unit tests");
     unit_test_step.dependOn(&run_unit_tests.step);
@@ -53,6 +55,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    integration_tests.root_module.link_libc = true;
     const run_integration_tests = b.addRunArtifact(integration_tests);
     const integration_test_step = b.step("test-integration", "Run integration tests");
     integration_test_step.dependOn(&run_integration_tests.step);
@@ -73,6 +76,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    test_protocol.root_module.link_libc = true;
     const run_test_protocol = b.addRunArtifact(test_protocol);
     const test_protocol_step = b.step("test-protocol", "Run protocol scenario tests");
     test_protocol_step.dependOn(&run_test_protocol.step);
@@ -88,6 +92,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    test_driver.root_module.link_libc = true;
     const run_test_driver = b.addRunArtifact(test_driver);
     const test_driver_step = b.step("test-driver", "Run driver scenario tests");
     test_driver_step.dependOn(&run_test_driver.step);
@@ -103,6 +108,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    test_archive.root_module.link_libc = true;
     const run_test_archive = b.addRunArtifact(test_archive);
     const test_archive_step = b.step("test-archive", "Run archive scenario tests");
     test_archive_step.dependOn(&run_test_archive.step);
@@ -118,6 +124,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    test_cluster.root_module.link_libc = true;
     const run_test_cluster = b.addRunArtifact(test_cluster);
     const test_cluster_step = b.step("test-cluster", "Run cluster scenario tests");
     test_cluster_step.dependOn(&run_test_cluster.step);
@@ -162,6 +169,7 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
+        exe.root_module.link_libc = true;
         b.installArtifact(exe);
         examples_step.dependOn(&exe.step);
     }
@@ -189,6 +197,7 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
+        fuzz_test.root_module.link_libc = true;
         fuzz_step.dependOn(&b.addRunArtifact(fuzz_test).step);
     }
 
@@ -211,6 +220,7 @@ pub fn build(b: *std.Build) void {
                 },
             }),
         });
+        bench_exe.root_module.link_libc = true;
         b.installArtifact(bench_exe);
         bench_step.dependOn(&b.addRunArtifact(bench_exe).step);
     }

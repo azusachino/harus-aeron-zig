@@ -37,6 +37,9 @@ zig-out/bin/aeron-driver
 
 Zig 0.15.2 is provided via `nixpkgs.legacyPackages.${system}.zig` in `flake.nix`.
 No `zig-overlay` or mise needed — just `nix develop`.
+Build artifacts explicitly link libc in `build.zig` because the media driver writes
+its PID into `cnc.dat` via `getpid()`. This matches local macOS development while
+keeping Linux target builds explicit rather than relying on implicit libc linkage.
 For API/source reference, prefer a local upstream checkout in `vendor/zig`:
 
 ```bash
@@ -203,7 +206,8 @@ make test-integration
 ## Interop Testing (Zig↔Java Wire Compatibility)
 
 Interop tests validate Aeron wire compatibility between this Zig implementation and
-the official Java Aeron library. Tests run as Kubernetes Jobs in the local k3s cluster.
+the official Java Aeron library. The current local path is Docker Compose via
+`deploy/docker-compose.ci.yml`, not the older k3s job flow.
 
 ### Test Matrix
 
@@ -218,19 +222,21 @@ Full suite sends 100 messages per scenario; smoke suite sends 10 messages per sc
 
 ### Prerequisites
 
-1. Colima running with containerd + k3s (`make colima-up`)
-2. Aeron JAR fetched (`make setup-interop`)
+1. A reachable local container runtime with Compose support:
+   on macOS, use Colima with the Docker client; on Linux, use Podman with `podman-compose`.
+2. Local helper artifacts prepared (`make setup-interop`)
+3. Recommended once per machine: warm the reusable Zig interop build environment image with `make setup-interop-base`
 
 ### Quick Start — Smoke Test (CI-friendly)
 
 ```bash
-# 1. Start cluster (if not already running)
-make colima-up
-
-# 2. Fetch Aeron JAR (first time only)
+# 1. Prepare local helpers
 make setup-interop
 
-# 3. Run smoke test (~1–2 minutes)
+# 2. Warm the reusable Zig build environment image (first time or after flake changes)
+make setup-interop-base
+
+# 3. Run smoke test (~1–2 minutes after the base image is warm)
 make interop-smoke
 ```
 
@@ -241,10 +247,10 @@ make interop-smoke
 make interop
 ```
 
-### Check Status of Running Jobs
+### Check Status
 
 ```bash
-# See job and pod status without re-running
+# Legacy k8s status target; only useful if you are still using the old k8s flow
 make interop-status
 ```
 
@@ -252,46 +258,49 @@ make interop-status
 
 | Target | Description |
 |--------|-------------|
-| `make interop` | Full suite — build images, deploy all jobs, wait, report |
-| `make interop-smoke` | Smoke suite — same flow but 10 msgs, 45s timeout |
-| `make interop-status` | Show status of current/recent interop jobs |
-| `make interop-build` | Build OCI images only (no job deployment) |
-| `make interop-run` | Deploy + wait for full interop jobs (no image rebuild) |
-| `make setup-interop` | Fetch Aeron JAR and set up local helpers |
+| `make interop` | Full Docker Compose interop run with 100 messages |
+| `make interop-smoke` | Smoke Docker Compose interop run with 10 messages |
+| `make interop-status` | Legacy k8s status output; not part of the Compose flow |
+| `make setup-interop` | Set up local helpers used by interop and benchmarks |
+| `make setup-interop-base` | Build/tag the reusable local Zig Nix build-env image used by interop |
 
 ### How It Works
 
-1. `make interop` calls `test/interop/k8s-verify.sh`
-2. The script builds OCI images (Nix for Zig, Docker for Java) and imports them into containerd
-3. Jobs are deleted before re-creation (idempotent — safe to re-run)
-4. The script polls job status and exits 0 on full success, 1 on any failure
-5. On failure, logs from all pods are printed for debugging
+1. `make interop` and `make interop-smoke` run `deploy/docker-compose.ci.yml`
+2. `make setup-interop-base` can prebuild the `build-env` stage from `deploy/Dockerfile` and tag it locally
+3. The Compose file builds the Zig driver image from the repo using that local build-env image and the Java client image from `deploy/Dockerfile.java-aeron`
+4. The Java client waits for `cnc.dat` via shared `/dev/shm/aeron`
+5. The command exits with the Java client container status
 
-### Job Specs
+### Compose Specs
 
-- Full suite: `deploy/interop/kustomization.yaml` (jobs in `deploy/interop/`)
-- Smoke suite: `deploy/interop/smoke/kustomization.yaml` (jobs in `deploy/interop/smoke/`)
-- All jobs use `backoffLimit: 0` — no retries on failure
-- All jobs use `restartPolicy: Never`
-- Full jobs: `activeDeadlineSeconds: 60`; smoke jobs: `activeDeadlineSeconds: 45`
+- Compose file: `deploy/docker-compose.ci.yml`
+- Reusable local Zig build-env image tag: `harus-aeron-zig-build-env:latest`
+- Full suite sets `MSG_COUNT=100`
+- Smoke suite sets `MSG_COUNT=10`
+- Override the compose runner if needed: `make interop-smoke COMPOSE=podman-compose`
 
 ### Troubleshooting
 
-**Jobs stuck in Pending**
+**macOS: Colima/Docker client not ready**
 
 ```bash
-kubectl describe pod -n aeron <pod-name>
-# Look for: image pull errors, resource limits, node pressure
+# Start Colima with its default runtime and use the Docker client
+colima start
+docker compose version
+docker info
 ```
 
-**Image not found**
+**Linux: Podman not ready**
 
 ```bash
-# Verify image is in k8s.io namespace
-colima ssh -- sudo ctr -n k8s.io images ls | grep -E 'harus|java-aeron'
-# Re-import if missing
-make interop-build
+# Check the Podman stack directly
+podman info
+podman-compose version
 ```
+
+`make interop` and `make interop-smoke` now run a preflight check first and fail
+early with a daemon/connectivity error before attempting `compose up`.
 
 **Subscriber receives 0 messages**
 
