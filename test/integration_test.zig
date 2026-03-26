@@ -113,9 +113,10 @@ test "repeated setup/teardown cycles do not leak images" {
         try std.testing.expectEqual(@as(usize, 1), h.driver.receiver_agent.images.items.len);
 
         // Remove subscription — should also clean up the image
-        var remove_buf: [16]u8 = undefined;
-        std.mem.writeInt(i64, remove_buf[0..8], 0, .little);
-        std.mem.writeInt(i64, remove_buf[8..16], reg_id, .little);
+        var remove_buf: [24]u8 = undefined;
+        std.mem.writeInt(i64, remove_buf[0..8], 1, .little); // client_id
+        std.mem.writeInt(i64, remove_buf[8..16], 0, .little); // correlation_id
+        std.mem.writeInt(i64, remove_buf[16..24], reg_id, .little);
         h.driver.conductor_agent.handleRemoveSubscription(&remove_buf);
         try std.testing.expectEqual(@as(usize, 0), h.driver.receiver_agent.images.items.len);
     }

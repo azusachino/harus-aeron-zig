@@ -62,7 +62,7 @@ test "NakHeader matches upstream FlyweightTest byte fixture" {
     var buf align(8) = [_]u8{0} ** protocol.NakHeader.LENGTH;
 
     std.mem.writeInt(i32, buf[0..4], protocol.NakHeader.LENGTH, .little);
-    buf[4] = 1;
+    buf[4] = protocol.VERSION;
     buf[5] = 0;
     std.mem.writeInt(u16, buf[6..8], @intFromEnum(protocol.FrameType.nak), .little);
     std.mem.writeInt(i32, buf[8..12], @as(i32, @bitCast(@as(u32, 0xDEAD_BEEF))), .little);
@@ -74,7 +74,7 @@ test "NakHeader matches upstream FlyweightTest byte fixture" {
     const frame = try protocol.decode(&buf);
     try std.testing.expectEqual(protocol.FrameType.nak, std.meta.activeTag(frame));
     try std.testing.expectEqual(@as(i32, 28), frame.nak.frame_length);
-    try std.testing.expectEqual(@as(u8, 1), frame.nak.version);
+    try std.testing.expectEqual(protocol.VERSION, frame.nak.version);
     try std.testing.expectEqual(@as(u8, 0), frame.nak.flags);
     try std.testing.expectEqual(@intFromEnum(protocol.FrameType.nak), frame.nak.type);
     try std.testing.expectEqual(@as(i32, @bitCast(@as(u32, 0xDEAD_BEEF))), frame.nak.session_id);
