@@ -7,8 +7,8 @@ pub const INSUFFICIENT_CAPACITY: i32 = -1;
 pub const PADDING_MSG_TYPE_ID: i32 = -1;
 
 // Upstream command message types (client → driver)
-pub const CLIENT_KEEPALIVE_MSG_TYPE: i32 = 0x05;
-pub const TERMINATE_DRIVER_MSG_TYPE: i32 = 0x08;
+pub const CLIENT_KEEPALIVE_MSG_TYPE: i32 = 0x06;
+pub const TERMINATE_DRIVER_MSG_TYPE: i32 = 0x0E;
 
 // Metadata positions (last 128 bytes of buffer)
 pub const TAIL_POSITION_OFFSET: usize = 0;
@@ -200,6 +200,18 @@ test "record alignment" {
     try std.testing.expectEqual(16, RecordDescriptor.aligned(8));
 }
 
+test "ring buffer constants match agrona protocol values" {
+    try std.testing.expectEqual(@as(i32, 0x06), CLIENT_KEEPALIVE_MSG_TYPE);
+    try std.testing.expectEqual(@as(i32, 0x0E), TERMINATE_DRIVER_MSG_TYPE);
+    try std.testing.expectEqual(@as(usize, 128), METADATA_LENGTH);
+    try std.testing.expectEqual(@as(usize, 8), RecordDescriptor.HEADER_LENGTH);
+    try std.testing.expectEqual(@as(usize, 8), RecordDescriptor.ALIGNMENT);
+    try std.testing.expectEqual(@as(usize, 0), TAIL_POSITION_OFFSET);
+    try std.testing.expectEqual(@as(usize, 8), HEAD_CACHE_POSITION_OFFSET);
+    try std.testing.expectEqual(@as(usize, 16), HEAD_POSITION_OFFSET);
+    try std.testing.expectEqual(@as(usize, 24), CORRELATION_COUNTER_OFFSET);
+}
+
 test "single write and read roundtrip" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -224,6 +236,23 @@ test "single write and read roundtrip" {
     const fragments = rb.read(handler, @ptrCast(&received_msg), 10);
     try std.testing.expectEqual(fragments, 1);
     try std.testing.expectEqualSlices(u8, test_msg, received_msg);
+}
+
+test "write stores agrona record header as length then type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const buf = try arena.allocator().alloc(u8, 256);
+    @memset(buf, 0);
+
+    var rb = ManyToOneRingBuffer.init(buf);
+    const msg = "abc";
+    try std.testing.expect(rb.write(0x04, msg));
+
+    try std.testing.expectEqual(@as(i32, 11), std.mem.readInt(i32, buf[0..4], .little));
+    try std.testing.expectEqual(@as(i32, 0x04), std.mem.readInt(i32, buf[4..8], .little));
+    try std.testing.expectEqualSlices(u8, msg, buf[8 .. 8 + msg.len]);
+    try std.testing.expectEqual(@as(i64, 16), std.mem.readInt(i64, buf[rb.capacity + TAIL_POSITION_OFFSET ..][0..8], .little));
 }
 
 test "write until full returns false" {
@@ -301,4 +330,39 @@ test "wrap-around with padding" {
     }
 
     try std.testing.expect(write_count > 0);
+}
+
+test "wrap-around encodes padding record with length then padding type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const buf = try arena.allocator().alloc(u8, 256);
+    @memset(buf, 0);
+
+    var rb = ManyToOneRingBuffer.init(buf);
+    try std.testing.expectEqual(@as(usize, 128), rb.capacity);
+
+    // 7 x 16-byte aligned records => head/tail at 112, leaving 16 bytes at the end.
+    for (0..7) |_| {
+        try std.testing.expect(rb.write(1, "abc"));
+    }
+
+    var read_count: i32 = 0;
+    const handler = struct {
+        fn handle(_: i32, _: []const u8, ctx: *anyopaque) void {
+            const count: *i32 = @ptrCast(@alignCast(ctx));
+            count.* += 1;
+        }
+    }.handle;
+    _ = rb.read(handler, @ptrCast(&read_count), 6);
+    try std.testing.expectEqual(@as(i32, 6), read_count);
+
+    try std.testing.expect(rb.write(2, "012345678"));
+
+    const padding_index: usize = 112;
+    try std.testing.expectEqual(@as(i32, 16), std.mem.readInt(i32, buf[padding_index..][0..4], .little));
+    try std.testing.expectEqual(@as(i32, PADDING_MSG_TYPE_ID), std.mem.readInt(i32, buf[padding_index + 4 ..][0..4], .little));
+    try std.testing.expectEqual(@as(i32, 17), std.mem.readInt(i32, buf[0..4], .little));
+    try std.testing.expectEqual(@as(i32, 2), std.mem.readInt(i32, buf[4..8], .little));
+    try std.testing.expectEqualSlices(u8, "012345678", buf[8..17]);
 }

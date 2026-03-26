@@ -19,23 +19,23 @@ const CountersMap = counters.CountersMap;
 const Receiver = receiver_mod.Receiver;
 const Image = receiver_mod.Image;
 
-// Command type IDs
+// Command type IDs — match io.aeron.command.ControlProtocolEvents.
 pub const CMD_ADD_PUBLICATION: i32 = 0x01;
 pub const CMD_REMOVE_PUBLICATION: i32 = 0x02;
-pub const CMD_ADD_SUBSCRIPTION: i32 = 0x03;
-pub const CMD_REMOVE_SUBSCRIPTION: i32 = 0x04;
-pub const CMD_CLIENT_KEEPALIVE: i32 = 0x05;
-pub const CMD_ADD_COUNTER: i32 = 0x06;
-pub const CMD_REMOVE_COUNTER: i32 = 0x07;
-pub const CMD_TERMINATE_DRIVER: i32 = 0x08;
+pub const CMD_ADD_SUBSCRIPTION: i32 = 0x04;
+pub const CMD_REMOVE_SUBSCRIPTION: i32 = 0x05;
+pub const CMD_CLIENT_KEEPALIVE: i32 = 0x06;
+pub const CMD_ADD_COUNTER: i32 = 0x09;
+pub const CMD_REMOVE_COUNTER: i32 = 0x0A;
+pub const CMD_TERMINATE_DRIVER: i32 = 0x0E;
 
-// Response type IDs
-pub const RESPONSE_ON_PUBLICATION_READY: i32 = 0x10;
-pub const RESPONSE_ON_SUBSCRIPTION_READY: i32 = 0x11;
-pub const RESPONSE_ON_ERROR: i32 = 0x12;
-pub const RESPONSE_ON_IMAGE_READY: i32 = 0x13;
-pub const RESPONSE_ON_IMAGE_CLOSE: i32 = 0x14;
-pub const RESPONSE_ON_COUNTER_READY: i32 = 0x15;
+// Response type IDs — match io.aeron.command.ControlProtocolEvents.
+pub const RESPONSE_ON_ERROR: i32 = 0x0F01;
+pub const RESPONSE_ON_IMAGE_READY: i32 = 0x0F02;
+pub const RESPONSE_ON_PUBLICATION_READY: i32 = 0x0F03;
+pub const RESPONSE_ON_IMAGE_CLOSE: i32 = 0x0F05;
+pub const RESPONSE_ON_SUBSCRIPTION_READY: i32 = 0x0F07;
+pub const RESPONSE_ON_COUNTER_READY: i32 = 0x0F08;
 pub const RESPONSE_ON_OPERATION_SUCCESS: i32 = 0x0F04;
 
 pub const PublicationEntry = struct {
@@ -236,7 +236,7 @@ pub const DriverConductor = struct {
         std.mem.writeInt(i32, buf[8..12], session_id, .little);
         std.mem.writeInt(i32, buf[12..16], stream_id, .little);
         std.mem.writeInt(i32, buf[16..20], 0, .little); // reserved
-        self.broadcaster.transmit(RESPONSE_ON_IMAGE_CLOSE, &buf);
+        self.broadcaster.transmit(RESPONSE_ON_IMAGE_CLOSE, &buf) catch return;
     }
 
     fn sendImageReady(self: *DriverConductor, session_id: i32, stream_id: i32, registration_id: i64, initial_term_id: i32) void {
@@ -245,7 +245,7 @@ pub const DriverConductor = struct {
         std.mem.writeInt(i32, buf[8..12], session_id, .little);
         std.mem.writeInt(i32, buf[12..16], stream_id, .little);
         std.mem.writeInt(i32, buf[16..20], initial_term_id, .little);
-        self.broadcaster.transmit(RESPONSE_ON_IMAGE_READY, &buf);
+        self.broadcaster.transmit(RESPONSE_ON_IMAGE_READY, &buf) catch return;
     }
 
     pub fn handleAddPublication(self: *DriverConductor, data: []const u8) void {
@@ -545,14 +545,14 @@ pub const DriverConductor = struct {
         std.mem.writeInt(i32, buf[8..12], session_id, .little);
         std.mem.writeInt(i32, buf[12..16], stream_id, .little);
         std.mem.writeInt(i32, buf[16..20], pub_limit_counter_id, .little);
-        self.broadcaster.transmit(RESPONSE_ON_PUBLICATION_READY, &buf);
+        self.broadcaster.transmit(RESPONSE_ON_PUBLICATION_READY, &buf) catch return;
     }
 
     fn sendSubscriptionReady(self: *DriverConductor, correlation_id: i64, stream_id: i32) void {
         var buf: [12]u8 = undefined;
         std.mem.writeInt(i64, buf[0..8], correlation_id, .little);
         std.mem.writeInt(i32, buf[8..12], stream_id, .little);
-        self.broadcaster.transmit(RESPONSE_ON_SUBSCRIPTION_READY, &buf);
+        self.broadcaster.transmit(RESPONSE_ON_SUBSCRIPTION_READY, &buf) catch return;
     }
 
     fn sendError(self: *DriverConductor, correlation_id: i64, error_code: i32, msg: []const u8) void {
@@ -563,7 +563,7 @@ pub const DriverConductor = struct {
         std.mem.writeInt(i32, buf[12..16], @as(i32, @intCast(msg.len)), .little);
 
         // Transmit header
-        self.broadcaster.transmit(RESPONSE_ON_ERROR, buf[0..16]);
+        self.broadcaster.transmit(RESPONSE_ON_ERROR, buf[0..16]) catch return;
 
         // If there's a message, we need to transmit it separately
         // For now, just transmit empty message if msg is too long
@@ -581,13 +581,13 @@ pub const DriverConductor = struct {
         var buf: [12]u8 = undefined;
         std.mem.writeInt(i64, buf[0..8], correlation_id, .little);
         std.mem.writeInt(i32, buf[8..12], counter_id, .little);
-        self.broadcaster.transmit(RESPONSE_ON_COUNTER_READY, &buf);
+        self.broadcaster.transmit(RESPONSE_ON_COUNTER_READY, &buf) catch return;
     }
 
     fn sendOperationSuccess(self: *DriverConductor, correlation_id: i64) void {
         var buf: [8]u8 = undefined;
         std.mem.writeInt(i64, buf[0..8], correlation_id, .little);
-        self.broadcaster.transmit(RESPONSE_ON_OPERATION_SUCCESS, &buf);
+        self.broadcaster.transmit(RESPONSE_ON_OPERATION_SUCCESS, &buf) catch return;
     }
 };
 
@@ -1012,6 +1012,25 @@ test "DriverConductor REMOVE_SUBSCRIPTION sends ON_OPERATION_SUCCESS" {
 
     const payload = rx.buffer();
     try testing.expectEqual(correlation_id, std.mem.readInt(i64, payload[0..8], .little));
+}
+
+test "DriverConductor IPC event IDs match upstream control protocol" {
+    try testing.expectEqual(@as(i32, 0x01), CMD_ADD_PUBLICATION);
+    try testing.expectEqual(@as(i32, 0x02), CMD_REMOVE_PUBLICATION);
+    try testing.expectEqual(@as(i32, 0x04), CMD_ADD_SUBSCRIPTION);
+    try testing.expectEqual(@as(i32, 0x05), CMD_REMOVE_SUBSCRIPTION);
+    try testing.expectEqual(@as(i32, 0x06), CMD_CLIENT_KEEPALIVE);
+    try testing.expectEqual(@as(i32, 0x09), CMD_ADD_COUNTER);
+    try testing.expectEqual(@as(i32, 0x0A), CMD_REMOVE_COUNTER);
+    try testing.expectEqual(@as(i32, 0x0E), CMD_TERMINATE_DRIVER);
+
+    try testing.expectEqual(@as(i32, 0x0F01), RESPONSE_ON_ERROR);
+    try testing.expectEqual(@as(i32, 0x0F02), RESPONSE_ON_IMAGE_READY);
+    try testing.expectEqual(@as(i32, 0x0F03), RESPONSE_ON_PUBLICATION_READY);
+    try testing.expectEqual(@as(i32, 0x0F04), RESPONSE_ON_OPERATION_SUCCESS);
+    try testing.expectEqual(@as(i32, 0x0F05), RESPONSE_ON_IMAGE_CLOSE);
+    try testing.expectEqual(@as(i32, 0x0F07), RESPONSE_ON_SUBSCRIPTION_READY);
+    try testing.expectEqual(@as(i32, 0x0F08), RESPONSE_ON_COUNTER_READY);
 }
 
 test "DriverConductor TERMINATE_DRIVER stops signal" {

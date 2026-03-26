@@ -1,5 +1,5 @@
 // Upstream reference: aeron-cluster/src/test/java/io/aeron/cluster/ClusterNodeTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: leader failure triggers election
 
 const std = @import("std");

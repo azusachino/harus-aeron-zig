@@ -1,5 +1,5 @@
 // Upstream reference: aeron-driver/src/test/java/io/aeron/driver/MediaDriverTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: media driver init, directory creation, CNC file allocation
 
 const std = @import("std");

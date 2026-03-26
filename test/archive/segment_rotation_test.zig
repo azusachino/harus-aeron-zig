@@ -1,5 +1,5 @@
 // Upstream reference: aeron-archive/src/test/java/io/aeron/archive/RecordingWriterTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: segment file rotates when segment_length is exceeded
 
 const std = @import("std");

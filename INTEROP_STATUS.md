@@ -83,10 +83,10 @@ what it sent in ADD_SUBSCRIPTION. Check that correlation_id is echoed correctly.
 
 ```bash
 # Build fresh image
-AERON_VERSION=1.46.7 podman-compose -f deploy/docker-compose.ci.yml build --no-cache zig-driver
+AERON_VERSION=1.50.2 podman-compose -f deploy/docker-compose.ci.yml build --no-cache zig-driver
 
 # Run with fresh volumes (stale cnc.dat causes false failures)
-AERON_VERSION=1.46.7 podman-compose -f deploy/docker-compose.ci.yml down -v
-AERON_VERSION=1.46.7 MSG_COUNT=10 podman-compose -f deploy/docker-compose.ci.yml up \
+AERON_VERSION=1.50.2 podman-compose -f deploy/docker-compose.ci.yml down -v
+AERON_VERSION=1.50.2 MSG_COUNT=10 podman-compose -f deploy/docker-compose.ci.yml up \
   --abort-on-container-exit --exit-code-from java-client
 ```

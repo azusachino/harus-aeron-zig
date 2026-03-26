@@ -1,14 +1,19 @@
 NIX_RUN := $(if $(IN_NIX_SHELL),,nix develop --command )
 export ZIG_GLOBAL_CACHE_DIR := $(CURDIR)/.zig-global-cache
 export ZIG_LOCAL_CACHE_DIR := $(CURDIR)/.zig-cache
-AERON_VERSION := 1.46.7
+AERON_VERSION := 1.50.2
 AERON_ALL_JAR_URL := https://repo1.maven.org/maven2/io/aeron/aeron-all/$(AERON_VERSION)/aeron-all-$(AERON_VERSION).jar
-AERON_ALL_JAR_SHA256 := ded2ed3c5b73991e31c439a7562a294e5d5566f955c3a9e81089a28a6b5b9d55
+AERON_UPSTREAM_REPO ?= https://github.com/aeron-io/aeron.git
+AERON_UPSTREAM_REF ?= release/1.50.x
+AERON_UPSTREAM_DIR ?= vendor/aeron
+ZIG_UPSTREAM_REPO ?= https://codeberg.org/ziglang/zig
+ZIG_UPSTREAM_REF ?= 0.15.2
+ZIG_UPSTREAM_DIR ?= vendor/zig
 
 .PHONY: fmt fmt-check build test lint check clean run tutorial-check lesson-lint \
        fuzz bench stress \
        nix-image k8s-up k8s-down k8s-status k8s-logs colima-up colima-down \
-       setup setup-interop \
+       setup setup-interop setup-upstream-aeron setup-upstream-zig \
        interop interop-smoke interop-status test-protocol test-driver test-archive test-cluster test-scenarios status
 
 fmt:
@@ -94,6 +99,29 @@ setup-interop:
 			chmod +x throughput; \
 		fi
 
+setup-upstream-aeron:
+	@mkdir -p vendor
+	@if [ -d "$(AERON_UPSTREAM_DIR)/.git" ]; then \
+		git -C "$(AERON_UPSTREAM_DIR)" fetch --depth 1 origin "$(AERON_UPSTREAM_REF)"; \
+		git -C "$(AERON_UPSTREAM_DIR)" checkout --detach FETCH_HEAD; \
+	else \
+		rm -f "$(AERON_UPSTREAM_DIR)"; \
+		git clone --depth 1 --branch "$(AERON_UPSTREAM_REF)" "$(AERON_UPSTREAM_REPO)" "$(AERON_UPSTREAM_DIR)"; \
+	fi
+
+setup-upstream-zig:
+	@mkdir -p vendor
+	@if [ -d "$(ZIG_UPSTREAM_DIR)/.git" ]; then \
+		git -C "$(ZIG_UPSTREAM_DIR)" fetch --depth 1 origin "$(ZIG_UPSTREAM_REF)"; \
+		git -C "$(ZIG_UPSTREAM_DIR)" checkout --detach FETCH_HEAD; \
+	else \
+		rm -f "$(ZIG_UPSTREAM_DIR)"; \
+		git init "$(ZIG_UPSTREAM_DIR)" >/dev/null 2>&1; \
+		git -C "$(ZIG_UPSTREAM_DIR)" remote add origin "$(ZIG_UPSTREAM_REPO)"; \
+		git -C "$(ZIG_UPSTREAM_DIR)" fetch --depth 1 origin "$(ZIG_UPSTREAM_REF)"; \
+		git -C "$(ZIG_UPSTREAM_DIR)" checkout --detach FETCH_HEAD; \
+	fi
+
 # =============================================================================
 # Kubernetes (k3s via colima)
 # =============================================================================
@@ -150,10 +178,10 @@ stress:  ## Run stress tests
 COMPOSE ?= podman-compose
 
 interop:  ## Run full interop test suite (100 messages, all scenarios)
-	AERON_VERSION=1.46.7 MSG_COUNT=100 $(COMPOSE) -f deploy/docker-compose.ci.yml up --abort-on-container-exit --exit-code-from java-client
+	AERON_VERSION=1.50.2 MSG_COUNT=100 $(COMPOSE) -f deploy/docker-compose.ci.yml up --abort-on-container-exit --exit-code-from java-client
 
 interop-smoke:  ## Run quick smoke interop test (10 messages, CI-friendly)
-	AERON_VERSION=1.46.7 MSG_COUNT=10 $(COMPOSE) -f deploy/docker-compose.ci.yml up --abort-on-container-exit --exit-code-from java-client
+	AERON_VERSION=1.50.2 MSG_COUNT=10 $(COMPOSE) -f deploy/docker-compose.ci.yml up --abort-on-container-exit --exit-code-from java-client
 
 interop-status:  ## Show status of running interop jobs
 	@echo "=== Interop Jobs ==="
@@ -162,4 +190,3 @@ interop-status:  ## Show status of running interop jobs
 	@echo ""
 	@echo "=== Interop Pods ==="
 	kubectl get pods -n aeron -l 'app.kubernetes.io/part-of in (interop,interop-smoke)' -o wide 2>/dev/null || true
-

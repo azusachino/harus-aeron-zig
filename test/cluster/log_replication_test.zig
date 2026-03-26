@@ -1,5 +1,5 @@
 // Upstream reference: aeron-cluster/src/test/java/io/aeron/cluster/LogReplicationTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: follower replicates log entries, commit position advances
 
 const std = @import("std");

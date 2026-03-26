@@ -37,6 +37,15 @@ zig-out/bin/aeron-driver
 
 Zig 0.15.2 is provided via `nixpkgs.legacyPackages.${system}.zig` in `flake.nix`.
 No `zig-overlay` or mise needed — just `nix develop`.
+For API/source reference, prefer a local upstream checkout in `vendor/zig`:
+
+```bash
+make setup-upstream-zig
+```
+
+This clones the Zig `0.15.2` tag into `vendor/zig`. Keep using `vendor/zig-std`
+for the exact stdlib path from the active toolchain, and use `vendor/zig` when
+you need the upstream compiler/runtime sources or want to confirm 0.15.2 APIs.
 
 ---
 

@@ -1,5 +1,5 @@
 // Upstream reference: aeron-archive/src/test/java/io/aeron/archive/ArchiveTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: replay yields same messages in order
 
 const std = @import("std");

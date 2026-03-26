@@ -101,13 +101,16 @@ pub const RttMeasurement = extern struct {
     version: u8,
     flags: u8,
     type: u16,
+    session_id: i32,
+    stream_id: i32,
     echo_timestamp: i64 align(4),
     reception_delta: i64 align(4),
     // LESSON(frame-codec): receiver_id was present from the start in C header. See docs/tutorial/01-foundations/01-frame-codec.md
-    // (aeron_udp_protocol.h). Total frame size = 32 bytes.
+    // (aeron_udp_protocol.h). Total frame size = 40 bytes including session_id and stream_id.
     receiver_id: i64 align(4),
 
     pub const LENGTH = @sizeOf(RttMeasurement);
+    pub const REPLY_FLAG: u8 = 0x80;
 };
 
 /// Resolution Entry — variable length, header portion only
@@ -229,11 +232,43 @@ comptime {
     std.debug.assert(@sizeOf(SetupHeader) == 40);
     std.debug.assert(@sizeOf(StatusMessage) == 36);
     std.debug.assert(@sizeOf(NakHeader) == 28);
-    std.debug.assert(@sizeOf(RttMeasurement) == 32);
+    std.debug.assert(@sizeOf(RttMeasurement) == 40);
+    std.debug.assert(@offsetOf(DataHeader, "reserved_value") == 24);
+    std.debug.assert(@offsetOf(StatusMessage, "receiver_id") == 28);
+    std.debug.assert(@offsetOf(RttMeasurement, "session_id") == 8);
+    std.debug.assert(@offsetOf(RttMeasurement, "stream_id") == 12);
+    std.debug.assert(@offsetOf(RttMeasurement, "echo_timestamp") == 16);
+    std.debug.assert(@offsetOf(RttMeasurement, "reception_delta") == 24);
+    std.debug.assert(@offsetOf(RttMeasurement, "receiver_id") == 32);
 }
 
-test "RttMeasurement is exactly 32 bytes" {
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(RttMeasurement));
+test "RttMeasurement is exactly 40 bytes" {
+    try std.testing.expectEqual(@as(usize, 40), @sizeOf(RttMeasurement));
+}
+
+test "frame type numeric values match aeron udp protocol" {
+    try std.testing.expectEqual(@as(u16, 0x00), @intFromEnum(FrameType.padding));
+    try std.testing.expectEqual(@as(u16, 0x01), @intFromEnum(FrameType.data));
+    try std.testing.expectEqual(@as(u16, 0x02), @intFromEnum(FrameType.nak));
+    try std.testing.expectEqual(@as(u16, 0x03), @intFromEnum(FrameType.status));
+    try std.testing.expectEqual(@as(u16, 0x05), @intFromEnum(FrameType.setup));
+    try std.testing.expectEqual(@as(u16, 0x06), @intFromEnum(FrameType.rtt_measurement));
+    try std.testing.expectEqual(@as(u16, 0x0E), @intFromEnum(FrameType.resolution_entry));
+}
+
+test "wire field offsets match aeron udp protocol" {
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(DataHeader, "reserved_value"));
+    try std.testing.expectEqual(@as(usize, 28), @offsetOf(StatusMessage, "receiver_id"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(NakHeader, "session_id"));
+    try std.testing.expectEqual(@as(usize, 12), @offsetOf(NakHeader, "stream_id"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(NakHeader, "term_id"));
+    try std.testing.expectEqual(@as(usize, 20), @offsetOf(NakHeader, "term_offset"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(NakHeader, "length"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(RttMeasurement, "session_id"));
+    try std.testing.expectEqual(@as(usize, 12), @offsetOf(RttMeasurement, "stream_id"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(RttMeasurement, "echo_timestamp"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(RttMeasurement, "reception_delta"));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(RttMeasurement, "receiver_id"));
 }
 
 test "frame sizes match spec" {
@@ -241,7 +276,7 @@ test "frame sizes match spec" {
     try std.testing.expectEqual(40, SetupHeader.LENGTH);
     try std.testing.expectEqual(36, StatusMessage.LENGTH);
     try std.testing.expectEqual(28, NakHeader.LENGTH);
-    try std.testing.expectEqual(32, RttMeasurement.LENGTH);
+    try std.testing.expectEqual(40, RttMeasurement.LENGTH);
 }
 
 test "alignedLength calculation" {
@@ -336,26 +371,51 @@ test "decode: decodes SETUP frame" {
     var buf align(8) = [_]u8{0} ** 64;
     std.mem.writeInt(i32, buf[0..4], @as(i32, SetupHeader.LENGTH), .little);
     buf[4] = VERSION;
+    buf[5] = 0xC0;
     std.mem.writeInt(u16, buf[6..8], @intFromEnum(FrameType.setup), .little);
-    // SetupHeader layout: frame_length(4) version(1) flags(1) type(2) term_offset(4)
-    //   session_id(4) stream_id(4) initial_term_id(4) ... => initial_term_id at offset 20
-    std.mem.writeInt(i32, buf[20..24], 7, .little); // initial_term_id
+    std.mem.writeInt(i32, buf[8..12], 4096, .little);
+    std.mem.writeInt(i32, buf[12..16], 11, .little);
+    std.mem.writeInt(i32, buf[16..20], 22, .little);
+    std.mem.writeInt(i32, buf[20..24], 33, .little);
+    std.mem.writeInt(i32, buf[24..28], 44, .little);
+    std.mem.writeInt(i32, buf[28..32], 64 * 1024, .little);
+    std.mem.writeInt(i32, buf[32..36], 1408, .little);
+    std.mem.writeInt(i32, buf[36..40], 3, .little);
 
     const frame = try decode(&buf);
     try std.testing.expectEqual(FrameType.setup, std.meta.activeTag(frame));
-    try std.testing.expectEqual(@as(i32, 7), frame.setup.initial_term_id);
+    try std.testing.expectEqual(@as(u8, 0xC0), frame.setup.flags);
+    try std.testing.expectEqual(@as(i32, 4096), frame.setup.term_offset);
+    try std.testing.expectEqual(@as(i32, 11), frame.setup.session_id);
+    try std.testing.expectEqual(@as(i32, 22), frame.setup.stream_id);
+    try std.testing.expectEqual(@as(i32, 33), frame.setup.initial_term_id);
+    try std.testing.expectEqual(@as(i32, 44), frame.setup.active_term_id);
+    try std.testing.expectEqual(@as(i32, 64 * 1024), frame.setup.term_length);
+    try std.testing.expectEqual(@as(i32, 1408), frame.setup.mtu);
+    try std.testing.expectEqual(@as(i32, 3), frame.setup.ttl);
 }
 
 test "decode: decodes STATUS frame" {
     var buf align(8) = [_]u8{0} ** 64;
     std.mem.writeInt(i32, buf[0..4], @as(i32, StatusMessage.LENGTH), .little);
     buf[4] = VERSION;
+    buf[5] = 0x80;
     std.mem.writeInt(u16, buf[6..8], @intFromEnum(FrameType.status), .little);
-    std.mem.writeInt(i32, buf[8..12], 99, .little); // session_id
+    std.mem.writeInt(i32, buf[8..12], 99, .little);
+    std.mem.writeInt(i32, buf[12..16], 7, .little);
+    std.mem.writeInt(i32, buf[16..20], 12, .little);
+    std.mem.writeInt(i32, buf[20..24], 2048, .little);
+    std.mem.writeInt(i32, buf[24..28], 65536, .little);
+    std.mem.writeInt(i64, buf[28..36], 0x0102_0304_0506_0708, .little);
 
     const frame = try decode(&buf);
     try std.testing.expectEqual(FrameType.status, std.meta.activeTag(frame));
     try std.testing.expectEqual(@as(i32, 99), frame.status.session_id);
+    try std.testing.expectEqual(@as(i32, 7), frame.status.stream_id);
+    try std.testing.expectEqual(@as(i32, 12), frame.status.consumption_term_id);
+    try std.testing.expectEqual(@as(i32, 2048), frame.status.consumption_term_offset);
+    try std.testing.expectEqual(@as(i32, 65536), frame.status.receiver_window);
+    try std.testing.expectEqual(@as(i64, 0x0102_0304_0506_0708), frame.status.receiver_id);
 }
 
 test "decode: decodes NAK frame" {
@@ -363,9 +423,19 @@ test "decode: decodes NAK frame" {
     std.mem.writeInt(i32, buf[0..4], @as(i32, NakHeader.LENGTH), .little);
     buf[4] = VERSION;
     std.mem.writeInt(u16, buf[6..8], @intFromEnum(FrameType.nak), .little);
+    std.mem.writeInt(i32, buf[8..12], 17, .little);
+    std.mem.writeInt(i32, buf[12..16], 27, .little);
+    std.mem.writeInt(i32, buf[16..20], 37, .little);
+    std.mem.writeInt(i32, buf[20..24], 4096, .little);
+    std.mem.writeInt(i32, buf[24..28], 512, .little);
 
     const frame = try decode(&buf);
     try std.testing.expectEqual(FrameType.nak, std.meta.activeTag(frame));
+    try std.testing.expectEqual(@as(i32, 17), frame.nak.session_id);
+    try std.testing.expectEqual(@as(i32, 27), frame.nak.stream_id);
+    try std.testing.expectEqual(@as(i32, 37), frame.nak.term_id);
+    try std.testing.expectEqual(@as(i32, 4096), frame.nak.term_offset);
+    try std.testing.expectEqual(@as(i32, 512), frame.nak.length);
 }
 
 test "decode: decodes RTT frame" {
@@ -373,9 +443,52 @@ test "decode: decodes RTT frame" {
     std.mem.writeInt(i32, buf[0..4], @as(i32, RttMeasurement.LENGTH), .little);
     buf[4] = VERSION;
     std.mem.writeInt(u16, buf[6..8], @intFromEnum(FrameType.rtt_measurement), .little);
+    std.mem.writeInt(i32, buf[8..12], 17, .little);
+    std.mem.writeInt(i32, buf[12..16], 27, .little);
+    std.mem.writeInt(i64, buf[16..24], 111, .little);
+    std.mem.writeInt(i64, buf[24..32], 222, .little);
+    std.mem.writeInt(i64, buf[32..40], 333, .little);
 
     const frame = try decode(&buf);
     try std.testing.expectEqual(FrameType.rtt_measurement, std.meta.activeTag(frame));
+    try std.testing.expectEqual(@as(i32, 17), frame.rtt_measurement.session_id);
+    try std.testing.expectEqual(@as(i32, 27), frame.rtt_measurement.stream_id);
+    try std.testing.expectEqual(@as(i64, 111), frame.rtt_measurement.echo_timestamp);
+    try std.testing.expectEqual(@as(i64, 222), frame.rtt_measurement.reception_delta);
+    try std.testing.expectEqual(@as(i64, 333), frame.rtt_measurement.receiver_id);
+}
+
+test "decode: decodes resolution entry header" {
+    var buf align(8) = [_]u8{0} ** 32;
+    std.mem.writeInt(i32, buf[0..4], @as(i32, ResolutionEntry.HEADER_LENGTH), .little);
+    buf[4] = VERSION;
+    std.mem.writeInt(u16, buf[6..8], @intFromEnum(FrameType.resolution_entry), .little);
+    buf[8] = 1;
+    buf[9] = 16;
+    std.mem.writeInt(u16, buf[10..12], 40123, .little);
+    std.mem.writeInt(i32, buf[12..16], 9000, .little);
+
+    const frame = try decode(&buf);
+    try std.testing.expectEqual(FrameType.resolution_entry, std.meta.activeTag(frame));
+    try std.testing.expectEqual(@as(u8, 1), frame.resolution_entry.res_type);
+    try std.testing.expectEqual(@as(u8, 16), frame.resolution_entry.address_length);
+    try std.testing.expectEqual(@as(u16, 40123), frame.resolution_entry.port);
+    try std.testing.expectEqual(@as(i32, 9000), frame.resolution_entry.age_in_ms);
+}
+
+test "decode: data payload respects frame_length not outer buffer length" {
+    var buf align(8) = [_]u8{0} ** 96;
+    const payload = "abc";
+    const total_len = DataHeader.LENGTH + payload.len;
+    std.mem.writeInt(i32, buf[0..4], @as(i32, @intCast(total_len)), .little);
+    buf[4] = VERSION;
+    std.mem.writeInt(u16, buf[6..8], @intFromEnum(FrameType.data), .little);
+    @memcpy(buf[DataHeader.LENGTH..][0..payload.len], payload);
+    @memcpy(buf[DataHeader.LENGTH + payload.len ..][0..5], "zzzzz");
+
+    const frame = try decode(&buf);
+    try std.testing.expectEqual(FrameType.data, std.meta.activeTag(frame));
+    try std.testing.expectEqualSlices(u8, payload, frame.data.payload);
 }
 
 test "decode: rejects truncated DATA frame (frame_length < DataHeader.LENGTH)" {

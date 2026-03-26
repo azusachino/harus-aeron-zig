@@ -8,3 +8,4 @@
 {"task": 8, "name": "CI Workflows", "steps": ["Create ci.yml", "Create interop.yml"], "status": "pending"}
 {"task": 9, "name": "CI Infrastructure", "steps": ["Create docker-compose.ci.yml", "Create Dockerfiles"], "status": "pending"}
 {"task": 10, "name": "Final Verification", "steps": ["make check", "verify upstream_map", "verify CI artifacts"], "status": "pending"}
+{"task": 11, "name": "Protocol Spec-Locking", "steps": ["Add spec-locked frame byte-layout tests", "Add spec-locked CnC metadata layout tests", "Add spec-locked Agrona broadcast layout tests", "Add spec-locked ring buffer record-layout tests"], "status": "completed"}

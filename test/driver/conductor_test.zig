@@ -1,5 +1,5 @@
 // Upstream reference: aeron-driver/src/test/java/io/aeron/driver/DriverConductorTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: add/remove publication, add/remove subscription, IPC command dispatch
 
 const std = @import("std");

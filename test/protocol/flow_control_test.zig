@@ -1,5 +1,5 @@
 // Upstream reference: aeron-driver/src/test/java/io/aeron/driver/ReceiverWindowTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: initial window equals term_buffer_length (or a fraction thereof), window does not exceed max
 
 const std = @import("std");

@@ -235,8 +235,8 @@ green on unsolved stubs. Chapters above N are excluded from the test run.
 ### Zig References
 | Resource | URL |
 |----------|-----|
-| Zig 0.15 std docs | https://ziglang.org/documentation/0.15.0/ |
-| Zig stdlib source | https://github.com/ziglang/zig/tree/0.15.0/lib/std |
+| Zig 0.15.2 std docs | https://ziglang.org/documentation/0.15.2/ |
+| Zig stdlib source | https://codeberg.org/ziglang/zig/src/tag/0.15.2/lib/std |
 | Zig atomics | `std.atomic` — `@atomicLoad`, `@atomicStore`, `@cmpxchgStrong` |
 
 ### Course Design Inspiration

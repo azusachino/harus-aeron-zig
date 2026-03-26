@@ -119,5 +119,5 @@ make examples         # build and run example applications
 - **Protocol**: `aeron-driver/src/main/c/protocol/aeron_udp_protocol.h`
 
 ### Zig
-- **Docs**: https://ziglang.org/documentation/0.15.0/
-- **Source**: https://github.com/ziglang/zig/tree/0.15.0/lib/std
+- **Docs**: https://ziglang.org/documentation/0.15.2/
+- **Source**: https://codeberg.org/ziglang/zig/src/tag/0.15.2/lib/std

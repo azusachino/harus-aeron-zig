@@ -91,7 +91,7 @@ pub const MediaDriver = struct {
             .error_log_buffer_length = 1024 * 1024,
             .client_liveness_timeout_ns = ctx_.client_liveness_timeout_ns,
             .start_timestamp_ms = std.time.milliTimestamp(),
-            .driver_pid = std.os.linux.getpid(),
+            .driver_pid = @as(i64, @intCast(std.c.getpid())),
         };
 
         self.cnc = try cnc.CncFile.create(allocator, cnc_path, cnc_cfg);

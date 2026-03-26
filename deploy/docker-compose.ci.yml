@@ -20,7 +20,7 @@ services:
       context: .
       dockerfile: Dockerfile.java-aeron
       args:
-        AERON_VERSION: "${AERON_VERSION:-1.46.7}"
+        AERON_VERSION: "${AERON_VERSION:-1.50.2}"
     networks: [aeron]
     volumes:
       - aeron_shm:/dev/shm/aeron

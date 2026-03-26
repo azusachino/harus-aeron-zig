@@ -1,5 +1,5 @@
 // Upstream reference: aeron-client/src/test/java/io/aeron/ChannelUriTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: parse aeron:udp URI, reject malformed, extract media, endpoint
 
 const std = @import("std");

@@ -28,6 +28,10 @@ Internal living doc. Always read at session start. Update when architecture or c
 - Enter dev shell: `nix develop`
 - One-off command: `nix develop --command <cmd>` (or `make <target>` — handles this automatically)
 - Never install tools outside the flake — add to `devShells.default.packages` in `flake.nix`
+- `make setup-upstream-aeron` creates/refreshes a shallow clone of the official Aeron upstream in `vendor/aeron`
+- `make setup-upstream-zig` creates/refreshes a shallow clone of Zig `0.15.2` in `vendor/zig`
+- Prefer `vendor/aeron` as the first source of truth for upstream protocol/spec checks when it exists
+- Prefer `vendor/zig` as the first source of truth for Zig 0.15.2 API/source checks when it exists
 
 ## Tutorial Layer
 
@@ -54,6 +58,14 @@ Two parallel code trees — agents must maintain both:
 ## Project Context
 
 - Wire protocol reference: https://github.com/aeron-io/aeron (C++ driver, Java client)
+- Current upstream pin for interop/docs/tests: Aeron `1.50.2`
+- Local upstream source checkout should come from `make setup-upstream-aeron` and defaults to `release/1.50.x`
+- If `vendor/aeron` is missing or stale, refresh it before using secondary local docs or network lookups
+- Local Zig upstream source checkout should come from `make setup-upstream-zig` and defaults to tag `0.15.2`
+- If Zig API behavior is unclear, check `vendor/zig` before guessing from memory
+- For Agrona shared-memory IPC parity, prefer the vendored C client sources when the Java Agrona sources are not present:
+  `vendor/aeron/aeron-client/src/main/c/concurrent/aeron_broadcast_{descriptor,transmitter,receiver}.*`
+  and `vendor/aeron/aeron-client/src/test/c/concurrent/aeron_broadcast_*_test.cpp`
 - Key C file for UDP protocol: `aeron-driver/src/main/c/protocol/aeron_udp_protocol.h`
 - Key Java file for log buffer: `aeron-client/src/main/java/io/aeron/logbuffer/LogBufferDescriptor.java`
 - Term buffer: 3 partitions, each a power-of-2 size (default 16MB), memory-mapped
