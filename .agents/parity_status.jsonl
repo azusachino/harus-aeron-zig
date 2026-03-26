@@ -2,4 +2,4 @@
 {"layer":"ipc","completeness_pct":92,"gaps":["multi-destination","advanced-keepalive"],"reference":"vendor/aeron/aeron-client/src/main/c/concurrent/","updated":"2026-03-26"}
 {"layer":"archive","completeness_pct":100,"gaps":[],"reference":"aeron-archive/","updated":"2026-03-25"}
 {"layer":"cluster","completeness_pct":90,"gaps":["snapshot-coordination","member-discovery"],"reference":"aeron-cluster/codecs/","updated":"2026-03-25"}
-{"layer":"uri","completeness_pct":95,"gaps":["media-type-extensions"],"reference":"ChannelUri.java","updated":"2026-03-25"}
+{"layer":"uri","completeness_pct":97,"gaps":["destination substitution helpers","full builder-format round-trip edge cases"],"reference":"vendor/aeron/aeron-client/src/main/java/io/aeron/ChannelUri.java","updated":"2026-03-26"}

@@ -37,6 +37,75 @@ pub const AeronUri = struct {
         InvalidParam,
     };
 
+    fn canonicalKey(key: []const u8) []const u8 {
+        if (std.mem.eql(u8, key, "so-sndbuf")) return "socket-sndbuf";
+        if (std.mem.eql(u8, key, "so-rcvbuf")) return "socket-rcvbuf";
+        if (std.mem.eql(u8, key, "rcv-wnd")) return "receiver-window";
+        return key;
+    }
+
+    fn parseSize(comptime T: type, value: []const u8) !T {
+        if (value.len == 0) return error.InvalidParam;
+
+        var multiplier: u64 = 1;
+        var digits = value;
+        const suffix = value[value.len - 1];
+        switch (suffix) {
+            'k', 'K' => {
+                multiplier = 1024;
+                digits = value[0 .. value.len - 1];
+            },
+            'm', 'M' => {
+                multiplier = 1024 * 1024;
+                digits = value[0 .. value.len - 1];
+            },
+            'g', 'G' => {
+                multiplier = 1024 * 1024 * 1024;
+                digits = value[0 .. value.len - 1];
+            },
+            else => {},
+        }
+
+        if (digits.len == 0) return error.InvalidParam;
+        const base = std.fmt.parseInt(u64, digits, 10) catch return error.InvalidParam;
+        const scaled = std.math.mul(u64, base, multiplier) catch return error.InvalidParam;
+        return std.math.cast(T, scaled) orelse return error.InvalidParam;
+    }
+
+    fn parseDurationNs(value: []const u8) !u64 {
+        if (value.len < 2) return error.InvalidParam;
+
+        const suffix2 = if (value.len >= 2) value[value.len - 2 ..] else "";
+        if (std.mem.eql(u8, suffix2, "ns")) {
+            const base = std.fmt.parseInt(u64, value[0 .. value.len - 2], 10) catch return error.InvalidParam;
+            return base;
+        }
+        if (std.mem.eql(u8, suffix2, "us")) {
+            const base = std.fmt.parseInt(u64, value[0 .. value.len - 2], 10) catch return error.InvalidParam;
+            return std.math.mul(u64, base, 1_000) catch return error.InvalidParam;
+        }
+        if (std.mem.eql(u8, suffix2, "ms")) {
+            const base = std.fmt.parseInt(u64, value[0 .. value.len - 2], 10) catch return error.InvalidParam;
+            return std.math.mul(u64, base, 1_000_000) catch return error.InvalidParam;
+        }
+        if (value.len >= 1 and value[value.len - 1] == 's') {
+            const base = std.fmt.parseInt(u64, value[0 .. value.len - 1], 10) catch return error.InvalidParam;
+            return std.math.mul(u64, base, 1_000_000_000) catch return error.InvalidParam;
+        }
+
+        return std.fmt.parseInt(u64, value, 10) catch return error.InvalidParam;
+    }
+
+    fn validateSessionId(value: []const u8) ParseError!void {
+        if (std.mem.startsWith(u8, value, "tag:")) {
+            if (value["tag:".len..].len == 0) return ParseError.InvalidParam;
+            _ = std.fmt.parseInt(i64, value["tag:".len..], 10) catch return ParseError.InvalidParam;
+            return;
+        }
+
+        _ = std.fmt.parseInt(i32, value, 10) catch return ParseError.InvalidParam;
+    }
+
     // LESSON(udp-transport): String parsing using std.mem.tokenizeScalar and manual ownership transfer. See docs/tutorial/02-data-path/03-udp-transport.md
     pub fn parse(allocator: std.mem.Allocator, uri_str: []const u8) (ParseError || std.mem.Allocator.Error)!AeronUri {
         var prefix: ?Prefix = null;
@@ -108,9 +177,10 @@ pub const AeronUri = struct {
                 const key = kv_it.next() orelse return ParseError.InvalidParam;
                 const value = kv_it.rest();
                 if (key.len == 0 or value.len == 0) return ParseError.InvalidParam;
-                try validateKnownParam(key, value);
+                const normalized_key = canonicalKey(key);
+                try validateKnownParam(normalized_key, value);
 
-                const owned_key = try allocator.dupe(u8, key);
+                const owned_key = try allocator.dupe(u8, normalized_key);
                 errdefer allocator.free(owned_key);
                 const owned_value = try allocator.dupe(u8, value);
                 errdefer allocator.free(owned_value);
@@ -169,7 +239,7 @@ pub const AeronUri = struct {
 
     pub fn mtu(self: *const AeronUri) ?usize {
         const val = self.params.get("mtu") orelse return null;
-        return std.fmt.parseInt(usize, val, 10) catch null;
+        return parseSize(usize, val) catch null;
     }
 
     pub fn ttl(self: *const AeronUri) ?u8 {
@@ -179,7 +249,7 @@ pub const AeronUri = struct {
 
     pub fn termLength(self: *const AeronUri) ?u32 {
         const val = self.params.get("term-length") orelse return null;
-        return std.fmt.parseInt(u32, val, 10) catch null;
+        return parseSize(u32, val) catch null;
     }
 
     pub fn initialTermId(self: *const AeronUri) ?i32 {
@@ -189,6 +259,7 @@ pub const AeronUri = struct {
 
     pub fn sessionId(self: *const AeronUri) ?i32 {
         const val = self.params.get("session-id") orelse return null;
+        if (std.mem.startsWith(u8, val, "tag:")) return null;
         return std.fmt.parseInt(i32, val, 10) catch null;
     }
 
@@ -205,7 +276,7 @@ pub const AeronUri = struct {
     /// Linger time in milliseconds before a publication is fully closed.
     pub fn linger(self: *const AeronUri) ?u32 {
         const val = self.params.get("linger") orelse return null;
-        return std.fmt.parseInt(u32, val, 10) catch null;
+        return std.math.cast(u32, parseDurationNs(val) catch return null) orelse null;
     }
 
     /// Flow-control strategy string (e.g. "min", "max", "tagged", "pref-tagged").
@@ -216,19 +287,19 @@ pub const AeronUri = struct {
     /// SO_SNDBUF hint in bytes for the sending socket.
     pub fn socketSndbuf(self: *const AeronUri) ?usize {
         const val = self.params.get("socket-sndbuf") orelse return null;
-        return std.fmt.parseInt(usize, val, 10) catch null;
+        return parseSize(usize, val) catch null;
     }
 
     /// SO_RCVBUF hint in bytes for the receiving socket.
     pub fn socketRcvbuf(self: *const AeronUri) ?usize {
         const val = self.params.get("socket-rcvbuf") orelse return null;
-        return std.fmt.parseInt(usize, val, 10) catch null;
+        return parseSize(usize, val) catch null;
     }
 
     /// Receiver window size override in bytes.
     pub fn receiverWindow(self: *const AeronUri) ?i64 {
         const val = self.params.get("receiver-window") orelse return null;
-        return std.fmt.parseInt(i64, val, 10) catch null;
+        return parseSize(i64, val) catch null;
     }
 
     /// Informational alias string for the channel (not used for routing).
@@ -259,7 +330,7 @@ pub const AeronUri = struct {
         }
 
         if (std.mem.eql(u8, key, "mtu")) {
-            _ = std.fmt.parseInt(usize, value, 10) catch return ParseError.InvalidParam;
+            _ = parseSize(usize, value) catch return ParseError.InvalidParam;
             return;
         }
 
@@ -269,7 +340,7 @@ pub const AeronUri = struct {
         }
 
         if (std.mem.eql(u8, key, "term-length")) {
-            const v = std.fmt.parseInt(u32, value, 10) catch return ParseError.InvalidParam;
+            const v = parseSize(u32, value) catch return ParseError.InvalidParam;
             // Must be a power of two in [64KiB, 1GiB] — same rule as upstream driver.
             const TERM_MIN: u32 = 64 * 1024;
             const TERM_MAX: u32 = 1024 * 1024 * 1024;
@@ -277,23 +348,28 @@ pub const AeronUri = struct {
             return;
         }
 
-        if (std.mem.eql(u8, key, "initial-term-id") or std.mem.eql(u8, key, "session-id")) {
+        if (std.mem.eql(u8, key, "initial-term-id")) {
             _ = std.fmt.parseInt(i32, value, 10) catch return ParseError.InvalidParam;
             return;
         }
 
+        if (std.mem.eql(u8, key, "session-id")) {
+            try validateSessionId(value);
+            return;
+        }
+
         if (std.mem.eql(u8, key, "linger")) {
-            _ = std.fmt.parseInt(u32, value, 10) catch return ParseError.InvalidParam;
+            _ = parseDurationNs(value) catch return ParseError.InvalidParam;
             return;
         }
 
         if (std.mem.eql(u8, key, "socket-sndbuf") or std.mem.eql(u8, key, "socket-rcvbuf")) {
-            _ = std.fmt.parseInt(usize, value, 10) catch return ParseError.InvalidParam;
+            _ = parseSize(usize, value) catch return ParseError.InvalidParam;
             return;
         }
 
         if (std.mem.eql(u8, key, "receiver-window")) {
-            _ = std.fmt.parseInt(i64, value, 10) catch return ParseError.InvalidParam;
+            _ = parseSize(i64, value) catch return ParseError.InvalidParam;
             return;
         }
 
@@ -377,6 +453,15 @@ test "AeronUri: parse term-length and session-id" {
     try std.testing.expectEqual(@as(i32, -7), uri.sessionId().?);
 }
 
+test "AeronUri: parse tagged session-id without numeric accessor" {
+    const allocator = std.testing.allocator;
+    var uri = try AeronUri.parse(allocator, "aeron:ipc?session-id=tag:123456");
+    defer uri.deinit();
+
+    try std.testing.expectEqualStrings("tag:123456", uri.get("session-id").?);
+    try std.testing.expect(uri.sessionId() == null);
+}
+
 test "AeronUri: parse reliable=false and sparse=true" {
     const allocator = std.testing.allocator;
     var uri = try AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|reliable=false|sparse=true");
@@ -450,6 +535,21 @@ test "AeronUri: mtu accessor" {
     try std.testing.expectEqual(@as(usize, 8192), uri.mtu().?);
 }
 
+test "AeronUri: parse size suffixes and aliases" {
+    const allocator = std.testing.allocator;
+    var uri = try AeronUri.parse(
+        allocator,
+        "aeron:udp?endpoint=localhost:5050|mtu=8k|term-length=4m|so-sndbuf=64k|so-rcvbuf=32k|rcv-wnd=1k",
+    );
+    defer uri.deinit();
+
+    try std.testing.expectEqual(@as(usize, 8 * 1024), uri.mtu().?);
+    try std.testing.expectEqual(@as(u32, 4 * 1024 * 1024), uri.termLength().?);
+    try std.testing.expectEqual(@as(usize, 64 * 1024), uri.socketSndbuf().?);
+    try std.testing.expectEqual(@as(usize, 32 * 1024), uri.socketRcvbuf().?);
+    try std.testing.expectEqual(@as(i64, 1024), uri.receiverWindow().?);
+}
+
 test "AeronUri: reject invalid control-mode" {
     const allocator = std.testing.allocator;
     const result = AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|control-mode=bogus");
@@ -473,6 +573,13 @@ test "AeronUri: linger accessor" {
     var uri = try AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|linger=5000");
     defer uri.deinit();
     try std.testing.expectEqual(@as(u32, 5000), uri.linger().?);
+}
+
+test "AeronUri: linger duration units" {
+    const allocator = std.testing.allocator;
+    var uri = try AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|linger=50ms");
+    defer uri.deinit();
+    try std.testing.expectEqual(@as(u32, 50_000_000), uri.linger().?);
 }
 
 test "AeronUri: flowControl accessor" {
@@ -531,6 +638,11 @@ test "AeronUri: term-length must be power of two" {
 test "AeronUri: reject invalid linger value" {
     const allocator = std.testing.allocator;
     try std.testing.expectError(error.InvalidParam, AeronUri.parse(allocator, "aeron:udp?endpoint=localhost:40123|linger=notanumber"));
+}
+
+test "AeronUri: reject invalid tagged session-id" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidParam, AeronUri.parse(allocator, "aeron:ipc?session-id=tag:abc"));
 }
 
 test "AeronUri: reject invalid socket-sndbuf value" {
