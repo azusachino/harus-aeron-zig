@@ -30,3 +30,11 @@ test "ChannelUri: parse aeron:ipc" {
     defer parsed.deinit();
     try std.testing.expectEqual(aeron.transport.AeronUri.MediaType.ipc, parsed.media_type);
 }
+
+test "ChannelUri: parse aeron-spy prefix" {
+    const uri = "aeron-spy:aeron:ipc";
+    var parsed = try aeron.transport.AeronUri.parse(std.testing.allocator, uri);
+    defer parsed.deinit();
+    try std.testing.expect(parsed.isSpy());
+    try std.testing.expectEqual(aeron.transport.AeronUri.MediaType.ipc, parsed.media_type);
+}

@@ -2,6 +2,7 @@ const std = @import("std");
 
 // LESSON(udp-transport): Aeron URIs define the channel medium and parameters (e.g. aeron:udp?endpoint=...). See docs/tutorial/02-data-path/03-udp-transport.md
 pub const AeronUri = struct {
+    prefix: ?Prefix,
     media_type: MediaType,
     params: std.StringHashMap([]const u8),
     allocator: std.mem.Allocator,
@@ -11,6 +12,10 @@ pub const AeronUri = struct {
     pub const MediaType = enum {
         udp,
         ipc,
+    };
+
+    pub const Prefix = enum {
+        spy,
     };
 
     pub const ControlMode = enum {
@@ -34,11 +39,19 @@ pub const AeronUri = struct {
 
     // LESSON(udp-transport): String parsing using std.mem.tokenizeScalar and manual ownership transfer. See docs/tutorial/02-data-path/03-udp-transport.md
     pub fn parse(allocator: std.mem.Allocator, uri_str: []const u8) (ParseError || std.mem.Allocator.Error)!AeronUri {
-        if (!std.mem.startsWith(u8, uri_str, "aeron:")) {
+        var prefix: ?Prefix = null;
+        var trimmed = uri_str;
+
+        if (std.mem.startsWith(u8, trimmed, "aeron-spy:")) {
+            prefix = .spy;
+            trimmed = trimmed["aeron-spy:".len..];
+        }
+
+        if (!std.mem.startsWith(u8, trimmed, "aeron:")) {
             return ParseError.InvalidUri;
         }
 
-        const after_prefix = uri_str["aeron:".len..];
+        const after_prefix = trimmed["aeron:".len..];
 
         // Determine media type and extract query part
         var media_type: MediaType = undefined;
@@ -113,6 +126,7 @@ pub const AeronUri = struct {
         }
 
         return AeronUri{
+            .prefix = prefix,
             .media_type = media_type,
             .params = params,
             .allocator = allocator,
@@ -134,6 +148,10 @@ pub const AeronUri = struct {
 
     pub fn endpoint(self: *const AeronUri) ?[]const u8 {
         return self.params.get("endpoint");
+    }
+
+    pub fn isSpy(self: *const AeronUri) bool {
+        return self.prefix == .spy;
     }
 
     pub fn controlEndpoint(self: *const AeronUri) ?[]const u8 {
@@ -301,6 +319,15 @@ test "AeronUri: parse IPC" {
 
     try std.testing.expectEqual(AeronUri.MediaType.ipc, uri.media_type);
     try std.testing.expect(uri.endpoint() == null);
+}
+
+test "AeronUri: parse spy prefix" {
+    const allocator = std.testing.allocator;
+    var uri = try AeronUri.parse(allocator, "aeron-spy:aeron:ipc");
+    defer uri.deinit();
+
+    try std.testing.expect(uri.isSpy());
+    try std.testing.expectEqual(AeronUri.MediaType.ipc, uri.media_type);
 }
 
 test "AeronUri: parse IPC with params" {

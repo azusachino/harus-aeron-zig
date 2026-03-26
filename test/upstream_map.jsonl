@@ -55,6 +55,30 @@
   "status": "done"
 }
 {
+  "layer": "protocol",
+  "our_file": "src/protocol/frame.zig",
+  "upstream_class": "ErrorFlyweightTest",
+  "upstream_path": "aeron-client/src/test/java/io/aeron/protocol/ErrorFlyweightTest.java + aeron-client/src/main/java/io/aeron/protocol/ErrorFlyweight.java",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "protocol",
+  "our_file": "src/protocol/frame.zig",
+  "upstream_class": "ResponseSetupFlyweight",
+  "upstream_path": "aeron-client/src/main/java/io/aeron/protocol/ResponseSetupFlyweight.java + aeron-client/src/main/c/protocol/aeron_udp_protocol.h",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "protocol",
+  "our_file": "src/protocol/frame.zig",
+  "upstream_class": "ResolutionEntryFlyweight",
+  "upstream_path": "aeron-client/src/main/java/io/aeron/protocol/ResolutionEntryFlyweight.java + aeron-client/src/main/c/protocol/aeron_udp_protocol.h",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
   "layer": "ipc",
   "our_file": "src/driver/cnc.zig",
   "upstream_class": "CncFileDescriptorTest",

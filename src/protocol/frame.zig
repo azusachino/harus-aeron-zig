@@ -10,9 +10,11 @@ pub const FrameType = enum(u16) {
     data = 0x01,
     nak = 0x02,
     status = 0x03,
+    err = 0x04,
     setup = 0x05,
     rtt_measurement = 0x06,
-    resolution_entry = 0x0E,
+    resolution_entry = 0x07,
+    response_setup = 0x0B,
 };
 
 /// Base frame header — 8 bytes, present in every frame
@@ -60,6 +62,23 @@ pub const SetupHeader = extern struct {
     ttl: i32,
 
     pub const LENGTH = @sizeOf(SetupHeader);
+};
+
+/// Error frame fixed header — 40 bytes total before variable error string bytes
+pub const ErrorHeader = extern struct {
+    frame_length: i32,
+    version: u8,
+    flags: u8,
+    type: u16,
+    session_id: i32,
+    stream_id: i32,
+    receiver_id: i64 align(4),
+    group_tag: i64 align(4),
+    error_code: i32,
+    error_message_length: i32,
+
+    pub const LENGTH = @sizeOf(ErrorHeader);
+    pub const HAS_GROUP_ID_FLAG: u8 = 0x08;
 };
 
 /// Status message (SM) frame — 36 bytes total
@@ -111,6 +130,19 @@ pub const RttMeasurement = extern struct {
 
     pub const LENGTH = @sizeOf(RttMeasurement);
     pub const REPLY_FLAG: u8 = 0x80;
+};
+
+/// Response setup frame — 20 bytes total
+pub const ResponseSetupHeader = extern struct {
+    frame_length: i32,
+    version: u8,
+    flags: u8,
+    type: u16,
+    session_id: i32,
+    stream_id: i32,
+    response_session_id: i32,
+
+    pub const LENGTH = @sizeOf(ResponseSetupHeader);
 };
 
 /// Resolution Entry — variable length, header portion only
@@ -168,9 +200,14 @@ pub const DecodedFrame = union(FrameType) {
     },
     nak: *const NakHeader,
     status: *const StatusMessage,
+    err: struct {
+        header: *const ErrorHeader,
+        error_message: []const u8,
+    },
     setup: *const SetupHeader,
     rtt_measurement: *const RttMeasurement,
     resolution_entry: *const ResolutionEntry,
+    response_setup: *const ResponseSetupHeader,
 };
 
 /// Decode the first Aeron frame from `buf`.
@@ -212,6 +249,18 @@ pub fn decode(buf: []const u8) DecodeError!DecodedFrame {
             if (@as(usize, @intCast(frame_len)) < StatusMessage.LENGTH) return DecodeError.BufferTooShort;
             return .{ .status = @as(*const StatusMessage, @ptrCast(@alignCast(buf.ptr))) };
         },
+        .err => {
+            if (@as(usize, @intCast(frame_len)) < ErrorHeader.LENGTH) return DecodeError.BufferTooShort;
+            const err_hdr = @as(*const ErrorHeader, @ptrCast(@alignCast(buf.ptr)));
+            const message_end = ErrorHeader.LENGTH + @as(usize, @intCast(err_hdr.error_message_length));
+            if (message_end > @as(usize, @intCast(frame_len))) return DecodeError.BufferTooShort;
+            return .{
+                .err = .{
+                    .header = err_hdr,
+                    .error_message = buf[ErrorHeader.LENGTH..message_end],
+                },
+            };
+        },
         .setup => {
             if (@as(usize, @intCast(frame_len)) < SetupHeader.LENGTH) return DecodeError.BufferTooShort;
             return .{ .setup = @as(*const SetupHeader, @ptrCast(@alignCast(buf.ptr))) };
@@ -224,6 +273,10 @@ pub fn decode(buf: []const u8) DecodeError!DecodedFrame {
             if (@as(usize, @intCast(frame_len)) < ResolutionEntry.HEADER_LENGTH) return DecodeError.BufferTooShort;
             return .{ .resolution_entry = @as(*const ResolutionEntry, @ptrCast(@alignCast(buf.ptr))) };
         },
+        .response_setup => {
+            if (@as(usize, @intCast(frame_len)) < ResponseSetupHeader.LENGTH) return DecodeError.BufferTooShort;
+            return .{ .response_setup = @as(*const ResponseSetupHeader, @ptrCast(@alignCast(buf.ptr))) };
+        },
     }
 }
 
@@ -231,15 +284,24 @@ comptime {
     std.debug.assert(@sizeOf(DataHeader) == 32);
     std.debug.assert(@sizeOf(SetupHeader) == 40);
     std.debug.assert(@sizeOf(StatusMessage) == 36);
+    std.debug.assert(@sizeOf(ErrorHeader) == 40);
     std.debug.assert(@sizeOf(NakHeader) == 28);
     std.debug.assert(@sizeOf(RttMeasurement) == 40);
+    std.debug.assert(@sizeOf(ResponseSetupHeader) == 20);
     std.debug.assert(@offsetOf(DataHeader, "reserved_value") == 24);
     std.debug.assert(@offsetOf(StatusMessage, "receiver_id") == 28);
+    std.debug.assert(@offsetOf(ErrorHeader, "receiver_id") == 16);
+    std.debug.assert(@offsetOf(ErrorHeader, "group_tag") == 24);
+    std.debug.assert(@offsetOf(ErrorHeader, "error_code") == 32);
+    std.debug.assert(@offsetOf(ErrorHeader, "error_message_length") == 36);
     std.debug.assert(@offsetOf(RttMeasurement, "session_id") == 8);
     std.debug.assert(@offsetOf(RttMeasurement, "stream_id") == 12);
     std.debug.assert(@offsetOf(RttMeasurement, "echo_timestamp") == 16);
     std.debug.assert(@offsetOf(RttMeasurement, "reception_delta") == 24);
     std.debug.assert(@offsetOf(RttMeasurement, "receiver_id") == 32);
+    std.debug.assert(@offsetOf(ResponseSetupHeader, "session_id") == 8);
+    std.debug.assert(@offsetOf(ResponseSetupHeader, "stream_id") == 12);
+    std.debug.assert(@offsetOf(ResponseSetupHeader, "response_session_id") == 16);
 }
 
 test "RttMeasurement is exactly 40 bytes" {
@@ -251,14 +313,20 @@ test "frame type numeric values match aeron udp protocol" {
     try std.testing.expectEqual(@as(u16, 0x01), @intFromEnum(FrameType.data));
     try std.testing.expectEqual(@as(u16, 0x02), @intFromEnum(FrameType.nak));
     try std.testing.expectEqual(@as(u16, 0x03), @intFromEnum(FrameType.status));
+    try std.testing.expectEqual(@as(u16, 0x04), @intFromEnum(FrameType.err));
     try std.testing.expectEqual(@as(u16, 0x05), @intFromEnum(FrameType.setup));
     try std.testing.expectEqual(@as(u16, 0x06), @intFromEnum(FrameType.rtt_measurement));
-    try std.testing.expectEqual(@as(u16, 0x0E), @intFromEnum(FrameType.resolution_entry));
+    try std.testing.expectEqual(@as(u16, 0x07), @intFromEnum(FrameType.resolution_entry));
+    try std.testing.expectEqual(@as(u16, 0x0B), @intFromEnum(FrameType.response_setup));
 }
 
 test "wire field offsets match aeron udp protocol" {
     try std.testing.expectEqual(@as(usize, 24), @offsetOf(DataHeader, "reserved_value"));
     try std.testing.expectEqual(@as(usize, 28), @offsetOf(StatusMessage, "receiver_id"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(ErrorHeader, "receiver_id"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(ErrorHeader, "group_tag"));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(ErrorHeader, "error_code"));
+    try std.testing.expectEqual(@as(usize, 36), @offsetOf(ErrorHeader, "error_message_length"));
     try std.testing.expectEqual(@as(usize, 8), @offsetOf(NakHeader, "session_id"));
     try std.testing.expectEqual(@as(usize, 12), @offsetOf(NakHeader, "stream_id"));
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(NakHeader, "term_id"));
@@ -269,14 +337,19 @@ test "wire field offsets match aeron udp protocol" {
     try std.testing.expectEqual(@as(usize, 16), @offsetOf(RttMeasurement, "echo_timestamp"));
     try std.testing.expectEqual(@as(usize, 24), @offsetOf(RttMeasurement, "reception_delta"));
     try std.testing.expectEqual(@as(usize, 32), @offsetOf(RttMeasurement, "receiver_id"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(ResponseSetupHeader, "session_id"));
+    try std.testing.expectEqual(@as(usize, 12), @offsetOf(ResponseSetupHeader, "stream_id"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(ResponseSetupHeader, "response_session_id"));
 }
 
 test "frame sizes match spec" {
     try std.testing.expectEqual(32, DataHeader.LENGTH);
     try std.testing.expectEqual(40, SetupHeader.LENGTH);
     try std.testing.expectEqual(36, StatusMessage.LENGTH);
+    try std.testing.expectEqual(40, ErrorHeader.LENGTH);
     try std.testing.expectEqual(28, NakHeader.LENGTH);
     try std.testing.expectEqual(40, RttMeasurement.LENGTH);
+    try std.testing.expectEqual(20, ResponseSetupHeader.LENGTH);
 }
 
 test "alignedLength calculation" {
@@ -418,6 +491,33 @@ test "decode: decodes STATUS frame" {
     try std.testing.expectEqual(@as(i64, 0x0102_0304_0506_0708), frame.status.receiver_id);
 }
 
+test "decode: decodes ERR frame with message" {
+    var buf align(8) = [_]u8{0} ** 128;
+    const msg = "channel failure";
+    const total_len = ErrorHeader.LENGTH + msg.len;
+    std.mem.writeInt(i32, buf[0..4], @as(i32, @intCast(total_len)), .little);
+    buf[4] = VERSION;
+    buf[5] = ErrorHeader.HAS_GROUP_ID_FLAG;
+    std.mem.writeInt(u16, buf[6..8], @intFromEnum(FrameType.err), .little);
+    std.mem.writeInt(i32, buf[8..12], 10, .little);
+    std.mem.writeInt(i32, buf[12..16], 20, .little);
+    std.mem.writeInt(i64, buf[16..24], 30, .little);
+    std.mem.writeInt(i64, buf[24..32], 40, .little);
+    std.mem.writeInt(i32, buf[32..36], 50, .little);
+    std.mem.writeInt(i32, buf[36..40], @as(i32, @intCast(msg.len)), .little);
+    @memcpy(buf[ErrorHeader.LENGTH..][0..msg.len], msg);
+
+    const frame = try decode(&buf);
+    try std.testing.expectEqual(FrameType.err, std.meta.activeTag(frame));
+    try std.testing.expectEqual(@as(i32, 10), frame.err.header.session_id);
+    try std.testing.expectEqual(@as(i32, 20), frame.err.header.stream_id);
+    try std.testing.expectEqual(@as(i64, 30), frame.err.header.receiver_id);
+    try std.testing.expectEqual(@as(i64, 40), frame.err.header.group_tag);
+    try std.testing.expectEqual(@as(i32, 50), frame.err.header.error_code);
+    try std.testing.expectEqual(@as(i32, @intCast(msg.len)), frame.err.header.error_message_length);
+    try std.testing.expectEqualSlices(u8, msg, frame.err.error_message);
+}
+
 test "decode: decodes NAK frame" {
     var buf align(8) = [_]u8{0} ** 64;
     std.mem.writeInt(i32, buf[0..4], @as(i32, NakHeader.LENGTH), .little);
@@ -474,6 +574,22 @@ test "decode: decodes resolution entry header" {
     try std.testing.expectEqual(@as(u8, 16), frame.resolution_entry.address_length);
     try std.testing.expectEqual(@as(u16, 40123), frame.resolution_entry.port);
     try std.testing.expectEqual(@as(i32, 9000), frame.resolution_entry.age_in_ms);
+}
+
+test "decode: decodes response setup frame" {
+    var buf align(8) = [_]u8{0} ** 32;
+    std.mem.writeInt(i32, buf[0..4], @as(i32, ResponseSetupHeader.LENGTH), .little);
+    buf[4] = VERSION;
+    std.mem.writeInt(u16, buf[6..8], @intFromEnum(FrameType.response_setup), .little);
+    std.mem.writeInt(i32, buf[8..12], 71, .little);
+    std.mem.writeInt(i32, buf[12..16], 72, .little);
+    std.mem.writeInt(i32, buf[16..20], 73, .little);
+
+    const frame = try decode(&buf);
+    try std.testing.expectEqual(FrameType.response_setup, std.meta.activeTag(frame));
+    try std.testing.expectEqual(@as(i32, 71), frame.response_setup.session_id);
+    try std.testing.expectEqual(@as(i32, 72), frame.response_setup.stream_id);
+    try std.testing.expectEqual(@as(i32, 73), frame.response_setup.response_session_id);
 }
 
 test "decode: data payload respects frame_length not outer buffer length" {
