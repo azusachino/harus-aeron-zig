@@ -1,12 +1,15 @@
-FROM eclipse-temurin:21-jre-alpine AS fetcher
+FROM eclipse-temurin:21-jdk-alpine AS builder
 ARG AERON_VERSION=1.50.2
 RUN apk add --no-cache curl && \
     curl -fsSL \
       "https://repo1.maven.org/maven2/io/aeron/aeron-all/${AERON_VERSION}/aeron-all-${AERON_VERSION}.jar" \
       -o /aeron-all.jar
+COPY InteropSmoke.java /src/InteropSmoke.java
+RUN mkdir -p /out && javac -cp /aeron-all.jar -d /out /src/InteropSmoke.java
 
 FROM eclipse-temurin:21-jre-alpine
-COPY --from=fetcher /aeron-all.jar /aeron-all.jar
+COPY --from=builder /aeron-all.jar /aeron-all.jar
+COPY --from=builder /out /interop
 COPY entrypoint-java.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 ENV MSG_COUNT=10

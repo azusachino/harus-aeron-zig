@@ -3,3 +3,5 @@
 {"layer":"archive","completeness_pct":100,"gaps":[],"reference":"aeron-archive/","updated":"2026-03-25"}
 {"layer":"cluster","completeness_pct":90,"gaps":["snapshot-coordination","member-discovery"],"reference":"aeron-cluster/codecs/","updated":"2026-03-25"}
 {"layer":"uri","completeness_pct":98,"gaps":["wildcard endpoint substitution","full builder-format round-trip edge cases"],"reference":"vendor/aeron/aeron-client/src/main/java/io/aeron/ChannelUri.java","updated":"2026-03-26"}
+{"layer":"interop-smoke","completeness_pct":100,"gaps":[],"reference":"deploy/InteropSmoke.java + vendor/aeron/aeron-client/src/main/java/io/aeron/command/SubscriptionMessageFlyweight.java + vendor/aeron/aeron-client/src/main/java/io/aeron/command/SubscriptionReadyFlyweight.java","updated":"2026-03-26"}
+{"layer":"ci-readiness","completeness_pct":70,"gaps":["make check fails integration_test repeated setup/teardown image cleanup leak","make test-scenarios fails NAK frame upstream fixture"],"reference":"test/integration_test.zig + test/protocol/frame_codec_test.zig","updated":"2026-03-26"}

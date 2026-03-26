@@ -259,7 +259,7 @@ make interop-status
 | Target | Description |
 |--------|-------------|
 | `make interop` | Full Docker Compose interop run with 100 messages |
-| `make interop-smoke` | Smoke Docker Compose interop run with 10 messages |
+| `make interop-smoke` | Finite Docker Compose smoke run: Java adds and closes a subscription against the Zig driver |
 | `make interop-status` | Legacy k8s status output; not part of the Compose flow |
 | `make setup-interop` | Set up local helpers used by interop and benchmarks |
 | `make setup-interop-base` | Build/tag the reusable local Zig Nix build-env image used by interop |
@@ -270,14 +270,15 @@ make interop-status
 2. `make setup-interop-base` can prebuild the `build-env` stage from `deploy/Dockerfile` and tag it locally
 3. The Compose file builds the Zig driver image from the repo using that local build-env image and the Java client image from `deploy/Dockerfile.java-aeron`
 4. The Java client waits for `cnc.dat` via shared `/dev/shm/aeron`
-5. The command exits with the Java client container status
+5. `make interop-smoke` runs the finite `deploy/InteropSmoke.java` helper, which exercises `addSubscription` against the Zig driver and exits 0 on success
+6. The command exits with the Java client container status
 
 ### Compose Specs
 
 - Compose file: `deploy/docker-compose.ci.yml`
 - Reusable local Zig build-env image tag: `harus-aeron-zig-build-env:latest`
 - Full suite sets `MSG_COUNT=100`
-- Smoke suite sets `MSG_COUNT=10`
+- Smoke suite uses the finite Java helper and no longer relies on a long-running sample process
 - Override the compose runner if needed: `make interop-smoke COMPOSE=podman-compose`
 
 ### Troubleshooting

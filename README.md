@@ -98,3 +98,4 @@ concept with one Zig concept. Audience: engineers from C/C++/Rust, Go, or Java b
 - Default upstream ref is `0.15.2`, cloned into `vendor/zig`.
 - Interop jars and upstream test/doc references in this repo are pinned to Aeron `1.50.2`.
 - For local interop iteration, warm the reusable Zig Nix build-env image once with `make setup-interop-base`.
+- `make interop-smoke` now uses the finite Java helper in `deploy/InteropSmoke.java` so the smoke target exits cleanly after a successful Java subscription handshake against the Zig driver.

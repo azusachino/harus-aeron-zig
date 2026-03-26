@@ -100,6 +100,7 @@ Two parallel code trees — agents must maintain both:
 - Cluster consensus fidelity: follower catch-up/rejoin, restart/election/commit continuity, session redirect and failover.
 - CnC tooling real: `stat`, `errors`, `loss`, `streams`, `events`, `cluster-tool` backed by actual mmap reads and counters.
 - Interop automated: local Zig↔Java smoke/full runs use `deploy/docker-compose.ci.yml` with `make interop` / `make interop-smoke`; prefer Colima + Docker client on macOS and Podman on Linux.
+- `make interop-smoke` uses the finite Java helper in `deploy/InteropSmoke.java` so the smoke target exits on a successful Java `addSubscription` / close cycle against the Zig driver instead of hanging on an endless sample.
 - **Known parity gaps**: IPC 95% (multi-destination, advanced keepalive), Cluster 90% (snapshot coordination, member discovery), URI 95% (media type extensions). See `.agents/PARITY_AUDIT.md`.
 - Performance baseline established: `src/bench/` (throughput/latency/fanout) + `test/stress/` soak scenarios for reconnect, archive replay, cluster failover.
 - Roadmap for next work lives in `docs/plan.md`; no active stale investigations.

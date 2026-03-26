@@ -102,20 +102,23 @@ test "DriverConductor: handleAddSubscription and handleRemoveSubscription" {
     defer allocator.free(cmd_buf);
     @memset(cmd_buf, 0);
 
-    std.mem.writeInt(i64, cmd_buf[0..8], 20001, .little); // correlation_id
-    std.mem.writeInt(i32, cmd_buf[16..20], 1001, .little); // stream_id
-    std.mem.writeInt(i32, cmd_buf[20..24], @as(i32, @intCast(channel.len)), .little);
-    @memcpy(cmd_buf[24 .. 24 + channel.len], channel);
+    std.mem.writeInt(i64, cmd_buf[0..8], 5, .little); // client_id
+    std.mem.writeInt(i64, cmd_buf[8..16], 20001, .little); // correlation_id
+    std.mem.writeInt(i64, cmd_buf[16..24], -1, .little); // registration correlation id
+    std.mem.writeInt(i32, cmd_buf[24..28], 1001, .little); // stream_id
+    std.mem.writeInt(i32, cmd_buf[28..32], @as(i32, @intCast(channel.len)), .little);
+    @memcpy(cmd_buf[32 .. 32 + channel.len], channel);
 
-    conductor.handleAddSubscription(cmd_buf[0 .. 24 + channel.len]);
+    conductor.handleAddSubscription(cmd_buf[0 .. 32 + channel.len]);
 
     try std.testing.expectEqual(@as(usize, 1), conductor.subscriptions.items.len);
     try std.testing.expectEqual(@as(i32, 1001), conductor.subscriptions.items[0].stream_id);
 
     // 2. Remove subscription
-    var remove_cmd: [16]u8 = undefined;
-    std.mem.writeInt(i64, remove_cmd[0..8], 20002, .little); // correlation_id
-    std.mem.writeInt(i64, remove_cmd[8..16], 20001, .little); // registration_id
+    var remove_cmd: [24]u8 = undefined;
+    std.mem.writeInt(i64, remove_cmd[0..8], 5, .little); // client_id
+    std.mem.writeInt(i64, remove_cmd[8..16], 20002, .little); // correlation_id
+    std.mem.writeInt(i64, remove_cmd[16..24], 20001, .little); // registration_id
 
     conductor.handleRemoveSubscription(&remove_cmd);
     try std.testing.expectEqual(@as(usize, 0), conductor.subscriptions.items.len);

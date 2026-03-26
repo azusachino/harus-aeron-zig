@@ -48,11 +48,12 @@ pub const Aeron = struct {
     to_driver_ring_buffer: ipc.ring_buffer.ManyToOneRingBuffer,
     to_clients_broadcast_receiver: ipc.broadcast.BroadcastReceiver,
     counters_map: ipc.counters.CountersMap,
-    next_correlation_id: std.atomic.Value(i64),
+    client_id: i64,
 
     // Tracking
     publications: std.AutoHashMapUnmanaged(i64, *ExclusivePublication),
     subscriptions: std.AutoHashMapUnmanaged(i64, *Subscription),
+    pending_subscription_streams: std.AutoHashMapUnmanaged(i64, i32),
     embedded_driver: ?*driver.MediaDriver = null,
 
     // LESSON(what-is-aeron): Aeron.init opens the cnc.dat file, extracts the shared to-driver ring buffer and to-clients broadcast receiver. The client writes commands (add_publication, add_subscription) to the ring buffer; the driver writes responses (session_id, stream_id) to the broadcast. All subsequent publications and subscriptions reference log buffers allocated by the driver and discoverable via the shared broadcast. See docs/tutorial/00-orientation/01-what-is-aeron.md
@@ -65,17 +66,20 @@ pub const Aeron = struct {
         const to_clients = file.toClientsBuffer();
         const counters_meta = file.countersMetadataBuffer();
         const counters_values = file.countersValuesBuffer();
+        var to_driver_ring_buffer = ipc.ring_buffer.ManyToOneRingBuffer.init(to_driver);
+        const client_id = to_driver_ring_buffer.nextCorrelationId();
 
         return Aeron{
             .ctx = ctx,
             .allocator = allocator,
             .cnc_file = file,
-            .to_driver_ring_buffer = ipc.ring_buffer.ManyToOneRingBuffer.init(to_driver),
+            .to_driver_ring_buffer = to_driver_ring_buffer,
             .to_clients_broadcast_receiver = ipc.broadcast.BroadcastReceiver.wrap(to_clients),
             .counters_map = ipc.counters.CountersMap.init(counters_meta, counters_values),
-            .next_correlation_id = std.atomic.Value(i64).init(1),
+            .client_id = client_id,
             .publications = .{},
             .subscriptions = .{},
+            .pending_subscription_streams = .{},
         };
     }
 
@@ -99,6 +103,7 @@ pub const Aeron = struct {
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.subscriptions.deinit(self.allocator);
+        self.pending_subscription_streams.deinit(self.allocator);
     }
 
     // LESSON(what-is-zig): doWork is the client's polling loop. It drains all pending messages from the driver's broadcast buffer: RESPONSE_ON_PUBLICATION_READY (allocates ExclusivePublication with log buffer), RESPONSE_ON_SUBSCRIPTION_READY (allocates Subscription), RESPONSE_ON_IMAGE_READY (adds Image to subscription for a new publisher session). Call this in your application's main loop to discover new publications and subscriptions. See docs/tutorial/00-orientation/02-what-is-zig.md
@@ -126,7 +131,9 @@ pub const Aeron = struct {
                 work += 1;
             } else if (msg_type_id == driver.conductor.RESPONSE_ON_SUBSCRIPTION_READY) {
                 const correlation_id = std.mem.readInt(i64, buffer[0..8], .little);
-                const stream_id = std.mem.readInt(i32, buffer[8..12], .little);
+                const stream_id = self.pending_subscription_streams.get(correlation_id) orelse 0;
+                const channel_status_indicator_id = std.mem.readInt(i32, buffer[8..12], .little);
+                _ = channel_status_indicator_id;
 
                 const sub = self.allocator.create(Subscription) catch continue;
                 sub.* = Subscription.init(self.allocator, stream_id, "") catch {
@@ -138,6 +145,7 @@ pub const Aeron = struct {
                     self.allocator.destroy(sub);
                     continue;
                 };
+                _ = self.pending_subscription_streams.remove(correlation_id);
                 work += 1;
             } else if (msg_type_id == driver.conductor.RESPONSE_ON_PUBLICATION_READY) {
                 const correlation_id = std.mem.readInt(i64, buffer[0..8], .little);
@@ -186,31 +194,33 @@ pub const Aeron = struct {
         return 0;
     }
 
-    // LESSON(what-is-aeron): addSubscription encodes a CMD_ADD_SUBSCRIPTION message (correlation_id, stream_id, channel) into the to-driver ring buffer. The driver's Conductor reads this message, allocates a log buffer for this (channel, stream_id) pair, and sends RESPONSE_ON_SUBSCRIPTION_READY back on the broadcast. The correlation_id lets the client match request to response. See docs/tutorial/00-orientation/01-what-is-aeron.md
+    // LESSON(what-is-aeron): addSubscription encodes the upstream SubscriptionMessageFlyweight layout into the to-driver ring buffer: client_id, correlation_id, registration_correlation_id, stream_id, channel_length, then channel bytes. The driver's Conductor reads that payload and sends RESPONSE_ON_SUBSCRIPTION_READY keyed by correlation_id. See docs/tutorial/00-orientation/01-what-is-aeron.md
     pub fn addSubscription(self: *Aeron, channel: []const u8, stream_id: i32) !i64 {
-        const correlation_id = self.next_correlation_id.fetchAdd(1, .monotonic);
+        const correlation_id = self.to_driver_ring_buffer.nextCorrelationId();
 
         var buf: [1024]u8 = undefined;
-        std.mem.writeInt(i64, buf[0..8], correlation_id, .little);
-        std.mem.writeInt(i64, buf[8..16], -1, .little); // registration_id (-1 for new)
-        std.mem.writeInt(i32, buf[16..20], stream_id, .little);
-        std.mem.writeInt(i32, buf[20..24], @as(i32, @intCast(channel.len)), .little);
-        @memcpy(buf[24 .. 24 + channel.len], channel);
+        std.mem.writeInt(i64, buf[0..8], self.client_id, .little);
+        std.mem.writeInt(i64, buf[8..16], correlation_id, .little);
+        std.mem.writeInt(i64, buf[16..24], -1, .little);
+        std.mem.writeInt(i32, buf[24..28], stream_id, .little);
+        std.mem.writeInt(i32, buf[28..32], @as(i32, @intCast(channel.len)), .little);
+        @memcpy(buf[32 .. 32 + channel.len], channel);
 
-        if (!self.to_driver_ring_buffer.write(driver.conductor.CMD_ADD_SUBSCRIPTION, buf[0 .. 24 + channel.len])) {
+        if (!self.to_driver_ring_buffer.write(driver.conductor.CMD_ADD_SUBSCRIPTION, buf[0 .. 32 + channel.len])) {
             return error.RingBufferFull;
         }
+        try self.pending_subscription_streams.put(self.allocator, correlation_id, stream_id);
 
         return correlation_id;
     }
 
-    // LESSON(what-is-zig): addPublication is the complementary client-to-driver handshake for writers. It packs CMD_ADD_PUBLICATION (correlation_id, stream_id, channel) and sends it to the driver. The Conductor allocates an ExclusivePublication with a log buffer, and responds with RESPONSE_ON_PUBLICATION_READY. The client polls doWork() to see the response and creates a local ExclusivePublication handle. See docs/tutorial/00-orientation/02-what-is-zig.md
+    // LESSON(what-is-zig): addPublication is the complementary client-to-driver handshake for writers. It uses the upstream PublicationMessageFlyweight layout: client_id, correlation_id, stream_id, channel_length, then channel bytes. The Conductor allocates an ExclusivePublication with a log buffer and responds with RESPONSE_ON_PUBLICATION_READY using the same correlation_id. See docs/tutorial/00-orientation/02-what-is-zig.md
     pub fn addPublication(self: *Aeron, channel: []const u8, stream_id: i32) !i64 {
-        const correlation_id = self.next_correlation_id.fetchAdd(1, .monotonic);
+        const correlation_id = self.to_driver_ring_buffer.nextCorrelationId();
 
         var buf: [1024]u8 = undefined;
-        std.mem.writeInt(i64, buf[0..8], correlation_id, .little);
-        std.mem.writeInt(i64, buf[8..16], -1, .little); // registration_id (-1 for new)
+        std.mem.writeInt(i64, buf[0..8], self.client_id, .little);
+        std.mem.writeInt(i64, buf[8..16], correlation_id, .little);
         std.mem.writeInt(i32, buf[16..20], stream_id, .little);
         std.mem.writeInt(i32, buf[20..24], @as(i32, @intCast(channel.len)), .little);
         @memcpy(buf[24 .. 24 + channel.len], channel);
@@ -239,4 +249,101 @@ test "Aeron init and deinit" {
     var aeron = try Aeron.init(allocator, ctx);
     defer aeron.deinit();
     _ = aeron.doWork();
+}
+
+test "Aeron addSubscription encodes upstream SubscriptionMessageFlyweight layout" {
+    const allocator = std.testing.allocator;
+
+    var ring_storage: [512]u8 = undefined;
+    @memset(&ring_storage, 0);
+
+    var aeron = Aeron{
+        .ctx = .{},
+        .allocator = allocator,
+        .cnc_file = undefined,
+        .to_driver_ring_buffer = ipc.ring_buffer.ManyToOneRingBuffer.init(&ring_storage),
+        .to_clients_broadcast_receiver = undefined,
+        .counters_map = undefined,
+        .client_id = 7,
+        .publications = .{},
+        .subscriptions = .{},
+        .pending_subscription_streams = .{},
+        .embedded_driver = null,
+    };
+    defer aeron.publications.deinit(allocator);
+    defer aeron.subscriptions.deinit(allocator);
+    defer aeron.pending_subscription_streams.deinit(allocator);
+
+    const channel = "aeron:udp?endpoint=localhost:20121";
+    const correlation_id = try aeron.addSubscription(channel, 1001);
+
+    const Capture = struct {
+        msg_type: i32 = 0,
+        payload: []const u8 = "",
+    };
+    const handler = struct {
+        fn handle(msg_type_id: i32, data: []const u8, ctx: *anyopaque) void {
+            const capture: *Capture = @ptrCast(@alignCast(ctx));
+            capture.msg_type = msg_type_id;
+            capture.payload = data;
+        }
+    }.handle;
+
+    var capture = Capture{};
+    try std.testing.expectEqual(@as(i32, 1), aeron.to_driver_ring_buffer.read(handler, @ptrCast(&capture), 1));
+    try std.testing.expectEqual(driver.conductor.CMD_ADD_SUBSCRIPTION, capture.msg_type);
+    try std.testing.expectEqual(@as(i64, 7), std.mem.readInt(i64, capture.payload[0..8], .little));
+    try std.testing.expectEqual(correlation_id, std.mem.readInt(i64, capture.payload[8..16], .little));
+    try std.testing.expectEqual(@as(i64, -1), std.mem.readInt(i64, capture.payload[16..24], .little));
+    try std.testing.expectEqual(@as(i32, 1001), std.mem.readInt(i32, capture.payload[24..28], .little));
+    try std.testing.expectEqual(@as(i32, @intCast(channel.len)), std.mem.readInt(i32, capture.payload[28..32], .little));
+    try std.testing.expectEqualStrings(channel, capture.payload[32..]);
+}
+
+test "Aeron addPublication encodes upstream PublicationMessageFlyweight layout" {
+    const allocator = std.testing.allocator;
+
+    var ring_storage: [512]u8 = undefined;
+    @memset(&ring_storage, 0);
+
+    var aeron = Aeron{
+        .ctx = .{},
+        .allocator = allocator,
+        .cnc_file = undefined,
+        .to_driver_ring_buffer = ipc.ring_buffer.ManyToOneRingBuffer.init(&ring_storage),
+        .to_clients_broadcast_receiver = undefined,
+        .counters_map = undefined,
+        .client_id = 9,
+        .publications = .{},
+        .subscriptions = .{},
+        .pending_subscription_streams = .{},
+        .embedded_driver = null,
+    };
+    defer aeron.publications.deinit(allocator);
+    defer aeron.subscriptions.deinit(allocator);
+    defer aeron.pending_subscription_streams.deinit(allocator);
+
+    const channel = "aeron:udp?endpoint=localhost:20121";
+    const correlation_id = try aeron.addPublication(channel, 1001);
+
+    const Capture = struct {
+        msg_type: i32 = 0,
+        payload: []const u8 = "",
+    };
+    const handler = struct {
+        fn handle(msg_type_id: i32, data: []const u8, ctx: *anyopaque) void {
+            const capture: *Capture = @ptrCast(@alignCast(ctx));
+            capture.msg_type = msg_type_id;
+            capture.payload = data;
+        }
+    }.handle;
+
+    var capture = Capture{};
+    try std.testing.expectEqual(@as(i32, 1), aeron.to_driver_ring_buffer.read(handler, @ptrCast(&capture), 1));
+    try std.testing.expectEqual(driver.conductor.CMD_ADD_PUBLICATION, capture.msg_type);
+    try std.testing.expectEqual(@as(i64, 9), std.mem.readInt(i64, capture.payload[0..8], .little));
+    try std.testing.expectEqual(correlation_id, std.mem.readInt(i64, capture.payload[8..16], .little));
+    try std.testing.expectEqual(@as(i32, 1001), std.mem.readInt(i32, capture.payload[16..20], .little));
+    try std.testing.expectEqual(@as(i32, @intCast(channel.len)), std.mem.readInt(i32, capture.payload[20..24], .little));
+    try std.testing.expectEqualStrings(channel, capture.payload[24..]);
 }

@@ -20,11 +20,10 @@ fi
 
 echo "[CLIENT] Found cnc.dat: $(ls -l $AERON_DIR_PATH/cnc.dat)"
 
-# Run the Java subscriber
-# Use only the standard -Daeron.dir property for clarity
+# Run a finite Java smoke helper against the external Zig driver.
 exec java \
     --add-opens java.base/jdk.internal.misc=ALL-UNNAMED \
     --add-opens java.base/java.util.zip=ALL-UNNAMED \
     -Daeron.dir="$AERON_DIR_PATH" \
-    -cp /aeron-all.jar \
-    io.aeron.samples.BasicSubscriber
+    -cp /aeron-all.jar:/interop \
+    InteropSmoke
