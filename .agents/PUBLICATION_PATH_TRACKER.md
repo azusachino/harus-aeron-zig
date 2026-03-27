@@ -32,7 +32,8 @@ Make the next parity slice concrete and agent-ready: publication command/respons
 - [x] Local implementation/task split documented.
 - [x] Publication-ready payload now carries upstream fields plus a mappable log-buffer path.
 - [x] `make check` is green after the publication-path wire/client changes.
-- [~] `make interop-smoke` now gets past log-buffer mapping and fails later on publication connectivity.
+- [~] `make interop-smoke` now gets through publication mapping, connection, receiver SETUP/image creation, and first DATA frame.
+- [!] Java finite smoke still stalls later during repeated `publication.offer(...)`, so the remaining gap is now publication-window / offer-progress behavior rather than ready-payload parsing.
 
 ## Task Board
 
@@ -45,8 +46,8 @@ Make the next parity slice concrete and agent-ready: publication command/respons
 | P11-5 | conductor-response | Lead | done | `src/driver/conductor.zig`, `src/logbuffer/log_buffer.zig`, `src/driver/media_driver.zig` | `ON_PUBLICATION_READY` now emits registration id, both counter ids, and a log-buffer path; mapped file metadata is initialized for Java log-buffer mapping |
 | P11-6 | client-ready-consumption | Lead | done | `src/aeron.zig`, `src/publication.zig` | Client parses the full ready payload and can map the returned log buffer |
 | P11-7 | tests | Lead | done | `src/aeron.zig`, `src/driver/conductor.zig`, `test/driver/conductor_test.zig` | Local tests and `make check` are green after the publication-path change set |
-| P11-8 | interop | Heisenberg (5.4-mini) + Lead | blocked | `deploy/InteropSmoke.java`, `deploy/entrypoint-java.sh`, `deploy/docker-compose.ci.yml` | Finite smoke now exercises addSubscription + addPublication + bounded publish path, but publication remains disconnected |
-| P11-9 | verification | Lead | in progress | `Makefile`, `.agents/PUBLICATION_PATH_TRACKER.md`, `.agents/publication_path_tasks.jsonl` | `make check` passed; `make interop-smoke` still blocked on publication connectivity |
+| P11-8 | interop | Heisenberg (5.4-mini) + Lead | in progress | `deploy/InteropSmoke.java`, `deploy/entrypoint-java.sh`, `deploy/docker-compose.ci.yml`, `src/driver/conductor.zig`, `src/driver/media_driver.zig`, `src/driver/sender.zig` | Smoke now reaches connected publication + image creation + first DATA; current blocker is later offer/data progress |
+| P11-9 | verification | Lead | in progress | `Makefile`, `.agents/PUBLICATION_PATH_TRACKER.md`, `.agents/publication_path_tasks.jsonl` | `make test-unit` is green; `make interop-smoke` now fails later at repeated offer progression |
 
 ## Evidence / Upstream References
 
@@ -61,7 +62,8 @@ Make the next parity slice concrete and agent-ready: publication command/respons
 
 - Local publication buffers are not consistently represented as stable on-disk log files yet; the ready payload needs a credible `log_file_name` story.
 - Embedded-driver lookup by `(session_id, stream_id)` currently papers over missing wire metadata.
-- The bounded interop smoke now reaches Java publication creation and log-buffer mapping, but the publication never reaches `isConnected()`. The next likely boundary is sender/receiver/image/status connectivity rather than control-plane wire shape.
+- The bounded interop smoke now reaches Java publication creation, receiver-side SETUP, image creation, and the first DATA frame.
+- The remaining publication-path gap appears to be later offer-progress / flow-control behavior after the first successful DATA, not the original publication-ready or image-ready wire contracts.
 
 ## Session Log
 
@@ -82,3 +84,11 @@ Make the next parity slice concrete and agent-ready: publication command/respons
 - Updated the Zig client to parse the full ready payload and map the returned log buffer.
 - `make check` passed.
 - `make interop-smoke` advanced from log-buffer mapping failure to `Timed out waiting for publication to connect`.
+
+### 2026-03-27 - interop follow-up
+- Fixed publication log metadata offsets to upstream `LogBufferDescriptor` values, which cleared the Java `term length = 0` mapping failure.
+- Added publication log metadata connected/active-transport state and updated it from sender STATUS handling.
+- Reworked loopback interop so the driver emits an initial SETUP immediately and reaches receiver-side SETUP processing and image creation.
+- Expanded `ON_IMAGE_READY` from the previous 20-byte stub to the upstream `ImageBuffersReadyFlyweight` field layout used by the Java client.
+- `make test-unit` is green after the publication/image-ready follow-up.
+- `make interop-smoke` now reaches the first DATA frame and then stalls later at repeated `publication.offer(...)`.

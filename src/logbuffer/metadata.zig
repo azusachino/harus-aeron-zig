@@ -8,6 +8,9 @@ pub const TERM_MAX_LENGTH: i32 = 1024 * 1024 * 1024;
 pub const TERM_TAIL_COUNTERS_OFFSET: usize = 0;
 pub const LOG_ACTIVE_TERM_COUNT_OFFSET: usize = TERM_TAIL_COUNTERS_OFFSET + (PARTITION_COUNT * @sizeOf(i64));
 pub const CACHE_LINE_LENGTH: usize = 64;
+pub const LOG_END_OF_STREAM_POSITION_OFFSET: usize = CACHE_LINE_LENGTH * 2;
+pub const LOG_IS_CONNECTED_OFFSET: usize = LOG_END_OF_STREAM_POSITION_OFFSET + @sizeOf(i64);
+pub const LOG_ACTIVE_TRANSPORT_COUNT_OFFSET: usize = LOG_IS_CONNECTED_OFFSET + @sizeOf(i32);
 
 // Metadata length: align to 4096 (page boundary)
 // Need: 3 * i64 (tail counters) + 1 * i32 (active term count) + padding
@@ -38,6 +41,26 @@ pub const LogBufferMetadata = struct {
         const offset = TERM_TAIL_COUNTERS_OFFSET + (partition * @sizeOf(i64));
         const ptr: *i64 = @ptrCast(@alignCast(&self.buffer[offset]));
         @atomicStore(i64, ptr, val, .release);
+    }
+
+    pub fn isConnected(self: *const LogBufferMetadata) bool {
+        const ptr: *i32 = @ptrCast(@alignCast(&self.buffer[LOG_IS_CONNECTED_OFFSET]));
+        return @atomicLoad(i32, ptr, .acquire) == 1;
+    }
+
+    pub fn setIsConnected(self: *LogBufferMetadata, connected: bool) void {
+        const ptr: *i32 = @ptrCast(@alignCast(&self.buffer[LOG_IS_CONNECTED_OFFSET]));
+        @atomicStore(i32, ptr, if (connected) 1 else 0, .release);
+    }
+
+    pub fn activeTransportCount(self: *const LogBufferMetadata) i32 {
+        const ptr: *i32 = @ptrCast(@alignCast(&self.buffer[LOG_ACTIVE_TRANSPORT_COUNT_OFFSET]));
+        return @atomicLoad(i32, ptr, .acquire);
+    }
+
+    pub fn setActiveTransportCount(self: *LogBufferMetadata, val: i32) void {
+        const ptr: *i32 = @ptrCast(@alignCast(&self.buffer[LOG_ACTIVE_TRANSPORT_COUNT_OFFSET]));
+        @atomicStore(i32, ptr, val, .release);
     }
 };
 
@@ -88,4 +111,18 @@ test "nextPartitionIndex wraps correctly" {
 
 test "LOG_META_DATA_LENGTH is page-aligned" {
     try std.testing.expectEqual(@as(usize, 0), LOG_META_DATA_LENGTH % 4096);
+}
+
+test "connected flag and active transport count round trip" {
+    var raw align(64) = [_]u8{0} ** LOG_META_DATA_LENGTH;
+    var meta = LogBufferMetadata{ .buffer = &raw };
+
+    try std.testing.expect(!meta.isConnected());
+    try std.testing.expectEqual(@as(i32, 0), meta.activeTransportCount());
+
+    meta.setIsConnected(true);
+    meta.setActiveTransportCount(1);
+
+    try std.testing.expect(meta.isConnected());
+    try std.testing.expectEqual(@as(i32, 1), meta.activeTransportCount());
 }

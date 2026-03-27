@@ -129,8 +129,7 @@ pub const ExclusivePublication = struct {
     }
 
     pub fn isConnected(self: *const ExclusivePublication) bool {
-        var mutable = @constCast(self);
-        return mutable.livePublisherLimit() > 0;
+        return self.log_buffer.metaData().isConnected();
     }
 
     pub fn close(self: *ExclusivePublication) void {
@@ -201,6 +200,8 @@ test "offer: returns not_connected until publisher limit counter advances" {
     try std.testing.expect(pub_instance.offer("hello") == .not_connected);
 
     counters_map.set(pub_limit.counter_id, 64 * 1024);
+    var meta_data = log_buf.metaData();
+    meta_data.setIsConnected(true);
     try std.testing.expect(pub_instance.isConnected());
     try std.testing.expect(pub_instance.offer("hello") == .ok);
 }

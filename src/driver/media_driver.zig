@@ -130,26 +130,28 @@ pub const MediaDriver = struct {
         self.counters_map = CountersMap.init(self.counters_meta_buf, self.counters_values_buf);
 
         // Create dummy endpoints for sender/receiver
-        const fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
-        errdefer std.posix.close(fd);
+        const recv_fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
+        errdefer std.posix.close(recv_fd);
+        const send_fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
+        errdefer std.posix.close(send_fd);
 
         // Bind socket to configured port (if non-zero)
         const bound = if (ctx_.listen_port != 0) blk: {
             const bind_addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, ctx_.listen_port);
-            std.posix.bind(fd, &bind_addr.any, bind_addr.getOsSockLen()) catch |err| {
+            std.posix.bind(recv_fd, &bind_addr.any, bind_addr.getOsSockLen()) catch |err| {
                 std.debug.print("[DRIVER] Failed to bind to port {d}: {any}\n", .{ ctx_.listen_port, err });
                 return err;
             };
-            std.debug.print("[DRIVER] Bound to 0.0.0.0:{d} (fd={d})\n", .{ ctx_.listen_port, fd });
+            std.debug.print("[DRIVER] Bound to 0.0.0.0:{d} (fd={d})\n", .{ ctx_.listen_port, recv_fd });
             break :blk true;
         } else false;
 
         self.recv_endpoint = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
-            .socket = fd,
+            .socket = recv_fd,
             .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, if (bound) ctx_.listen_port else 0),
         };
         self.send_endpoint = @import("../transport/endpoint.zig").SendChannelEndpoint{
-            .socket = fd,
+            .socket = send_fd,
         };
 
         // Initialize agents with pointers to self's stable fields
@@ -197,7 +199,10 @@ pub const MediaDriver = struct {
         const broadcaster = try BroadcastTransmitter.init(allocator, 8192);
         const counters_map = CountersMap.init(counters_meta_buf, counters_values_buf);
 
-        const fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
+        const recv_fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
+        errdefer std.posix.close(recv_fd);
+        const send_fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
+        errdefer std.posix.close(send_fd);
 
         return .{
             .allocator = allocator,
@@ -216,8 +221,8 @@ pub const MediaDriver = struct {
             .ring_buf = ring_buf,
             .broadcaster = broadcaster,
             .counters_map = counters_map,
-            .recv_endpoint = .{ .socket = fd, .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0) },
-            .send_endpoint = .{ .socket = fd },
+            .recv_endpoint = .{ .socket = recv_fd, .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0) },
+            .send_endpoint = .{ .socket = send_fd },
         };
     }
 
@@ -232,6 +237,9 @@ pub const MediaDriver = struct {
             self.allocator.free(self.counters_values_buf);
         }
         std.posix.close(self.send_endpoint.socket);
+        if (self.recv_endpoint.socket != self.send_endpoint.socket) {
+            std.posix.close(self.recv_endpoint.socket);
+        }
     }
 
     /// Destroy a heap-allocated MediaDriver created with `create`.
