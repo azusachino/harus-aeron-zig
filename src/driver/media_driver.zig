@@ -170,6 +170,7 @@ pub const MediaDriver = struct {
             &self.sender_agent,
             &self.recv_endpoint,
             bound,
+            ctx_.aeron_dir,
         );
         errdefer self.conductor_agent.deinit();
 
