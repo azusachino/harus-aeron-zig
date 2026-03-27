@@ -17,7 +17,7 @@ pub const Image = struct {
     initial_term_id: i32,
     log_buffer: *logbuffer.LogBuffer,
     receiver_hwm: counters.CounterHandle, // highest term_offset seen
-    subscriber_position: counters.CounterHandle, // where subscriber has consumed to
+    subscriber_position: counters.CounterHandle, // client-owned image position counter
     rebuild_position: i64, // tracks gap filling progress
     source_address: std.net.Address,
     nak_state: NakState,
@@ -109,6 +109,7 @@ pub const Image = struct {
     }
 
     fn advanceRebuildPosition(self: *Image, counters_map: *counters.CountersMap) void {
+        _ = counters_map;
         var position = self.rebuild_position;
 
         while (true) {
@@ -130,7 +131,6 @@ pub const Image = struct {
         }
 
         self.rebuild_position = position;
-        counters_map.set(self.subscriber_position.counter_id, position);
     }
 
     // Check if there is a gap between rebuild_position and receiver_hwm
@@ -510,9 +510,9 @@ pub const Receiver = struct {
 
     // Send a STATUS message to source_address acknowledging receipt
     pub fn sendStatus(self: *Receiver, image: *Image) !void {
-        const subscriber_pos = self.counters_map.get(image.subscriber_position.counter_id);
-        const consumption_term_id = image.initial_term_id + @as(i32, @intCast(@divTrunc(subscriber_pos, @as(i64, @intCast(image.term_length)))));
-        const consumption_term_offset = @as(i32, @intCast(@mod(subscriber_pos, @as(i64, @intCast(image.term_length)))));
+        const consumption_position = image.rebuild_position;
+        const consumption_term_id = image.initial_term_id + @as(i32, @intCast(@divTrunc(consumption_position, @as(i64, @intCast(image.term_length)))));
+        const consumption_term_offset = @as(i32, @intCast(@mod(consumption_position, @as(i64, @intCast(image.term_length)))));
 
         var status: protocol.StatusMessage = undefined;
         status.frame_length = protocol.StatusMessage.LENGTH;
@@ -682,7 +682,7 @@ test "Image insertFrame writes data at correct offset" {
     const hwm = counters_map.get(hwm_handle.counter_id);
     try std.testing.expect(hwm > 0);
     try std.testing.expectEqual(hwm, image.rebuild_position);
-    try std.testing.expectEqual(hwm, counters_map.get(sub_pos_handle.counter_id));
+    try std.testing.expectEqual(@as(i64, 0), counters_map.get(sub_pos_handle.counter_id));
 }
 
 test "Image hasGap detects missing frame" {
@@ -768,7 +768,7 @@ test "Image insertFrame keeps gap until missing prefix arrives" {
     try std.testing.expect(image.insertFrame(&counters_map, &prefix, "first-frame"));
     try std.testing.expect(!image.hasGap(&counters_map));
     try std.testing.expect(image.rebuild_position > 64);
-    try std.testing.expectEqual(image.rebuild_position, counters_map.get(sub_pos_handle.counter_id));
+    try std.testing.expectEqual(@as(i64, 0), counters_map.get(sub_pos_handle.counter_id));
 }
 
 test "Receiver queues STATUS messages for sender flow control" {

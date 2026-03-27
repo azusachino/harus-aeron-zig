@@ -9,9 +9,11 @@ const counters = @import("../ipc/counters.zig");
 const receiver_mod = @import("receiver.zig");
 const sender_mod = @import("sender.zig");
 const logbuffer = @import("../logbuffer/log_buffer.zig");
+const frame = @import("../protocol/frame.zig");
 const transport_uri = @import("../transport/udp_channel.zig");
 const endpoint_mod = @import("../transport/endpoint.zig");
 const signal = @import("../signal.zig");
+const INVALID_SOCKET: std.posix.socket_t = std.math.maxInt(std.posix.socket_t);
 
 const ManyToOneRingBuffer = ring_buffer.ManyToOneRingBuffer;
 const BroadcastTransmitter = broadcast.BroadcastTransmitter;
@@ -48,13 +50,23 @@ const SUBSCRIPTION_COMMAND_REGISTRATION_CORRELATION_ID_OFFSET: usize = CORRELATE
 const SUBSCRIPTION_COMMAND_STREAM_ID_OFFSET: usize = SUBSCRIPTION_COMMAND_REGISTRATION_CORRELATION_ID_OFFSET + 8;
 const SUBSCRIPTION_COMMAND_CHANNEL_LENGTH_OFFSET: usize = SUBSCRIPTION_COMMAND_STREAM_ID_OFFSET + 4;
 const SUBSCRIPTION_COMMAND_CHANNEL_OFFSET: usize = SUBSCRIPTION_COMMAND_CHANNEL_LENGTH_OFFSET + 4;
+const LOG_META_PADDING_SIZE: usize = 64;
+const LOG_META_CORRELATION_ID_OFFSET: usize = LOG_META_PADDING_SIZE * 4;
+const LOG_META_INITIAL_TERM_ID_OFFSET: usize = LOG_META_CORRELATION_ID_OFFSET + 8;
+const LOG_META_DEFAULT_FRAME_HEADER_LENGTH_OFFSET: usize = LOG_META_INITIAL_TERM_ID_OFFSET + 4;
+const LOG_META_MTU_LENGTH_OFFSET: usize = LOG_META_DEFAULT_FRAME_HEADER_LENGTH_OFFSET + 4;
+const LOG_META_TERM_LENGTH_OFFSET: usize = LOG_META_MTU_LENGTH_OFFSET + 4;
+const LOG_META_PAGE_SIZE_OFFSET: usize = LOG_META_TERM_LENGTH_OFFSET + 4;
+const LOG_META_DEFAULT_FRAME_HEADER_OFFSET: usize = LOG_META_PADDING_SIZE * 5;
 
 pub const PublicationEntry = struct {
     registration_id: i64,
     session_id: i32,
     stream_id: i32,
     channel: []u8,
+    log_file_name: []u8,
     ref_count: i32,
+    channel_status_indicator_counter_id: i32,
     log_buffer: ?*logbuffer.LogBuffer = null,
     network_pub: ?*sender_mod.NetworkPublication = null,
 };
@@ -88,6 +100,7 @@ pub const DriverConductor = struct {
     recv_endpoint: *endpoint_mod.ReceiveChannelEndpoint,
     recv_bound: bool,
     current_time_ms: i64,
+    aeron_dir: []const u8,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -98,6 +111,7 @@ pub const DriverConductor = struct {
         sender_ptr: *sender_mod.Sender,
         recv_ep: *endpoint_mod.ReceiveChannelEndpoint,
         recv_bound: bool,
+        aeron_dir: []const u8,
     ) !DriverConductor {
         return DriverConductor{
             .ring_buffer = ring_buffer_ptr,
@@ -113,19 +127,26 @@ pub const DriverConductor = struct {
             .clients = .{},
             .next_session_id = 1,
             .current_time_ms = 0,
+            .aeron_dir = aeron_dir,
         };
     }
 
     pub fn deinit(self: *DriverConductor) void {
         for (self.publications.items) |pub_entry| {
             if (pub_entry.network_pub) |np| {
+                self.counters_map.free(np.sender_position.counter_id);
+                self.counters_map.free(np.publisher_limit.counter_id);
                 self.allocator.destroy(np);
+            }
+            if (pub_entry.channel_status_indicator_counter_id != counters.NULL_COUNTER_ID) {
+                self.counters_map.free(pub_entry.channel_status_indicator_counter_id);
             }
             if (pub_entry.log_buffer) |lb| {
                 lb.deinit();
                 self.allocator.destroy(lb);
             }
             self.allocator.free(pub_entry.channel);
+            self.allocator.free(pub_entry.log_file_name);
         }
         self.publications.deinit(self.allocator);
 
@@ -186,9 +207,35 @@ pub const DriverConductor = struct {
                     }
                     std.debug.print("[CONDUCTOR] Found subscription for stream {d}, creating image...\n", .{sig.stream_id});
                     found = true;
+                    const image_log_file_name = if (self.aeron_dir.len != 0)
+                        std.fmt.allocPrint(
+                            self.allocator,
+                            "{s}/image-{d}-{d}-{d}-{d}.logbuffer",
+                            .{ self.aeron_dir, sub.registration_id, sig.session_id, sig.stream_id, sig.initial_term_id },
+                        ) catch continue
+                    else
+                        std.fmt.allocPrint(
+                            self.allocator,
+                            "/tmp/embedded-image-{d}-{d}-{d}.logbuffer",
+                            .{ sig.session_id, sig.stream_id, sig.initial_term_id },
+                        ) catch continue;
+                    defer self.allocator.free(image_log_file_name);
+
                     // Create Image
                     const lb = self.allocator.create(@import("../logbuffer/log_buffer.zig").LogBuffer) catch continue;
-                    lb.* = @import("../logbuffer/log_buffer.zig").LogBuffer.init(self.allocator, sig.term_length) catch continue;
+                    lb.* = @import("../logbuffer/log_buffer.zig").LogBuffer.initMapped(self.allocator, sig.term_length, image_log_file_name) catch {
+                        self.allocator.destroy(lb);
+                        continue;
+                    };
+                    self.initializePublicationLogMetadata(
+                        lb,
+                        sub.registration_id,
+                        sig.session_id,
+                        sig.stream_id,
+                        sig.initial_term_id,
+                        sig.term_length,
+                        sig.mtu,
+                    );
 
                     const hwm_label = std.fmt.allocPrint(self.allocator, "hwm: {d}:{d}", .{ sig.session_id, sig.stream_id }) catch "hwm";
                     defer if (!std.mem.eql(u8, hwm_label, "hwm")) self.allocator.free(hwm_label);
@@ -197,6 +244,7 @@ pub const DriverConductor = struct {
                     const sub_pos_label = std.fmt.allocPrint(self.allocator, "sub-pos: {d}:{d}", .{ sig.session_id, sig.stream_id }) catch "sub-pos";
                     defer if (!std.mem.eql(u8, sub_pos_label, "sub-pos")) self.allocator.free(sub_pos_label);
                     const sub_pos_handle = self.counters_map.allocate(counters.SUBSCRIBER_POSITION, sub_pos_label);
+                    self.counters_map.set(sub_pos_handle.counter_id, 0);
 
                     const image = self.allocator.create(Image) catch continue;
                     image.* = Image.init(
@@ -212,10 +260,24 @@ pub const DriverConductor = struct {
                         sig.source_address,
                     );
                     self.receiver.onAddSubscription(image) catch continue;
+                    self.sender.onStatusMessage(
+                        sig.session_id,
+                        sig.stream_id,
+                        sig.initial_term_id,
+                        0,
+                        @as(i32, @divTrunc(sig.term_length, 4)),
+                    );
                     self.receiver.sendStatus(image) catch {};
 
                     // Send ON_IMAGE_READY to clients
-                    self.sendImageReady(sig.session_id, sig.stream_id, sub.registration_id, sig.initial_term_id);
+                    self.sendImageReady(
+                        sub.registration_id,
+                        sig.session_id,
+                        sig.stream_id,
+                        sub.registration_id,
+                        sub_pos_handle.counter_id,
+                        image_log_file_name,
+                    );
                     work += 1;
                     break;
                 }
@@ -250,13 +312,76 @@ pub const DriverConductor = struct {
         self.broadcaster.transmit(RESPONSE_ON_IMAGE_CLOSE, &buf) catch return;
     }
 
-    fn sendImageReady(self: *DriverConductor, session_id: i32, stream_id: i32, registration_id: i64, initial_term_id: i32) void {
-        var buf: [20]u8 = undefined;
-        std.mem.writeInt(i64, buf[0..8], registration_id, .little);
-        std.mem.writeInt(i32, buf[8..12], session_id, .little);
-        std.mem.writeInt(i32, buf[12..16], stream_id, .little);
-        std.mem.writeInt(i32, buf[16..20], initial_term_id, .little);
-        self.broadcaster.transmit(RESPONSE_ON_IMAGE_READY, &buf) catch return;
+    fn sendImageReady(
+        self: *DriverConductor,
+        correlation_id: i64,
+        session_id: i32,
+        stream_id: i32,
+        subscription_registration_id: i64,
+        subscriber_position_id: i32,
+        log_file_name: []const u8,
+    ) void {
+        const source_identity = "";
+        const aligned_log_name_len = std.mem.alignForward(usize, log_file_name.len, @sizeOf(i32));
+        const source_identity_offset = 32 + aligned_log_name_len;
+        const payload_len = source_identity_offset + 4 + source_identity.len;
+        const payload = self.allocator.alloc(u8, payload_len) catch return;
+        defer self.allocator.free(payload);
+
+        @memset(payload, 0);
+        std.mem.writeInt(i64, payload[0..8], correlation_id, .little);
+        std.mem.writeInt(i32, payload[8..12], session_id, .little);
+        std.mem.writeInt(i32, payload[12..16], stream_id, .little);
+        std.mem.writeInt(i64, payload[16..24], subscription_registration_id, .little);
+        std.mem.writeInt(i32, payload[24..28], subscriber_position_id, .little);
+        std.mem.writeInt(i32, payload[28..32], @as(i32, @intCast(log_file_name.len)), .little);
+        @memcpy(payload[32 .. 32 + log_file_name.len], log_file_name);
+        std.mem.writeInt(i32, payload[source_identity_offset..][0..4], @as(i32, @intCast(source_identity.len)), .little);
+
+        self.broadcaster.transmit(RESPONSE_ON_IMAGE_READY, payload) catch return;
+    }
+
+    fn initializePublicationLogMetadata(
+        self: *DriverConductor,
+        lb: *logbuffer.LogBuffer,
+        registration_id: i64,
+        session_id: i32,
+        stream_id: i32,
+        initial_term_id: i32,
+        term_length: i32,
+        mtu: i32,
+    ) void {
+        _ = self;
+        var meta = lb.metaData();
+        meta.setActiveTermCount(0);
+        meta.setRawTailVolatile(0, (@as(i64, initial_term_id) << 32));
+        meta.setIsConnected(false);
+        meta.setActiveTransportCount(0);
+
+        std.mem.writeInt(i64, meta.buffer[LOG_META_CORRELATION_ID_OFFSET .. LOG_META_CORRELATION_ID_OFFSET + 8], registration_id, .little);
+        std.mem.writeInt(i32, meta.buffer[LOG_META_INITIAL_TERM_ID_OFFSET .. LOG_META_INITIAL_TERM_ID_OFFSET + 4], initial_term_id, .little);
+        std.mem.writeInt(i32, meta.buffer[LOG_META_DEFAULT_FRAME_HEADER_LENGTH_OFFSET .. LOG_META_DEFAULT_FRAME_HEADER_LENGTH_OFFSET + 4], frame.DataHeader.LENGTH, .little);
+        std.mem.writeInt(i32, meta.buffer[LOG_META_MTU_LENGTH_OFFSET .. LOG_META_MTU_LENGTH_OFFSET + 4], mtu, .little);
+        std.mem.writeInt(i32, meta.buffer[LOG_META_TERM_LENGTH_OFFSET .. LOG_META_TERM_LENGTH_OFFSET + 4], term_length, .little);
+        std.mem.writeInt(i32, meta.buffer[LOG_META_PAGE_SIZE_OFFSET .. LOG_META_PAGE_SIZE_OFFSET + 4], 4096, .little);
+
+        var default_header: frame.DataHeader = undefined;
+        default_header.frame_length = 0;
+        default_header.version = frame.VERSION;
+        default_header.flags = frame.DataHeader.BEGIN_FLAG | frame.DataHeader.END_FLAG;
+        default_header.type = @intFromEnum(frame.FrameType.data);
+        default_header.term_offset = 0;
+        default_header.session_id = session_id;
+        default_header.stream_id = stream_id;
+        default_header.term_id = initial_term_id;
+        default_header.reserved_value = 0;
+        @memcpy(meta.buffer[LOG_META_DEFAULT_FRAME_HEADER_OFFSET .. LOG_META_DEFAULT_FRAME_HEADER_OFFSET + frame.DataHeader.LENGTH], std.mem.asBytes(&default_header));
+
+        if (lb.mapped_buffer) |mapped| {
+            std.posix.msync(mapped, std.posix.MSF.SYNC) catch |err| {
+                std.log.warn("publication logbuffer msync failed registration_id={} err={}", .{ registration_id, err });
+            };
+        }
     }
 
     pub fn handleAddPublication(self: *DriverConductor, data: []const u8) void {
@@ -287,34 +412,62 @@ pub const DriverConductor = struct {
 
         const dest_address = if (udp_ch) |ch| ch.endpoint orelse std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40124) else std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40124);
 
+        const log_file_name = if (self.aeron_dir.len != 0)
+            std.fmt.allocPrint(
+                self.allocator,
+                "{s}/publication-{d}-{d}-{d}.logbuffer",
+                .{ self.aeron_dir, correlation_id, session_id, stream_id },
+            ) catch {
+                self.allocator.free(channel_copy);
+                self.sendError(correlation_id, 2, "Out of memory");
+                return;
+            }
+        else
+            std.fmt.allocPrint(self.allocator, "/tmp/embedded-publication-{d}.logbuffer", .{correlation_id}) catch {
+                self.allocator.free(channel_copy);
+                self.sendError(correlation_id, 2, "Out of memory");
+                return;
+            };
+
         // Create log buffer (64KB term for interop test)
         const term_len: i32 = 64 * 1024;
         const lb = self.allocator.create(logbuffer.LogBuffer) catch {
             self.allocator.free(channel_copy);
+            self.allocator.free(log_file_name);
             self.sendError(correlation_id, 2, "Out of memory");
             return;
         };
-        lb.* = logbuffer.LogBuffer.init(self.allocator, term_len) catch {
+        lb.* = logbuffer.LogBuffer.initMapped(self.allocator, term_len, log_file_name) catch {
             self.allocator.destroy(lb);
             self.allocator.free(channel_copy);
+            self.allocator.free(log_file_name);
             self.sendError(correlation_id, 2, "LogBuffer init failed");
             return;
         };
+        self.initializePublicationLogMetadata(lb, correlation_id, session_id, stream_id, 0, term_len, 1408);
 
         // Allocate counters
         const sp_label = std.fmt.allocPrint(self.allocator, "sender-pos: {d}:{d}", .{ session_id, stream_id }) catch "sender-pos";
         defer if (!std.mem.eql(u8, sp_label, "sender-pos")) self.allocator.free(sp_label);
         const pl_label = std.fmt.allocPrint(self.allocator, "pub-limit: {d}:{d}", .{ session_id, stream_id }) catch "pub-limit";
         defer if (!std.mem.eql(u8, pl_label, "pub-limit")) self.allocator.free(pl_label);
+        const cs_label = std.fmt.allocPrint(self.allocator, "channel-status: {d}:{d}", .{ session_id, stream_id }) catch "channel-status";
+        defer if (!std.mem.eql(u8, cs_label, "channel-status")) self.allocator.free(cs_label);
         const sender_pos_handle = self.counters_map.allocate(counters.SENDER_POSITION, sp_label);
         const pub_limit_handle = self.counters_map.allocate(counters.PUBLISHER_LIMIT, pl_label);
+        const channel_status_handle = self.counters_map.allocate(counters.CHANNEL_STATUS, cs_label);
         self.counters_map.set(pub_limit_handle.counter_id, 0);
+        self.counters_map.set(channel_status_handle.counter_id, 1);
 
         // Create NetworkPublication
         const net_pub = self.allocator.create(sender_mod.NetworkPublication) catch {
             lb.deinit();
             self.allocator.destroy(lb);
             self.allocator.free(channel_copy);
+            self.allocator.free(log_file_name);
+            self.counters_map.free(sender_pos_handle.counter_id);
+            self.counters_map.free(pub_limit_handle.counter_id);
+            self.counters_map.free(channel_status_handle.counter_id);
             self.sendError(correlation_id, 2, "Out of memory");
             return;
         };
@@ -335,6 +488,10 @@ pub const DriverConductor = struct {
             lb.deinit();
             self.allocator.destroy(lb);
             self.allocator.free(channel_copy);
+            self.allocator.free(log_file_name);
+            self.counters_map.free(sender_pos_handle.counter_id);
+            self.counters_map.free(pub_limit_handle.counter_id);
+            self.counters_map.free(channel_status_handle.counter_id);
             self.sendError(correlation_id, 2, "Out of memory");
             return;
         };
@@ -344,7 +501,9 @@ pub const DriverConductor = struct {
             .session_id = session_id,
             .stream_id = stream_id,
             .channel = channel_copy,
+            .log_file_name = log_file_name,
             .ref_count = 1,
+            .channel_status_indicator_counter_id = channel_status_handle.counter_id,
             .log_buffer = lb,
             .network_pub = net_pub,
         };
@@ -355,11 +514,23 @@ pub const DriverConductor = struct {
             lb.deinit();
             self.allocator.destroy(lb);
             self.allocator.free(channel_copy);
+            self.allocator.free(log_file_name);
+            self.counters_map.free(sender_pos_handle.counter_id);
+            self.counters_map.free(pub_limit_handle.counter_id);
+            self.counters_map.free(channel_status_handle.counter_id);
             self.sendError(correlation_id, 2, "Out of memory");
             return;
         };
 
-        self.sendPublicationReady(correlation_id, session_id, stream_id, pub_limit_handle.counter_id);
+        self.sendPublicationReady(
+            correlation_id,
+            correlation_id,
+            session_id,
+            stream_id,
+            pub_limit_handle.counter_id,
+            channel_status_handle.counter_id,
+            log_file_name,
+        );
     }
 
     pub fn handleRemovePublication(self: *DriverConductor, data: []const u8) void {
@@ -379,14 +550,20 @@ pub const DriverConductor = struct {
         if (found_index) |idx| {
             const removed = self.publications.swapRemove(idx);
             if (removed.network_pub) |np| {
+                self.counters_map.free(np.sender_position.counter_id);
+                self.counters_map.free(np.publisher_limit.counter_id);
                 self.sender.onRemovePublication(removed.session_id, removed.stream_id);
                 self.allocator.destroy(np);
+            }
+            if (removed.channel_status_indicator_counter_id != counters.NULL_COUNTER_ID) {
+                self.counters_map.free(removed.channel_status_indicator_counter_id);
             }
             if (removed.log_buffer) |lb| {
                 lb.deinit();
                 self.allocator.destroy(lb);
             }
             self.allocator.free(removed.channel);
+            self.allocator.free(removed.log_file_name);
             self.sendOperationSuccess(correlation_id);
         }
     }
@@ -549,14 +726,30 @@ pub const DriverConductor = struct {
         _ = self;
     }
 
-    fn sendPublicationReady(self: *DriverConductor, correlation_id: i64, session_id: i32, stream_id: i32, pub_limit_counter_id: i32) void {
+    fn sendPublicationReady(
+        self: *DriverConductor,
+        correlation_id: i64,
+        registration_id: i64,
+        session_id: i32,
+        stream_id: i32,
+        pub_limit_counter_id: i32,
+        channel_status_indicator_id: i32,
+        log_file_name: []const u8,
+    ) void {
         // LESSON(conductor): Broadcast response to clients via shared-memory broadcast buffer—clients poll for readiness. See docs/tutorial/03-driver/03-conductor.md
-        var buf: [20]u8 = undefined;
-        std.mem.writeInt(i64, buf[0..8], correlation_id, .little);
-        std.mem.writeInt(i32, buf[8..12], session_id, .little);
-        std.mem.writeInt(i32, buf[12..16], stream_id, .little);
-        std.mem.writeInt(i32, buf[16..20], pub_limit_counter_id, .little);
-        self.broadcaster.transmit(RESPONSE_ON_PUBLICATION_READY, &buf) catch return;
+        const payload_len = 36 + log_file_name.len;
+        const payload = self.allocator.alloc(u8, payload_len) catch return;
+        defer self.allocator.free(payload);
+
+        std.mem.writeInt(i64, payload[0..8], correlation_id, .little);
+        std.mem.writeInt(i64, payload[8..16], registration_id, .little);
+        std.mem.writeInt(i32, payload[16..20], session_id, .little);
+        std.mem.writeInt(i32, payload[20..24], stream_id, .little);
+        std.mem.writeInt(i32, payload[24..28], pub_limit_counter_id, .little);
+        std.mem.writeInt(i32, payload[28..32], channel_status_indicator_id, .little);
+        std.mem.writeInt(i32, payload[32..36], @as(i32, @intCast(log_file_name.len)), .little);
+        @memcpy(payload[36..], log_file_name);
+        self.broadcaster.transmit(RESPONSE_ON_PUBLICATION_READY, payload) catch return;
     }
 
     fn sendSubscriptionReady(self: *DriverConductor, correlation_id: i64, channel_status_indicator_id: i32) void {
@@ -634,7 +827,8 @@ test "DriverConductor init and deinit" {
     var values_buf: [4096]u8 = undefined;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
 
-    const dummy_socket: std.posix.socket_t = undefined;
+    const dummy_socket = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer std.posix.close(dummy_socket);
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
         .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
@@ -648,7 +842,7 @@ test "DriverConductor init and deinit" {
     var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
     defer sender.deinit();
 
-    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false);
+    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp");
     defer conductor.deinit();
 
     try testing.expectEqual(@as(i32, 1), conductor.next_session_id);
@@ -671,7 +865,8 @@ test "DriverConductor ADD_PUBLICATION creates entry and sends ready response" {
     var values_buf: [4096]u8 = undefined;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
 
-    const dummy_socket: std.posix.socket_t = undefined;
+    const dummy_socket = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer std.posix.close(dummy_socket);
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
         .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
@@ -685,7 +880,7 @@ test "DriverConductor ADD_PUBLICATION creates entry and sends ready response" {
     var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
     defer sender.deinit();
 
-    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false);
+    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp");
     defer conductor.deinit();
 
     // Simulate ADD_PUBLICATION command
@@ -705,6 +900,22 @@ test "DriverConductor ADD_PUBLICATION creates entry and sends ready response" {
     try testing.expectEqual(@as(i32, 42), conductor.publications.items[0].stream_id);
     try testing.expectEqual(@as(i64, 12345), conductor.publications.items[0].registration_id);
     try testing.expectEqualStrings(channel, conductor.publications.items[0].channel);
+    try testing.expect(conductor.publications.items[0].log_file_name.len > 0);
+
+    var rx = try broadcast.BroadcastReceiver.init(allocator, &bcast);
+    try testing.expect(rx.receiveNext());
+    try testing.expectEqual(RESPONSE_ON_PUBLICATION_READY, rx.typeId());
+    const payload = rx.buffer();
+    const log_name_len = std.mem.readInt(i32, payload[32..36], .little);
+    try testing.expectEqual(@as(i64, 12345), std.mem.readInt(i64, payload[0..8], .little));
+    try testing.expectEqual(@as(i64, 12345), std.mem.readInt(i64, payload[8..16], .little));
+    try testing.expectEqual(@as(i32, 1), std.mem.readInt(i32, payload[16..20], .little));
+    try testing.expectEqual(@as(i32, 42), std.mem.readInt(i32, payload[20..24], .little));
+    try testing.expect(log_name_len > 0);
+    try testing.expectEqualStrings(
+        conductor.publications.items[0].log_file_name,
+        payload[36 .. 36 + @as(usize, @intCast(log_name_len))],
+    );
 }
 
 test "DriverConductor ADD_SUBSCRIPTION creates entry and sends ready response" {
@@ -722,7 +933,7 @@ test "DriverConductor ADD_SUBSCRIPTION creates entry and sends ready response" {
     var values_buf: [4096]u8 = undefined;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
 
-    const dummy_socket: std.posix.socket_t = undefined;
+    const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
         .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
@@ -736,7 +947,7 @@ test "DriverConductor ADD_SUBSCRIPTION creates entry and sends ready response" {
     var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
     defer sender.deinit();
 
-    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false);
+    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp");
     defer conductor.deinit();
 
     // Skip socket binding for dummy socket in tests
@@ -785,7 +996,7 @@ test "DriverConductor REMOVE_PUBLICATION cleans up entry" {
     var values_buf: [4096]u8 = undefined;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
 
-    const dummy_socket: std.posix.socket_t = undefined;
+    const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
         .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
@@ -799,7 +1010,7 @@ test "DriverConductor REMOVE_PUBLICATION cleans up entry" {
     var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
     defer sender.deinit();
 
-    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false);
+    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp");
     defer conductor.deinit();
 
     // Add a publication first
@@ -835,7 +1046,7 @@ fn makeTestConductor(
     sender: *sender_mod.Sender,
     recv_ep: *endpoint_mod.ReceiveChannelEndpoint,
 ) !DriverConductor {
-    const conductor = try DriverConductor.init(allocator, rb, bcast, cm, receiver, sender, recv_ep, true);
+    const conductor = try DriverConductor.init(allocator, rb, bcast, cm, receiver, sender, recv_ep, true, "/tmp");
     return conductor;
 }
 
@@ -851,7 +1062,7 @@ test "DriverConductor client keepalive registers and updates client" {
     var meta_buf: [4096]u8 = undefined;
     var values_buf: [4096]u8 = undefined;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
-    const dummy_socket: std.posix.socket_t = undefined;
+    const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
         .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
@@ -894,7 +1105,7 @@ test "DriverConductor checkClientLiveness evicts stale clients" {
     var meta_buf: [4096]u8 = undefined;
     var values_buf: [4096]u8 = undefined;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
-    const dummy_socket: std.posix.socket_t = undefined;
+    const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
         .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
@@ -941,7 +1152,7 @@ test "DriverConductor REMOVE_SUBSCRIPTION closes associated image" {
     var meta_buf: [4096]u8 = undefined;
     var values_buf: [4096]u8 = undefined;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
-    const dummy_socket: std.posix.socket_t = undefined;
+    const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
         .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
@@ -998,7 +1209,7 @@ test "DriverConductor REMOVE_SUBSCRIPTION sends ON_OPERATION_SUCCESS" {
     var meta_buf: [4096]u8 = undefined;
     var values_buf: [4096]u8 = undefined;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
-    const dummy_socket: std.posix.socket_t = undefined;
+    const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
         .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
@@ -1070,7 +1281,7 @@ test "DriverConductor TERMINATE_DRIVER stops signal" {
     var meta_buf: [4096]u8 = undefined;
     var values_buf: [4096]u8 = undefined;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
-    const dummy_socket: std.posix.socket_t = undefined;
+    const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
         .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),

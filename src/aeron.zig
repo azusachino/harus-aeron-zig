@@ -56,6 +56,11 @@ pub const Aeron = struct {
     pending_subscription_streams: std.AutoHashMapUnmanaged(i64, i32),
     embedded_driver: ?*driver.MediaDriver = null,
 
+    const PublicationLogHandle = struct {
+        buffer: *logbuffer.LogBuffer,
+        owns_buffer: bool,
+    };
+
     // LESSON(what-is-aeron): Aeron.init opens the cnc.dat file, extracts the shared to-driver ring buffer and to-clients broadcast receiver. The client writes commands (add_publication, add_subscription) to the ring buffer; the driver writes responses (session_id, stream_id) to the broadcast. All subsequent publications and subscriptions reference log buffers allocated by the driver and discoverable via the shared broadcast. See docs/tutorial/00-orientation/01-what-is-aeron.md
     pub fn init(allocator: std.mem.Allocator, ctx: AeronContext) !Aeron {
         const cnc_path = try std.fmt.allocPrint(allocator, "{s}/cnc.dat", .{ctx.aeron_dir});
@@ -89,6 +94,7 @@ pub const Aeron = struct {
 
         var pub_it = self.publications.iterator();
         while (pub_it.next()) |entry| {
+            entry.value_ptr.*.deinit(self.allocator);
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.publications.deinit(self.allocator);
@@ -104,6 +110,27 @@ pub const Aeron = struct {
         }
         self.subscriptions.deinit(self.allocator);
         self.pending_subscription_streams.deinit(self.allocator);
+    }
+
+    fn openPublicationLogBuffer(self: *Aeron, log_file_name: []const u8, session_id: i32, stream_id: i32) ?PublicationLogHandle {
+        const full_path = if (std.fs.path.isAbsolute(log_file_name))
+            self.allocator.dupe(u8, log_file_name) catch return null
+        else
+            std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ self.ctx.aeron_dir, log_file_name }) catch return null;
+        defer self.allocator.free(full_path);
+
+        const mapped = self.allocator.create(logbuffer.LogBuffer) catch return null;
+        mapped.* = logbuffer.LogBuffer.openMapped(self.allocator, full_path) catch {
+            self.allocator.destroy(mapped);
+            if (self.embedded_driver) |md| {
+                if (md.getPublicationLogBuffer(session_id, stream_id)) |lb| {
+                    return .{ .buffer = lb, .owns_buffer = false };
+                }
+            }
+            return null;
+        };
+
+        return .{ .buffer = mapped, .owns_buffer = true };
     }
 
     // LESSON(what-is-zig): doWork is the client's polling loop. It drains all pending messages from the driver's broadcast buffer: RESPONSE_ON_PUBLICATION_READY (allocates ExclusivePublication with log buffer), RESPONSE_ON_SUBSCRIPTION_READY (allocates Subscription), RESPONSE_ON_IMAGE_READY (adds Image to subscription for a new publisher session). Call this in your application's main loop to discover new publications and subscriptions. See docs/tutorial/00-orientation/02-what-is-zig.md
@@ -148,23 +175,52 @@ pub const Aeron = struct {
                 _ = self.pending_subscription_streams.remove(correlation_id);
                 work += 1;
             } else if (msg_type_id == driver.conductor.RESPONSE_ON_PUBLICATION_READY) {
-                const correlation_id = std.mem.readInt(i64, buffer[0..8], .little);
-                const session_id = std.mem.readInt(i32, buffer[8..12], .little);
-                const stream_id = std.mem.readInt(i32, buffer[12..16], .little);
-                const publisher_limit_counter_id = if (buffer.len >= 20) std.mem.readInt(i32, buffer[16..20], .little) else ipc.counters.NULL_COUNTER_ID;
+                if (buffer.len < 36) continue;
 
-                if (self.embedded_driver) |md| {
-                    if (md.getPublicationLogBuffer(session_id, stream_id)) |lb| {
-                        const pub_instance = self.allocator.create(ExclusivePublication) catch continue;
-                        pub_instance.* = ExclusivePublication.init(session_id, stream_id, 0, lb.term_length, 1408, lb);
-                        if (publisher_limit_counter_id != ipc.counters.NULL_COUNTER_ID) {
-                            pub_instance.attachPublisherLimitCounter(&self.counters_map, publisher_limit_counter_id);
+                const correlation_id = std.mem.readInt(i64, buffer[0..8], .little);
+                const registration_id = std.mem.readInt(i64, buffer[8..16], .little);
+                const session_id = std.mem.readInt(i32, buffer[16..20], .little);
+                const stream_id = std.mem.readInt(i32, buffer[20..24], .little);
+                const publisher_limit_counter_id = std.mem.readInt(i32, buffer[24..28], .little);
+                const channel_status_indicator_id = std.mem.readInt(i32, buffer[28..32], .little);
+                const log_file_name_length = std.mem.readInt(i32, buffer[32..36], .little);
+
+                if (log_file_name_length < 0) continue;
+                const log_file_name_len: usize = @intCast(log_file_name_length);
+                if (buffer.len < 36 + log_file_name_len) continue;
+
+                const log_file_name = buffer[36 .. 36 + log_file_name_len];
+                _ = correlation_id;
+                _ = channel_status_indicator_id;
+
+                if (self.openPublicationLogBuffer(log_file_name, session_id, stream_id)) |log_handle| {
+                    const pub_instance = self.allocator.create(ExclusivePublication) catch {
+                        if (log_handle.owns_buffer) {
+                            log_handle.buffer.deinit();
+                            self.allocator.destroy(log_handle.buffer);
                         }
-                        self.publications.put(self.allocator, correlation_id, pub_instance) catch {
-                            self.allocator.destroy(pub_instance);
-                            continue;
-                        };
+                        continue;
+                    };
+
+                    pub_instance.* = ExclusivePublication.init(
+                        session_id,
+                        stream_id,
+                        0,
+                        log_handle.buffer.term_length,
+                        1408,
+                        log_handle.buffer,
+                    );
+                    pub_instance.owns_log_buffer = log_handle.owns_buffer;
+
+                    if (publisher_limit_counter_id != ipc.counters.NULL_COUNTER_ID) {
+                        pub_instance.attachPublisherLimitCounter(&self.counters_map, publisher_limit_counter_id);
                     }
+
+                    self.publications.put(self.allocator, registration_id, pub_instance) catch {
+                        pub_instance.deinit(self.allocator);
+                        self.allocator.destroy(pub_instance);
+                        continue;
+                    };
                 }
                 work += 1;
             }
@@ -346,4 +402,73 @@ test "Aeron addPublication encodes upstream PublicationMessageFlyweight layout" 
     try std.testing.expectEqual(@as(i32, 1001), std.mem.readInt(i32, capture.payload[16..20], .little));
     try std.testing.expectEqual(@as(i32, @intCast(channel.len)), std.mem.readInt(i32, capture.payload[20..24], .little));
     try std.testing.expectEqualStrings(channel, capture.payload[24..]);
+}
+
+test "Aeron doWork parses full publication-ready payload and maps log buffer" {
+    const allocator = std.testing.allocator;
+    const aeron_dir = "/tmp/aeron-test-publication-ready";
+    defer std.fs.deleteTreeAbsolute(aeron_dir) catch {};
+    try std.fs.makeDirAbsolute(aeron_dir);
+
+    const log_file_name = "pub-ready.logbuffer";
+    const log_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ aeron_dir, log_file_name });
+    defer allocator.free(log_path);
+
+    var created = try logbuffer.LogBuffer.initMapped(allocator, 64 * 1024, log_path);
+    created.deinit();
+
+    var ring_storage align(8) = [_]u8{0} ** 512;
+    @memset(&ring_storage, 0);
+
+    var bcast = try ipc.broadcast.BroadcastTransmitter.init(allocator, 1024);
+    defer bcast.deinit(allocator);
+
+    var meta align(64) = [_]u8{0} ** (ipc.counters.METADATA_LENGTH * 4);
+    var values align(64) = [_]u8{0} ** (ipc.counters.COUNTER_LENGTH * 4);
+    var counters_map = ipc.counters.CountersMap.init(&meta, &values);
+    counters_map.set(0, 4096);
+
+    const payload_len = 36 + log_file_name.len;
+    const payload = try allocator.alloc(u8, payload_len);
+    defer allocator.free(payload);
+    std.mem.writeInt(i64, payload[0..8], 55, .little);
+    std.mem.writeInt(i64, payload[8..16], 55, .little);
+    std.mem.writeInt(i32, payload[16..20], 7, .little);
+    std.mem.writeInt(i32, payload[20..24], 1001, .little);
+    std.mem.writeInt(i32, payload[24..28], 0, .little);
+    std.mem.writeInt(i32, payload[28..32], 1, .little);
+    std.mem.writeInt(i32, payload[32..36], @as(i32, @intCast(log_file_name.len)), .little);
+    @memcpy(payload[36..], log_file_name);
+    try bcast.transmit(driver.conductor.RESPONSE_ON_PUBLICATION_READY, payload);
+
+    var aeron = Aeron{
+        .ctx = .{ .aeron_dir = aeron_dir },
+        .allocator = allocator,
+        .cnc_file = undefined,
+        .to_driver_ring_buffer = ipc.ring_buffer.ManyToOneRingBuffer.init(&ring_storage),
+        .to_clients_broadcast_receiver = ipc.broadcast.BroadcastReceiver.wrap(bcast.full_buffer),
+        .counters_map = counters_map,
+        .client_id = 12,
+        .publications = .{},
+        .subscriptions = .{},
+        .pending_subscription_streams = .{},
+        .embedded_driver = null,
+    };
+    defer {
+        var pub_it = aeron.publications.iterator();
+        while (pub_it.next()) |entry| {
+            entry.value_ptr.*.deinit(allocator);
+            allocator.destroy(entry.value_ptr.*);
+        }
+        aeron.publications.deinit(allocator);
+        aeron.subscriptions.deinit(allocator);
+        aeron.pending_subscription_streams.deinit(allocator);
+    }
+
+    try std.testing.expectEqual(@as(i32, 1), aeron.doWork());
+    const pub_instance = aeron.getPublication(55) orelse return error.MissingPublication;
+    try std.testing.expectEqual(@as(i32, 7), pub_instance.session_id);
+    try std.testing.expectEqual(@as(i32, 1001), pub_instance.stream_id);
+    try std.testing.expectEqual(@as(i32, 0), pub_instance.publisher_limit_counter_id);
+    try std.testing.expect(pub_instance.owns_log_buffer);
 }

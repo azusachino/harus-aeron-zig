@@ -25,5 +25,6 @@ exec java \
     --add-opens java.base/jdk.internal.misc=ALL-UNNAMED \
     --add-opens java.base/java.util.zip=ALL-UNNAMED \
     -Daeron.dir="$AERON_DIR_PATH" \
+    -Daeron.sample.messageCount="${MSG_COUNT:-10}" \
     -cp /aeron-all.jar:/interop \
     InteropSmoke

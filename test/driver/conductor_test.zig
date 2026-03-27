@@ -35,7 +35,7 @@ test "DriverConductor: handleAddPublication and handleRemovePublication" {
     var receiver = try aeron.driver.Receiver.init(allocator, &recv_ep, sender.send_endpoint, &cm, null);
     defer receiver.deinit();
 
-    var conductor = try aeron.driver.conductor.DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false);
+    var conductor = try aeron.driver.conductor.DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp");
     defer conductor.deinit();
 
     // 1. Add publication
@@ -54,6 +54,13 @@ test "DriverConductor: handleAddPublication and handleRemovePublication" {
 
     try std.testing.expectEqual(@as(usize, 1), conductor.publications.items.len);
     try std.testing.expectEqual(@as(i32, 1001), conductor.publications.items[0].stream_id);
+    try std.testing.expect(conductor.publications.items[0].log_file_name.len > 0);
+    const lb = conductor.publications.items[0].log_buffer.?;
+    const meta = lb.metaData();
+    try std.testing.expectEqual(@as(i32, aeron.protocol.DataHeader.LENGTH), std.mem.readInt(i32, meta.buffer[268..272], .little));
+    try std.testing.expectEqual(@as(i32, 1408), std.mem.readInt(i32, meta.buffer[272..276], .little));
+    try std.testing.expectEqual(@as(i32, 64 * 1024), std.mem.readInt(i32, meta.buffer[276..280], .little));
+    try std.testing.expectEqual(@as(i32, 4096), std.mem.readInt(i32, meta.buffer[280..284], .little));
 
     // 2. Remove publication
     var remove_cmd: [24]u8 = undefined;
@@ -95,7 +102,7 @@ test "DriverConductor: handleAddSubscription and handleRemoveSubscription" {
     var receiver = try aeron.driver.Receiver.init(allocator, &recv_ep, sender.send_endpoint, &cm, null);
     defer receiver.deinit();
 
-    var conductor = try aeron.driver.conductor.DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false);
+    var conductor = try aeron.driver.conductor.DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp");
     defer conductor.deinit();
 
     // 1. Add subscription

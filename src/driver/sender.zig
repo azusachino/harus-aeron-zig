@@ -8,6 +8,7 @@ const counters = @import("../ipc/counters.zig");
 const protocol = @import("../protocol/frame.zig");
 const endpoint = @import("../transport/endpoint.zig");
 const event_log_mod = @import("../event_log.zig");
+const INVALID_SOCKET: std.posix.socket_t = std.math.maxInt(std.posix.socket_t);
 
 pub const RetransmitRequest = struct {
     session_id: i32,
@@ -287,6 +288,13 @@ pub const Sender = struct {
 
     pub fn onAddPublication(self: *Sender, publication: *NetworkPublication) !void {
         publication.last_setup_time_ms = self.current_time_ms;
+        if (publication.send_channel.socket != INVALID_SOCKET) {
+            if (self.sendSetupFrame(publication)) {
+                publication.last_setup_time_ms = self.current_time_ms;
+            } else {
+                publication.last_setup_time_ms = self.current_time_ms - 50;
+            }
+        }
         try self.publications.append(self.allocator, publication);
     }
 
@@ -339,6 +347,9 @@ pub const Sender = struct {
                     consumption_term_offset;
                 const new_limit = receiver_position + receiver_window;
                 self.counters_map.set(publication.publisher_limit.counter_id, new_limit);
+                var meta = publication.log_buffer.metaData();
+                meta.setIsConnected(true);
+                meta.setActiveTransportCount(1);
                 return;
             }
         }
@@ -371,8 +382,11 @@ test "Sender: onAddPublication adds to list" {
     var meta align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
     var values align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
     var counters_map = counters.CountersMap.init(&meta, &values);
+    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer std.posix.close(sock);
+    var send_endpoint = endpoint.SendChannelEndpoint{ .socket = sock };
 
-    var sender = try Sender.init(allocator, undefined, &counters_map);
+    var sender = try Sender.init(allocator, &send_endpoint, &counters_map);
     defer sender.deinit();
 
     var log_buf = try logbuffer.LogBuffer.init(allocator, 64 * 1024);
@@ -385,7 +399,7 @@ test "Sender: onAddPublication adds to list" {
         .log_buffer = &log_buf,
         .sender_position = counters.CounterHandle{ .counter_id = 0 },
         .publisher_limit = counters.CounterHandle{ .counter_id = 1 },
-        .send_channel = undefined,
+        .send_channel = &send_endpoint,
         .dest_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
         .mtu = 1408,
         .last_setup_time_ms = 0,
@@ -401,8 +415,11 @@ test "Sender: onRemovePublication removes from list" {
     var meta align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
     var values align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
     var counters_map = counters.CountersMap.init(&meta, &values);
+    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer std.posix.close(sock);
+    var send_endpoint = endpoint.SendChannelEndpoint{ .socket = sock };
 
-    var sender = try Sender.init(allocator, undefined, &counters_map);
+    var sender = try Sender.init(allocator, &send_endpoint, &counters_map);
     defer sender.deinit();
 
     var log_buf = try logbuffer.LogBuffer.init(allocator, 64 * 1024);
@@ -415,7 +432,7 @@ test "Sender: onRemovePublication removes from list" {
         .log_buffer = &log_buf,
         .sender_position = counters.CounterHandle{ .counter_id = 0 },
         .publisher_limit = counters.CounterHandle{ .counter_id = 1 },
-        .send_channel = undefined,
+        .send_channel = &send_endpoint,
         .dest_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
         .mtu = 1408,
         .last_setup_time_ms = 0,
@@ -428,7 +445,7 @@ test "Sender: onRemovePublication removes from list" {
         .log_buffer = &log_buf,
         .sender_position = counters.CounterHandle{ .counter_id = 2 },
         .publisher_limit = counters.CounterHandle{ .counter_id = 3 },
-        .send_channel = undefined,
+        .send_channel = &send_endpoint,
         .dest_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40124),
         .mtu = 1408,
         .last_setup_time_ms = 0,
@@ -556,11 +573,14 @@ test "Sender: STATUS updates publisher limit" {
     var meta align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
     var values align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
     var counters_map = counters.CountersMap.init(&meta, &values);
+    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer std.posix.close(sock);
+    var send_endpoint = endpoint.SendChannelEndpoint{ .socket = sock };
 
     const sender_pos = counters_map.allocate(counters.SENDER_POSITION, "sender-pos");
     const pub_limit = counters_map.allocate(counters.PUBLISHER_LIMIT, "pub-limit");
 
-    var sender = try Sender.init(allocator, undefined, &counters_map);
+    var sender = try Sender.init(allocator, &send_endpoint, &counters_map);
     defer sender.deinit();
 
     var log_buf = try logbuffer.LogBuffer.init(allocator, 64 * 1024);
@@ -573,7 +593,7 @@ test "Sender: STATUS updates publisher limit" {
         .log_buffer = &log_buf,
         .sender_position = sender_pos,
         .publisher_limit = pub_limit,
-        .send_channel = undefined,
+        .send_channel = &send_endpoint,
         .dest_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
         .mtu = 1408,
         .last_setup_time_ms = 0,
@@ -582,6 +602,8 @@ test "Sender: STATUS updates publisher limit" {
 
     sender.onStatusMessage(7, 1001, 3, 1024, 4096);
     try std.testing.expectEqual(@as(i64, 5120), counters_map.get(pub_limit.counter_id));
+    try std.testing.expect(log_buf.metaData().isConnected());
+    try std.testing.expectEqual(@as(i32, 1), log_buf.metaData().activeTransportCount());
 }
 
 test "Sender: sendDataFrames reads committed frame from log buffer" {

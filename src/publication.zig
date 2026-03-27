@@ -27,6 +27,7 @@ pub const ExclusivePublication = struct {
     counters_map: ?*counters.CountersMap,
     publisher_limit_counter_id: i32,
     is_closed: bool,
+    owns_log_buffer: bool,
     appender: term_appender.TermAppender,
 
     pub fn init(
@@ -54,6 +55,7 @@ pub const ExclusivePublication = struct {
             .counters_map = null,
             .publisher_limit_counter_id = counters.NULL_COUNTER_ID,
             .is_closed = false,
+            .owns_log_buffer = false,
             .appender = term_appender.TermAppender.init(term_buffer, term_id),
         };
     }
@@ -127,12 +129,18 @@ pub const ExclusivePublication = struct {
     }
 
     pub fn isConnected(self: *const ExclusivePublication) bool {
-        var mutable = @constCast(self);
-        return mutable.livePublisherLimit() > 0;
+        return self.log_buffer.metaData().isConnected();
     }
 
     pub fn close(self: *ExclusivePublication) void {
         self.is_closed = true;
+    }
+
+    pub fn deinit(self: *ExclusivePublication, allocator: std.mem.Allocator) void {
+        if (self.owns_log_buffer) {
+            self.log_buffer.deinit();
+            allocator.destroy(self.log_buffer);
+        }
     }
 };
 
@@ -192,6 +200,8 @@ test "offer: returns not_connected until publisher limit counter advances" {
     try std.testing.expect(pub_instance.offer("hello") == .not_connected);
 
     counters_map.set(pub_limit.counter_id, 64 * 1024);
+    var meta_data = log_buf.metaData();
+    meta_data.setIsConnected(true);
     try std.testing.expect(pub_instance.isConnected());
     try std.testing.expect(pub_instance.offer("hello") == .ok);
 }

@@ -19,14 +19,17 @@ pub const LogBuffer = struct {
     allocator: std.mem.Allocator,
     mapped_buffer: ?[]align(std.heap.page_size_min) u8 = null,
 
-    pub fn init(allocator: std.mem.Allocator, term_length: i32) !LogBuffer {
-        // Validate term_length is power-of-2
+    fn validateTermLength(term_length: i32) !void {
         if (term_length < TERM_MIN_LENGTH or term_length > TERM_MAX_LENGTH) {
             return error.InvalidTermLength;
         }
         if ((term_length & (term_length - 1)) != 0) {
             return error.TermLengthNotPowerOfTwo;
         }
+    }
+
+    pub fn init(allocator: std.mem.Allocator, term_length: i32) !LogBuffer {
+        try validateTermLength(term_length);
 
         // Allocate metadata buffer (page-aligned)
         const meta_raw = try allocator.alloc(u8, metadata.LOG_META_DATA_LENGTH);
@@ -51,13 +54,7 @@ pub const LogBuffer = struct {
     }
 
     pub fn initMapped(allocator: std.mem.Allocator, term_length: i32, path: []const u8) !LogBuffer {
-        // Validate term_length is power-of-2
-        if (term_length < TERM_MIN_LENGTH or term_length > TERM_MAX_LENGTH) {
-            return error.InvalidTermLength;
-        }
-        if ((term_length & (term_length - 1)) != 0) {
-            return error.TermLengthNotPowerOfTwo;
-        }
+        try validateTermLength(term_length);
 
         const total = @as(usize, @intCast(term_length)) * PARTITION_COUNT + metadata.LOG_META_DATA_LENGTH;
 
@@ -82,6 +79,51 @@ pub const LogBuffer = struct {
             terms[i] = buffer[start .. start + @as(usize, @intCast(term_length))];
         }
         const meta_raw = buffer[total - metadata.LOG_META_DATA_LENGTH ..];
+
+        return .{
+            .terms = terms,
+            .meta_raw = meta_raw,
+            .term_length = term_length,
+            .allocator = allocator,
+            .mapped_buffer = buffer,
+        };
+    }
+
+    pub fn openMapped(allocator: std.mem.Allocator, path: []const u8) !LogBuffer {
+        const file = try std.fs.openFileAbsolute(path, .{ .mode = .read_write });
+        defer file.close();
+
+        const stat = try file.stat();
+        if (stat.size < metadata.LOG_META_DATA_LENGTH) {
+            return error.InvalidLogBufferFile;
+        }
+
+        const total_size: usize = @intCast(stat.size);
+        const term_bytes = total_size - metadata.LOG_META_DATA_LENGTH;
+        if ((term_bytes % PARTITION_COUNT) != 0) {
+            return error.InvalidLogBufferFile;
+        }
+
+        const term_length_usize = term_bytes / PARTITION_COUNT;
+        const term_length: i32 = std.math.cast(i32, term_length_usize) orelse return error.InvalidTermLength;
+        try validateTermLength(term_length);
+
+        const ptr = try std.posix.mmap(
+            null,
+            total_size,
+            std.posix.PROT.READ | std.posix.PROT.WRITE,
+            .{ .TYPE = .SHARED },
+            file.handle,
+            0,
+        );
+        const buffer = @as([*]align(std.heap.page_size_min) u8, @ptrCast(ptr))[0..total_size];
+
+        var terms: [PARTITION_COUNT][]u8 = undefined;
+        for (0..PARTITION_COUNT) |i| {
+            const start = i * term_length_usize;
+            terms[i] = buffer[start .. start + term_length_usize];
+        }
+        const meta_raw = buffer[total_size - metadata.LOG_META_DATA_LENGTH ..];
 
         return .{
             .terms = terms,
@@ -131,6 +173,23 @@ test "LogBuffer: mmap file created on disk" {
     const stat = try std.fs.cwd().statFile(path);
     const expected_size = 3 * 64 * 1024 + metadata.LOG_META_DATA_LENGTH;
     try std.testing.expectEqual(expected_size, stat.size);
+}
+
+test "LogBuffer openMapped reopens existing mapped file" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/test-logbuf-open.dat";
+    defer std.fs.deleteFileAbsolute(path) catch {};
+
+    var created = try LogBuffer.initMapped(allocator, 64 * 1024, path);
+    var meta = created.metaData();
+    meta.setActiveTermCount(1);
+    created.deinit();
+
+    var reopened = try LogBuffer.openMapped(allocator, path);
+    defer reopened.deinit();
+
+    try std.testing.expectEqual(@as(i32, 64 * 1024), reopened.term_length);
+    try std.testing.expectEqual(@as(i32, 1), reopened.metaData().activeTermCount());
 }
 
 test "LogBuffer init and deinit" {
