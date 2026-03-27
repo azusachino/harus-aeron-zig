@@ -239,11 +239,29 @@ pub const DriverConductor = struct {
 
                     const hwm_label = std.fmt.allocPrint(self.allocator, "hwm: {d}:{d}", .{ sig.session_id, sig.stream_id }) catch "hwm";
                     defer if (!std.mem.eql(u8, hwm_label, "hwm")) self.allocator.free(hwm_label);
-                    const hwm_handle = self.counters_map.allocate(counters.RECEIVER_HWM, hwm_label);
+                    const hwm_handle = self.counters_map.allocateStreamCounter(
+                        counters.RECEIVER_HWM,
+                        "rcv-hwm",
+                        0,
+                        sub.registration_id,
+                        sig.session_id,
+                        sig.stream_id,
+                        sub.channel,
+                        null,
+                    );
 
                     const sub_pos_label = std.fmt.allocPrint(self.allocator, "sub-pos: {d}:{d}", .{ sig.session_id, sig.stream_id }) catch "sub-pos";
                     defer if (!std.mem.eql(u8, sub_pos_label, "sub-pos")) self.allocator.free(sub_pos_label);
-                    const sub_pos_handle = self.counters_map.allocate(counters.SUBSCRIBER_POSITION, sub_pos_label);
+                    const sub_pos_handle = self.counters_map.allocateStreamCounter(
+                        counters.SUBSCRIBER_POSITION,
+                        "sub-pos",
+                        0,
+                        sub.registration_id,
+                        sig.session_id,
+                        sig.stream_id,
+                        sub.channel,
+                        0,
+                    );
                     self.counters_map.set(sub_pos_handle.counter_id, 0);
 
                     const image = self.allocator.create(Image) catch continue;
@@ -453,9 +471,27 @@ pub const DriverConductor = struct {
         defer if (!std.mem.eql(u8, pl_label, "pub-limit")) self.allocator.free(pl_label);
         const cs_label = std.fmt.allocPrint(self.allocator, "channel-status: {d}:{d}", .{ session_id, stream_id }) catch "channel-status";
         defer if (!std.mem.eql(u8, cs_label, "channel-status")) self.allocator.free(cs_label);
-        const sender_pos_handle = self.counters_map.allocate(counters.SENDER_POSITION, sp_label);
-        const pub_limit_handle = self.counters_map.allocate(counters.PUBLISHER_LIMIT, pl_label);
-        const channel_status_handle = self.counters_map.allocate(counters.CHANNEL_STATUS, cs_label);
+        const sender_pos_handle = self.counters_map.allocateStreamCounter(
+            counters.SENDER_POSITION,
+            "snd-pos",
+            0,
+            correlation_id,
+            session_id,
+            stream_id,
+            channel_data,
+            null,
+        );
+        const pub_limit_handle = self.counters_map.allocateStreamCounter(
+            counters.PUBLISHER_LIMIT,
+            "pub-lmt",
+            0,
+            correlation_id,
+            session_id,
+            stream_id,
+            channel_data,
+            null,
+        );
+        const channel_status_handle = self.counters_map.allocate(counters.SEND_CHANNEL_STATUS, cs_label);
         self.counters_map.set(pub_limit_handle.counter_id, 0);
         self.counters_map.set(channel_status_handle.counter_id, 1);
 

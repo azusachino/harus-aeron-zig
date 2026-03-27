@@ -3,28 +3,42 @@
 // LESSON(counters): Counters isolate shared position state (publisher-limit, sender-pos, subscriber-pos) in separate cache-line slots. See docs/tutorial/01-foundations/04-counters.md
 const std = @import("std");
 
-pub const PUBLISHER_LIMIT: i32 = 0;
-pub const SENDER_POSITION: i32 = 1;
-pub const RECEIVER_HWM: i32 = 2;
-pub const SUBSCRIBER_POSITION: i32 = 3;
-pub const CHANNEL_STATUS: i32 = 4;
+pub const PUBLISHER_LIMIT: i32 = 1;
+pub const SENDER_POSITION: i32 = 2;
+pub const RECEIVER_HWM: i32 = 3;
+pub const SUBSCRIBER_POSITION: i32 = 4;
+pub const RECEIVER_POSITION: i32 = 5;
+pub const SEND_CHANNEL_STATUS: i32 = 6;
+pub const RECEIVE_CHANNEL_STATUS: i32 = 7;
+pub const CHANNEL_STATUS: i32 = SEND_CHANNEL_STATUS;
 
 pub const RECORD_UNUSED: i32 = 0;
 pub const RECORD_ALLOCATED: i32 = 1;
 pub const RECORD_RECLAIMED: i32 = -1;
 
-pub const METADATA_LENGTH: usize = 1024;
+pub const METADATA_LENGTH: usize = 512;
 // LESSON(counters): 64-byte slots prevent false sharing: a write to counter N doesn't invalidate counter N+1's cache line. See docs/tutorial/01-foundations/04-counters.md
 pub const COUNTER_LENGTH: usize = 128; // Agrona counter value record length
 
 pub const RECORD_STATE_OFFSET: usize = 0;
 pub const TYPE_ID_OFFSET: usize = 4;
 pub const FREE_TO_REUSE_DEADLINE_OFFSET: usize = 8;
-pub const KEY_LENGTH_OFFSET: usize = 16;
-pub const KEY_DATA_OFFSET: usize = 20;
-pub const LABEL_OFFSET: usize = 512;
+pub const KEY_OFFSET: usize = 16;
+pub const MAX_KEY_LENGTH: usize = 112;
+pub const LABEL_OFFSET: usize = 128;
+pub const FULL_LABEL_LENGTH: usize = 384;
+pub const MAX_LABEL_LENGTH: usize = FULL_LABEL_LENGTH - @sizeOf(i32);
 pub const LABEL_LENGTH_OFFSET: usize = LABEL_OFFSET;
 pub const LABEL_DATA_OFFSET: usize = LABEL_OFFSET + 4;
+pub const REGISTRATION_ID_OFFSET: usize = 8;
+pub const OWNER_ID_OFFSET: usize = 16;
+pub const REFERENCE_ID_OFFSET: usize = 24;
+
+pub const STREAM_COUNTER_REGISTRATION_ID_OFFSET: usize = 0;
+pub const STREAM_COUNTER_SESSION_ID_OFFSET: usize = STREAM_COUNTER_REGISTRATION_ID_OFFSET + @sizeOf(i64);
+pub const STREAM_COUNTER_STREAM_ID_OFFSET: usize = STREAM_COUNTER_SESSION_ID_OFFSET + @sizeOf(i32);
+pub const STREAM_COUNTER_CHANNEL_OFFSET: usize = STREAM_COUNTER_STREAM_ID_OFFSET + @sizeOf(i32);
+pub const MAX_CHANNEL_LENGTH: usize = MAX_KEY_LENGTH - (STREAM_COUNTER_CHANNEL_OFFSET + @sizeOf(i32));
 
 pub const CounterHandle = struct {
     counter_id: i32,
@@ -47,6 +61,62 @@ pub const CountersMap = struct {
     }
 
     pub fn allocate(self: *CountersMap, type_id: i32, label: []const u8) CounterHandle {
+        return self.allocateCounter(type_id, &.{}, label, 0, 0, 0);
+    }
+
+    pub fn allocateStreamCounter(
+        self: *CountersMap,
+        type_id: i32,
+        name: []const u8,
+        owner_id: i64,
+        registration_id: i64,
+        session_id: i32,
+        stream_id: i32,
+        channel: []const u8,
+        join_position: ?i64,
+    ) CounterHandle {
+        var key_buf: [MAX_KEY_LENGTH]u8 = undefined;
+        @memset(&key_buf, 0);
+        std.mem.writeInt(i64, key_buf[STREAM_COUNTER_REGISTRATION_ID_OFFSET..][0..8], registration_id, .little);
+        std.mem.writeInt(i32, key_buf[STREAM_COUNTER_SESSION_ID_OFFSET..][0..4], session_id, .little);
+        std.mem.writeInt(i32, key_buf[STREAM_COUNTER_STREAM_ID_OFFSET..][0..4], stream_id, .little);
+
+        const channel_len = @min(channel.len, MAX_CHANNEL_LENGTH);
+        std.mem.writeInt(i32, key_buf[STREAM_COUNTER_CHANNEL_OFFSET..][0..4], @as(i32, @intCast(channel_len)), .little);
+        if (channel_len > 0) {
+            @memcpy(
+                key_buf[STREAM_COUNTER_CHANNEL_OFFSET + 4 .. STREAM_COUNTER_CHANNEL_OFFSET + 4 + channel_len],
+                channel[0..channel_len],
+            );
+        }
+        const key_length = STREAM_COUNTER_CHANNEL_OFFSET + 4 + channel_len;
+
+        var label_buf: [MAX_LABEL_LENGTH]u8 = undefined;
+        const label_len = if (join_position) |pos|
+            std.fmt.bufPrint(
+                &label_buf,
+                "{s}: {d} {d} {d} {s} @{d}",
+                .{ name, registration_id, session_id, stream_id, channel[0..channel_len], pos },
+            ) catch label_buf[0..0]
+        else
+            std.fmt.bufPrint(
+                &label_buf,
+                "{s}: {d} {d} {d} {s}",
+                .{ name, registration_id, session_id, stream_id, channel[0..channel_len] },
+            ) catch label_buf[0..0];
+
+        return self.allocateCounter(type_id, key_buf[0..key_length], label_len, registration_id, owner_id, registration_id);
+    }
+
+    fn allocateCounter(
+        self: *CountersMap,
+        type_id: i32,
+        key: []const u8,
+        label: []const u8,
+        registration_id: i64,
+        owner_id: i64,
+        reference_id: i64,
+    ) CounterHandle {
         var i: usize = 0;
         while (i < self.max_counters) : (i += 1) {
             const counter_id = @as(i32, @intCast(i));
@@ -59,11 +129,15 @@ pub const CountersMap = struct {
                 const type_id_ptr: *[4]u8 = @ptrCast(&self.meta_buffer[meta_offset + TYPE_ID_OFFSET]);
                 std.mem.writeInt(i32, type_id_ptr, type_id, .little);
 
-                const key_len_ptr: *[4]u8 = @ptrCast(&self.meta_buffer[meta_offset + KEY_LENGTH_OFFSET]);
-                std.mem.writeInt(i32, key_len_ptr, 0, .little);
+                const actual_key_len = @min(key.len, MAX_KEY_LENGTH);
+                if (actual_key_len > 0) {
+                    @memcpy(
+                        self.meta_buffer[meta_offset + KEY_OFFSET .. meta_offset + KEY_OFFSET + actual_key_len],
+                        key[0..actual_key_len],
+                    );
+                }
 
-                const max_label_len = METADATA_LENGTH - LABEL_DATA_OFFSET;
-                const actual_label_len = @min(label.len, max_label_len);
+                const actual_label_len = @min(label.len, MAX_LABEL_LENGTH);
                 const label_len_ptr: *[4]u8 = @ptrCast(&self.meta_buffer[meta_offset + LABEL_LENGTH_OFFSET]);
                 std.mem.writeInt(i32, label_len_ptr, @as(i32, @intCast(actual_label_len)), .little);
 
@@ -76,6 +150,9 @@ pub const CountersMap = struct {
 
                 // Reset value to 0
                 self.set(counter_id, 0);
+                self.setCounterRegistrationId(counter_id, registration_id);
+                self.setCounterOwnerId(counter_id, owner_id);
+                self.setCounterReferenceId(counter_id, reference_id);
 
                 // Mark allocated (ordered write) - use writeInt to avoid alignment issues
                 const state_write_ptr: *[4]u8 = @ptrCast(&self.meta_buffer[meta_offset + RECORD_STATE_OFFSET]);
@@ -124,6 +201,44 @@ pub const CountersMap = struct {
         const ptr: *i64 = @ptrCast(@alignCast(&self.values_buffer[offset]));
         return @cmpxchgStrong(i64, ptr, expected, update, .acq_rel, .acquire) == null;
     }
+
+    pub fn setCounterRegistrationId(self: *CountersMap, counter_id: i32, registration_id: i64) void {
+        self.writeValueRecordField(counter_id, REGISTRATION_ID_OFFSET, registration_id);
+    }
+
+    pub fn setCounterOwnerId(self: *CountersMap, counter_id: i32, owner_id: i64) void {
+        self.writeValueRecordField(counter_id, OWNER_ID_OFFSET, owner_id);
+    }
+
+    pub fn setCounterReferenceId(self: *CountersMap, counter_id: i32, reference_id: i64) void {
+        self.writeValueRecordField(counter_id, REFERENCE_ID_OFFSET, reference_id);
+    }
+
+    pub fn getCounterRegistrationId(self: *const CountersMap, counter_id: i32) i64 {
+        return self.readValueRecordField(counter_id, REGISTRATION_ID_OFFSET);
+    }
+
+    pub fn getCounterOwnerId(self: *const CountersMap, counter_id: i32) i64 {
+        return self.readValueRecordField(counter_id, OWNER_ID_OFFSET);
+    }
+
+    pub fn getCounterReferenceId(self: *const CountersMap, counter_id: i32) i64 {
+        return self.readValueRecordField(counter_id, REFERENCE_ID_OFFSET);
+    }
+
+    fn writeValueRecordField(self: *CountersMap, counter_id: i32, field_offset: usize, value: i64) void {
+        if (counter_id < 0 or counter_id >= @as(i32, @intCast(self.max_counters))) return;
+        const offset = @as(usize, @intCast(counter_id)) * COUNTER_LENGTH + field_offset;
+        const ptr: *i64 = @ptrCast(@alignCast(&self.values_buffer[offset]));
+        @atomicStore(i64, ptr, value, .release);
+    }
+
+    fn readValueRecordField(self: *const CountersMap, counter_id: i32, field_offset: usize) i64 {
+        if (counter_id < 0 or counter_id >= @as(i32, @intCast(self.max_counters))) return 0;
+        const offset = @as(usize, @intCast(counter_id)) * COUNTER_LENGTH + field_offset;
+        const ptr: *i64 = @ptrCast(@alignCast(&self.values_buffer[offset]));
+        return @atomicLoad(i64, ptr, .acquire);
+    }
 };
 
 test "CountersMap allocate and free" {
@@ -163,4 +278,47 @@ test "CountersMap operations" {
     const fail = counters.compareAndSet(h.counter_id, 133, 789);
     try std.testing.expect(!fail);
     try std.testing.expectEqual(@as(i64, 456), counters.get(h.counter_id));
+}
+
+test "counter constants match agrona and aeron stream counters" {
+    try std.testing.expectEqual(@as(usize, 512), METADATA_LENGTH);
+    try std.testing.expectEqual(@as(usize, 128), COUNTER_LENGTH);
+    try std.testing.expectEqual(@as(usize, 16), KEY_OFFSET);
+    try std.testing.expectEqual(@as(usize, 112), MAX_KEY_LENGTH);
+    try std.testing.expectEqual(@as(usize, 128), LABEL_OFFSET);
+    try std.testing.expectEqual(@as(usize, 384), FULL_LABEL_LENGTH);
+    try std.testing.expectEqual(@as(usize, 380), MAX_LABEL_LENGTH);
+    try std.testing.expectEqual(@as(i32, 1), PUBLISHER_LIMIT);
+    try std.testing.expectEqual(@as(i32, 2), SENDER_POSITION);
+    try std.testing.expectEqual(@as(i32, 3), RECEIVER_HWM);
+    try std.testing.expectEqual(@as(i32, 4), SUBSCRIBER_POSITION);
+    try std.testing.expectEqual(@as(i32, 6), SEND_CHANNEL_STATUS);
+    try std.testing.expectEqual(@as(i32, 7), RECEIVE_CHANNEL_STATUS);
+}
+
+test "allocateStreamCounter writes upstream-style key and value metadata" {
+    var meta align(64) = [_]u8{0} ** (METADATA_LENGTH * 2);
+    var values align(64) = [_]u8{0} ** (COUNTER_LENGTH * 2);
+    var counters = CountersMap.init(&meta, &values);
+
+    const handle = counters.allocateStreamCounter(
+        PUBLISHER_LIMIT,
+        "pub-limit",
+        42,
+        99,
+        7,
+        1001,
+        "aeron:udp?endpoint=localhost:40123",
+        null,
+    );
+
+    try std.testing.expectEqual(@as(i32, 0), handle.counter_id);
+    try std.testing.expectEqual(@as(i64, 99), counters.getCounterRegistrationId(handle.counter_id));
+    try std.testing.expectEqual(@as(i64, 42), counters.getCounterOwnerId(handle.counter_id));
+    try std.testing.expectEqual(@as(i64, 99), counters.getCounterReferenceId(handle.counter_id));
+
+    const meta_offset = @as(usize, @intCast(handle.counter_id)) * METADATA_LENGTH;
+    try std.testing.expectEqual(@as(i64, 99), std.mem.readInt(i64, meta[meta_offset + KEY_OFFSET + STREAM_COUNTER_REGISTRATION_ID_OFFSET ..][0..8], .little));
+    try std.testing.expectEqual(@as(i32, 7), std.mem.readInt(i32, meta[meta_offset + KEY_OFFSET + STREAM_COUNTER_SESSION_ID_OFFSET ..][0..4], .little));
+    try std.testing.expectEqual(@as(i32, 1001), std.mem.readInt(i32, meta[meta_offset + KEY_OFFSET + STREAM_COUNTER_STREAM_ID_OFFSET ..][0..4], .little));
 }
