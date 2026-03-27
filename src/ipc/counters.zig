@@ -39,6 +39,8 @@ pub const STREAM_COUNTER_SESSION_ID_OFFSET: usize = STREAM_COUNTER_REGISTRATION_
 pub const STREAM_COUNTER_STREAM_ID_OFFSET: usize = STREAM_COUNTER_SESSION_ID_OFFSET + @sizeOf(i32);
 pub const STREAM_COUNTER_CHANNEL_OFFSET: usize = STREAM_COUNTER_STREAM_ID_OFFSET + @sizeOf(i32);
 pub const MAX_CHANNEL_LENGTH: usize = MAX_KEY_LENGTH - (STREAM_COUNTER_CHANNEL_OFFSET + @sizeOf(i32));
+pub const CHANNEL_STATUS_CHANNEL_OFFSET: usize = 0;
+pub const CHANNEL_STATUS_MAX_CHANNEL_LENGTH: usize = MAX_KEY_LENGTH - (@sizeOf(i32) + CHANNEL_STATUS_CHANNEL_OFFSET);
 
 pub const CounterHandle = struct {
     counter_id: i32,
@@ -106,6 +108,36 @@ pub const CountersMap = struct {
             ) catch label_buf[0..0];
 
         return self.allocateCounter(type_id, key_buf[0..key_length], label_len, registration_id, owner_id, registration_id);
+    }
+
+    pub fn allocateChannelStatusCounter(
+        self: *CountersMap,
+        type_id: i32,
+        name: []const u8,
+        registration_id: i64,
+        channel: []const u8,
+    ) CounterHandle {
+        var key_buf: [MAX_KEY_LENGTH]u8 = undefined;
+        @memset(&key_buf, 0);
+
+        const channel_len = @min(channel.len, CHANNEL_STATUS_MAX_CHANNEL_LENGTH);
+        std.mem.writeInt(i32, key_buf[CHANNEL_STATUS_CHANNEL_OFFSET..][0..4], @as(i32, @intCast(channel_len)), .little);
+        if (channel_len > 0) {
+            @memcpy(
+                key_buf[CHANNEL_STATUS_CHANNEL_OFFSET + 4 .. CHANNEL_STATUS_CHANNEL_OFFSET + 4 + channel_len],
+                channel[0..channel_len],
+            );
+        }
+        const key_length = @sizeOf(i32) + channel_len;
+
+        var label_buf: [MAX_LABEL_LENGTH]u8 = undefined;
+        const label_len = std.fmt.bufPrint(
+            &label_buf,
+            "{s}: {s}",
+            .{ name, channel[0..channel_len] },
+        ) catch label_buf[0..0];
+
+        return self.allocateCounter(type_id, key_buf[0..key_length], label_len, registration_id, 0, 0);
     }
 
     fn allocateCounter(
@@ -321,4 +353,33 @@ test "allocateStreamCounter writes upstream-style key and value metadata" {
     try std.testing.expectEqual(@as(i64, 99), std.mem.readInt(i64, meta[meta_offset + KEY_OFFSET + STREAM_COUNTER_REGISTRATION_ID_OFFSET ..][0..8], .little));
     try std.testing.expectEqual(@as(i32, 7), std.mem.readInt(i32, meta[meta_offset + KEY_OFFSET + STREAM_COUNTER_SESSION_ID_OFFSET ..][0..4], .little));
     try std.testing.expectEqual(@as(i32, 1001), std.mem.readInt(i32, meta[meta_offset + KEY_OFFSET + STREAM_COUNTER_STREAM_ID_OFFSET ..][0..4], .little));
+}
+
+test "allocateChannelStatusCounter writes upstream-style key and registration metadata" {
+    var meta align(64) = [_]u8{0} ** (METADATA_LENGTH * 2);
+    var values align(64) = [_]u8{0} ** (COUNTER_LENGTH * 2);
+    var counters = CountersMap.init(&meta, &values);
+
+    const channel = "aeron:udp?endpoint=localhost:20121";
+    const handle = counters.allocateChannelStatusCounter(
+        SEND_CHANNEL_STATUS,
+        "snd-channel",
+        1234,
+        channel,
+    );
+
+    try std.testing.expectEqual(@as(i32, 0), handle.counter_id);
+    try std.testing.expectEqual(@as(i64, 1234), counters.getCounterRegistrationId(handle.counter_id));
+    try std.testing.expectEqual(@as(i64, 0), counters.getCounterOwnerId(handle.counter_id));
+    try std.testing.expectEqual(@as(i64, 0), counters.getCounterReferenceId(handle.counter_id));
+
+    const meta_offset = @as(usize, @intCast(handle.counter_id)) * METADATA_LENGTH;
+    try std.testing.expectEqual(
+        @as(i32, @intCast(channel.len)),
+        std.mem.readInt(i32, meta[meta_offset + KEY_OFFSET + CHANNEL_STATUS_CHANNEL_OFFSET ..][0..4], .little),
+    );
+    try std.testing.expectEqualStrings(
+        channel,
+        meta[meta_offset + KEY_OFFSET + 4 .. meta_offset + KEY_OFFSET + 4 + channel.len],
+    );
 }

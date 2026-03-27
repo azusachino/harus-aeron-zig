@@ -1,6 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const harness = @import("harness.zig");
+const aeron = @import("aeron");
 
 test "round-trip 1 message" {
     const allocator = testing.allocator;
@@ -45,15 +46,17 @@ test "subscriber receives data after SETUP handshake" {
     var sub = try h.createSubscription(1001, "aeron:ipc");
     defer sub.deinit();
 
+    const aeron_pkg = @import("aeron");
+
     // Register subscription in driver conductor so it can match the SETUP frame
     try h.driver.conductor_agent.subscriptions.append(allocator, .{
         .registration_id = 123,
         .stream_id = 1001,
         .channel = try allocator.dupe(u8, "aeron:ipc"),
+        .channel_status_indicator_counter_id = aeron.ipc.counters.NULL_COUNTER_ID,
     });
 
     // Inject a synthetic SETUP signal directly into the receiver queue
-    const aeron_pkg = @import("aeron");
     try h.injectSetupFrame(aeron_pkg.driver.receiver.SetupSignal{
         .session_id = 42,
         .stream_id = 1001,
@@ -86,6 +89,7 @@ test "repeated setup/teardown cycles do not leak images" {
         .registration_id = reg_id,
         .stream_id = stream_id,
         .channel = try allocator.dupe(u8, "aeron:ipc"),
+        .channel_status_indicator_counter_id = aeron.ipc.counters.NULL_COUNTER_ID,
     });
 
     // Cycle: inject SETUP → conductor creates Image → remove subscription → image freed
@@ -97,6 +101,7 @@ test "repeated setup/teardown cycles do not leak images" {
                 .registration_id = reg_id,
                 .stream_id = stream_id,
                 .channel = try allocator.dupe(u8, "aeron:ipc"),
+                .channel_status_indicator_counter_id = aeron_pkg.ipc.counters.NULL_COUNTER_ID,
             });
         }
 
@@ -140,6 +145,7 @@ test "subscriber catch-up preserves client-owned subscriber position" {
         .registration_id = 777,
         .stream_id = stream_id,
         .channel = try allocator.dupe(u8, "aeron:ipc"),
+        .channel_status_indicator_counter_id = aeron_pkg.ipc.counters.NULL_COUNTER_ID,
     });
     try h.injectSetupFrame(aeron_pkg.driver.receiver.SetupSignal{
         .session_id = session_id,

@@ -75,6 +75,7 @@ pub const SubscriptionEntry = struct {
     registration_id: i64,
     stream_id: i32,
     channel: []u8,
+    channel_status_indicator_counter_id: i32,
 };
 
 /// Tracks per-client liveness for timeout eviction.
@@ -151,6 +152,9 @@ pub const DriverConductor = struct {
         self.publications.deinit(self.allocator);
 
         for (self.subscriptions.items) |sub_entry| {
+            if (sub_entry.channel_status_indicator_counter_id != counters.NULL_COUNTER_ID) {
+                self.counters_map.free(sub_entry.channel_status_indicator_counter_id);
+            }
             self.allocator.free(sub_entry.channel);
         }
         self.subscriptions.deinit(self.allocator);
@@ -469,8 +473,6 @@ pub const DriverConductor = struct {
         defer if (!std.mem.eql(u8, sp_label, "sender-pos")) self.allocator.free(sp_label);
         const pl_label = std.fmt.allocPrint(self.allocator, "pub-limit: {d}:{d}", .{ session_id, stream_id }) catch "pub-limit";
         defer if (!std.mem.eql(u8, pl_label, "pub-limit")) self.allocator.free(pl_label);
-        const cs_label = std.fmt.allocPrint(self.allocator, "channel-status: {d}:{d}", .{ session_id, stream_id }) catch "channel-status";
-        defer if (!std.mem.eql(u8, cs_label, "channel-status")) self.allocator.free(cs_label);
         const sender_pos_handle = self.counters_map.allocateStreamCounter(
             counters.SENDER_POSITION,
             "snd-pos",
@@ -491,7 +493,12 @@ pub const DriverConductor = struct {
             channel_data,
             null,
         );
-        const channel_status_handle = self.counters_map.allocate(counters.SEND_CHANNEL_STATUS, cs_label);
+        const channel_status_handle = self.counters_map.allocateChannelStatusCounter(
+            counters.SEND_CHANNEL_STATUS,
+            "snd-channel",
+            correlation_id,
+            channel_data,
+        );
         self.counters_map.set(pub_limit_handle.counter_id, 0);
         self.counters_map.set(channel_status_handle.counter_id, 1);
 
@@ -643,19 +650,34 @@ pub const DriverConductor = struct {
             return;
         };
 
+        const channel_status_handle = self.counters_map.allocateChannelStatusCounter(
+            counters.RECEIVE_CHANNEL_STATUS,
+            "rcv-channel",
+            correlation_id,
+            channel_data,
+        );
+        if (channel_status_handle.counter_id == counters.NULL_COUNTER_ID) {
+            self.allocator.free(channel_copy);
+            self.sendError(correlation_id, 3, "Failed to allocate receive channel status");
+            return;
+        }
+        self.counters_map.set(channel_status_handle.counter_id, 1);
+
         const entry = SubscriptionEntry{
             .registration_id = correlation_id,
             .stream_id = stream_id,
             .channel = channel_copy,
+            .channel_status_indicator_counter_id = channel_status_handle.counter_id,
         };
 
         self.subscriptions.append(self.allocator, entry) catch {
+            self.counters_map.free(channel_status_handle.counter_id);
             self.allocator.free(channel_copy);
             self.sendError(correlation_id, 2, "Out of memory");
             return;
         };
 
-        self.sendSubscriptionReady(correlation_id, counters.NULL_COUNTER_ID);
+        self.sendSubscriptionReady(correlation_id, channel_status_handle.counter_id);
     }
 
     pub fn handleRemoveSubscription(self: *DriverConductor, data: []const u8) void {
@@ -700,6 +722,9 @@ pub const DriverConductor = struct {
                 }
             }
             self.receiver.mutex.unlock();
+            if (removed.channel_status_indicator_counter_id != counters.NULL_COUNTER_ID) {
+                self.counters_map.free(removed.channel_status_indicator_counter_id);
+            }
             self.allocator.free(removed.channel);
             self.sendOperationSuccess(correlation_id);
         }
@@ -859,8 +884,8 @@ test "DriverConductor init and deinit" {
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
 
-    var meta_buf: [4096]u8 = undefined;
-    var values_buf: [4096]u8 = undefined;
+    var meta_buf = [_]u8{0} ** 4096;
+    var values_buf = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
 
     const dummy_socket = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
@@ -897,8 +922,8 @@ test "DriverConductor ADD_PUBLICATION creates entry and sends ready response" {
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
 
-    var meta_buf: [4096]u8 = undefined;
-    var values_buf: [4096]u8 = undefined;
+    var meta_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
+    var values_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
 
     const dummy_socket = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
@@ -965,8 +990,8 @@ test "DriverConductor ADD_SUBSCRIPTION creates entry and sends ready response" {
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
 
-    var meta_buf: [4096]u8 = undefined;
-    var values_buf: [4096]u8 = undefined;
+    var meta_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
+    var values_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
 
     const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
@@ -1007,6 +1032,7 @@ test "DriverConductor ADD_SUBSCRIPTION creates entry and sends ready response" {
     try testing.expectEqual(@as(i32, 99), conductor.subscriptions.items[0].stream_id);
     try testing.expectEqual(@as(i64, 54321), conductor.subscriptions.items[0].registration_id);
     try testing.expectEqualStrings(channel, conductor.subscriptions.items[0].channel);
+    try testing.expect(conductor.subscriptions.items[0].channel_status_indicator_counter_id != counters.NULL_COUNTER_ID);
 
     var rx = try broadcast.BroadcastReceiver.init(allocator, &bcast);
     try testing.expect(rx.receiveNext());
@@ -1014,7 +1040,10 @@ test "DriverConductor ADD_SUBSCRIPTION creates entry and sends ready response" {
     try testing.expectEqual(@as(i32, 12), rx.length());
     const payload = rx.buffer();
     try testing.expectEqual(@as(i64, 54321), std.mem.readInt(i64, payload[0..8], .little));
-    try testing.expectEqual(counters.NULL_COUNTER_ID, std.mem.readInt(i32, payload[8..12], .little));
+    try testing.expectEqual(
+        conductor.subscriptions.items[0].channel_status_indicator_counter_id,
+        std.mem.readInt(i32, payload[8..12], .little),
+    );
 }
 
 test "DriverConductor REMOVE_PUBLICATION cleans up entry" {
@@ -1028,8 +1057,8 @@ test "DriverConductor REMOVE_PUBLICATION cleans up entry" {
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
 
-    var meta_buf: [4096]u8 = undefined;
-    var values_buf: [4096]u8 = undefined;
+    var meta_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
+    var values_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
 
     const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
@@ -1095,8 +1124,8 @@ test "DriverConductor client keepalive registers and updates client" {
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
-    var meta_buf: [4096]u8 = undefined;
-    var values_buf: [4096]u8 = undefined;
+    var meta_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
+    var values_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
     const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
@@ -1138,8 +1167,8 @@ test "DriverConductor checkClientLiveness evicts stale clients" {
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
-    var meta_buf: [4096]u8 = undefined;
-    var values_buf: [4096]u8 = undefined;
+    var meta_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
+    var values_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
     const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
@@ -1185,8 +1214,8 @@ test "DriverConductor REMOVE_SUBSCRIPTION closes associated image" {
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
-    var meta_buf: [4096]u8 = undefined;
-    var values_buf: [4096]u8 = undefined;
+    var meta_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
+    var values_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
     const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
@@ -1209,6 +1238,7 @@ test "DriverConductor REMOVE_SUBSCRIPTION closes associated image" {
         .registration_id = reg_id,
         .stream_id = stream_id,
         .channel = try allocator.dupe(u8, "aeron:udp"),
+        .channel_status_indicator_counter_id = counters.NULL_COUNTER_ID,
     }) catch unreachable;
 
     // Manually add an Image for that subscription to the receiver
@@ -1242,8 +1272,8 @@ test "DriverConductor REMOVE_SUBSCRIPTION sends ON_OPERATION_SUCCESS" {
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
-    var meta_buf: [4096]u8 = undefined;
-    var values_buf: [4096]u8 = undefined;
+    var meta_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
+    var values_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
     const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
@@ -1267,6 +1297,7 @@ test "DriverConductor REMOVE_SUBSCRIPTION sends ON_OPERATION_SUCCESS" {
         .registration_id = reg_id,
         .stream_id = stream_id,
         .channel = try allocator.dupe(u8, "aeron:udp"),
+        .channel_status_indicator_counter_id = counters.NULL_COUNTER_ID,
     }) catch unreachable;
 
     // Remove the subscription with correlation_id
@@ -1314,8 +1345,8 @@ test "DriverConductor TERMINATE_DRIVER stops signal" {
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
-    var meta_buf: [4096]u8 = undefined;
-    var values_buf: [4096]u8 = undefined;
+    var meta_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
+    var values_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
     const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{

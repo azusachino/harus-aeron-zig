@@ -15,15 +15,15 @@ test "DriverConductor: handleAddPublication and handleRemovePublication" {
     var bcast = try aeron.ipc.broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
 
-    const meta_buf = try allocator.alloc(u8, 4096);
+    const meta_buf = try allocator.alignedAlloc(u8, .@"64", 4096);
     defer allocator.free(meta_buf);
-    const values_buf = try allocator.alloc(u8, 4096);
+    @memset(meta_buf, 0);
+    const values_buf = try allocator.alignedAlloc(u8, .@"64", 4096);
     defer allocator.free(values_buf);
+    @memset(values_buf, 0);
     var cm = aeron.ipc.counters.CountersMap.init(meta_buf, values_buf);
 
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    defer std.posix.close(sock);
-
+    const sock = std.math.maxInt(std.posix.socket_t);
     var recv_ep = aeron.transport.ReceiveChannelEndpoint{
         .socket = sock,
         .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
@@ -37,6 +37,7 @@ test "DriverConductor: handleAddPublication and handleRemovePublication" {
 
     var conductor = try aeron.driver.conductor.DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp");
     defer conductor.deinit();
+    conductor.recv_bound = true;
 
     // 1. Add publication
     const channel = "aeron:udp?endpoint=localhost:20121";
@@ -82,10 +83,12 @@ test "DriverConductor: handleAddSubscription and handleRemoveSubscription" {
     var bcast = try aeron.ipc.broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
 
-    const meta_buf = try allocator.alloc(u8, 4096);
+    const meta_buf = try allocator.alignedAlloc(u8, .@"64", 4096);
     defer allocator.free(meta_buf);
-    const values_buf = try allocator.alloc(u8, 4096);
+    @memset(meta_buf, 0);
+    const values_buf = try allocator.alignedAlloc(u8, .@"64", 4096);
     defer allocator.free(values_buf);
+    @memset(values_buf, 0);
     var cm = aeron.ipc.counters.CountersMap.init(meta_buf, values_buf);
 
     const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);

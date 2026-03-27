@@ -77,9 +77,9 @@ Required wire shapes:
 - `src/driver/conductor.zig`
 - `test/driver/conductor_test.zig`
 
-- [ ] Add explicit byte-layout assertions for `ADD_PUBLICATION` length and field order using vendored Aeron flyweight structure as the source of truth.
-- [ ] Add explicit byte-layout assertions for `ON_PUBLICATION_READY` including `registration_id`, both counter ids, and the ASCII `log_file_name`.
-- [ ] Reject malformed publication-ready payloads on the client side rather than assuming the reduced local shape.
+- [x] Add explicit byte-layout assertions for `ADD_PUBLICATION` length and field order using vendored Aeron flyweight structure as the source of truth.
+- [x] Add explicit byte-layout assertions for `ON_PUBLICATION_READY` including `registration_id`, both counter ids, and the ASCII `log_file_name`.
+- [x] Reject malformed publication-ready payloads on the client side rather than assuming the reduced local shape.
 
 Acceptance:
 - `make test-unit`
@@ -93,10 +93,10 @@ Acceptance:
 - `src/logbuffer/log_buffer.zig`
 - `src/driver/media_driver.zig`
 
-- [ ] Extend publication tracking so the conductor can emit both `registration_id` and a stable log-buffer file name.
-- [ ] Add a channel-status counter id for publication readiness instead of omitting it from the contract.
-- [ ] Replace the current 20-byte ready message with the upstream-ready payload shape.
-- [ ] Preserve embedded-driver behavior while making the wire payload complete enough for external clients.
+- [x] Extend publication tracking so the conductor can emit both `registration_id` and a stable log-buffer file name.
+- [x] Add a channel-status counter id for publication readiness instead of omitting it from the contract.
+- [x] Replace the current 20-byte ready message with the upstream-ready payload shape.
+- [x] Preserve embedded-driver behavior while making the wire payload complete enough for external clients.
 
 Acceptance:
 - `make test-unit`
@@ -111,10 +111,10 @@ Acceptance:
 - `src/publication.zig`
 - `src/driver/media_driver.zig`
 
-- [ ] Parse `registration_id`, `session_id`, `stream_id`, both counter ids, and `log_file_name` from `RESPONSE_ON_PUBLICATION_READY`.
-- [ ] Stop depending on the reduced `(session_id, stream_id)` lookup as the only publication materialization path.
-- [ ] Use the ready response as the source of truth for publication registration and counter attachment.
-- [ ] Keep embedded-driver tests green while moving toward a path that can support external clients.
+- [x] Parse `registration_id`, `session_id`, `stream_id`, both counter ids, and `log_file_name` from `RESPONSE_ON_PUBLICATION_READY`.
+- [x] Stop depending on the reduced `(session_id, stream_id)` lookup as the only publication materialization path.
+- [x] Use the ready response as the source of truth for publication registration and counter attachment.
+- [x] Keep embedded-driver tests green while moving toward a path that can support external clients.
 
 Acceptance:
 - `make test-unit`
@@ -169,9 +169,9 @@ Recommended parallel split:
 
 ## Risks
 
-1. The remaining parity debt is now concentrated in `src/ipc/counters.zig`: Agrona-compatible metadata length, key/label offsets, and counter type ids still need cleanup.
-2. The embedded-driver helper path still exists as a fallback, even though the external Java smoke now passes on the wire contract alone.
-3. Publication/data-path interop is green, but the broader counters surface should be normalized before treating this whole area as fully upstream-complete.
+1. The embedded-driver helper path still exists as a fallback, even though the external Java smoke now passes on the wire contract alone.
+2. Publication/data-path interop is green and Java `countersReader()` now validates the core counters surface, but broader external tooling beyond the smoke helper still needs coverage.
+3. The next parity debt is no longer the publication-ready wire contract; it is follow-on external-reader/tooling breadth and remaining fallback cleanup.
 
 ## Done When
 
