@@ -207,9 +207,35 @@ pub const DriverConductor = struct {
                     }
                     std.debug.print("[CONDUCTOR] Found subscription for stream {d}, creating image...\n", .{sig.stream_id});
                     found = true;
+                    const image_log_file_name = if (self.aeron_dir.len != 0)
+                        std.fmt.allocPrint(
+                            self.allocator,
+                            "{s}/image-{d}-{d}-{d}-{d}.logbuffer",
+                            .{ self.aeron_dir, sub.registration_id, sig.session_id, sig.stream_id, sig.initial_term_id },
+                        ) catch continue
+                    else
+                        std.fmt.allocPrint(
+                            self.allocator,
+                            "/tmp/embedded-image-{d}-{d}-{d}.logbuffer",
+                            .{ sig.session_id, sig.stream_id, sig.initial_term_id },
+                        ) catch continue;
+                    defer self.allocator.free(image_log_file_name);
+
                     // Create Image
                     const lb = self.allocator.create(@import("../logbuffer/log_buffer.zig").LogBuffer) catch continue;
-                    lb.* = @import("../logbuffer/log_buffer.zig").LogBuffer.init(self.allocator, sig.term_length) catch continue;
+                    lb.* = @import("../logbuffer/log_buffer.zig").LogBuffer.initMapped(self.allocator, sig.term_length, image_log_file_name) catch {
+                        self.allocator.destroy(lb);
+                        continue;
+                    };
+                    self.initializePublicationLogMetadata(
+                        lb,
+                        sub.registration_id,
+                        sig.session_id,
+                        sig.stream_id,
+                        sig.initial_term_id,
+                        sig.term_length,
+                        sig.mtu,
+                    );
 
                     const hwm_label = std.fmt.allocPrint(self.allocator, "hwm: {d}:{d}", .{ sig.session_id, sig.stream_id }) catch "hwm";
                     defer if (!std.mem.eql(u8, hwm_label, "hwm")) self.allocator.free(hwm_label);
@@ -218,6 +244,7 @@ pub const DriverConductor = struct {
                     const sub_pos_label = std.fmt.allocPrint(self.allocator, "sub-pos: {d}:{d}", .{ sig.session_id, sig.stream_id }) catch "sub-pos";
                     defer if (!std.mem.eql(u8, sub_pos_label, "sub-pos")) self.allocator.free(sub_pos_label);
                     const sub_pos_handle = self.counters_map.allocate(counters.SUBSCRIBER_POSITION, sub_pos_label);
+                    self.counters_map.set(sub_pos_handle.counter_id, 0);
 
                     const image = self.allocator.create(Image) catch continue;
                     image.* = Image.init(
@@ -233,13 +260,6 @@ pub const DriverConductor = struct {
                         sig.source_address,
                     );
                     self.receiver.onAddSubscription(image) catch continue;
-                    var image_log_file_name: []const u8 = "";
-                    for (self.publications.items) |publication_entry| {
-                        if (publication_entry.session_id == sig.session_id and publication_entry.stream_id == sig.stream_id) {
-                            image_log_file_name = publication_entry.log_file_name;
-                            break;
-                        }
-                    }
                     self.sender.onStatusMessage(
                         sig.session_id,
                         sig.stream_id,

@@ -15,7 +15,7 @@ pub const RECORD_RECLAIMED: i32 = -1;
 
 pub const METADATA_LENGTH: usize = 1024;
 // LESSON(counters): 64-byte slots prevent false sharing: a write to counter N doesn't invalidate counter N+1's cache line. See docs/tutorial/01-foundations/04-counters.md
-pub const COUNTER_LENGTH: usize = 64; // Cache line size
+pub const COUNTER_LENGTH: usize = 128; // Agrona counter value record length
 
 pub const RECORD_STATE_OFFSET: usize = 0;
 pub const TYPE_ID_OFFSET: usize = 4;

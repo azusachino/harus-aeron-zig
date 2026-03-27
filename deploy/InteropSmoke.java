@@ -88,7 +88,8 @@ public final class InteropSmoke
 
             if (System.nanoTime() > deadline)
             {
-                throw new IllegalStateException("Timed out offering publication data");
+                throw new IllegalStateException(
+                    "Timed out offering publication data; last result=" + Publication.errorString(position));
             }
 
             sleepQuietly(1);

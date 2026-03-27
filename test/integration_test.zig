@@ -122,7 +122,7 @@ test "repeated setup/teardown cycles do not leak images" {
     }
 }
 
-test "subscriber catch-up: gap fill advances subscriber position" {
+test "subscriber catch-up: gap fill advances receiver rebuild position" {
     const allocator = std.testing.allocator;
     const aeron_pkg = @import("aeron");
     const protocol = aeron_pkg.protocol;
@@ -156,9 +156,10 @@ test "subscriber catch-up: gap fill advances subscriber position" {
     const image = h.driver.receiver_agent.images.items[0];
     const cm = h.driver.conductor_agent.counters_map;
 
-    // Subscriber position should start at 0 (no data yet)
+    // Client-owned subscriber position should start at 0 (no data consumed yet)
     const pos_before = cm.get(image.subscriber_position.counter_id);
     try std.testing.expectEqual(@as(i64, 0), pos_before);
+    try std.testing.expectEqual(@as(i64, 0), image.rebuild_position);
 
     // Simulate arrival of a DATA frame at offset 0
     const payload = "catch-up-test";
@@ -176,9 +177,11 @@ test "subscriber catch-up: gap fill advances subscriber position" {
     const written = image.insertFrame(cm, &dh, payload);
     try std.testing.expect(written);
 
-    // Subscriber position should now have advanced past the frame
-    const pos_after = cm.get(image.subscriber_position.counter_id);
-    try std.testing.expect(pos_after > 0);
+    // Receiver rebuild position should now have advanced past the frame while
+    // the client-owned subscriber position counter remains unchanged.
+    const rebuild_after = image.rebuild_position;
+    try std.testing.expect(rebuild_after > 0);
+    try std.testing.expectEqual(@as(i64, 0), cm.get(image.subscriber_position.counter_id));
 
     // Deliver a second frame (gap fill) at an offset after the first
     const aligned_first = std.mem.alignForward(
@@ -192,6 +195,7 @@ test "subscriber catch-up: gap fill advances subscriber position" {
     const written2 = image.insertFrame(cm, &dh, payload);
     try std.testing.expect(written2);
 
-    const pos_final = cm.get(image.subscriber_position.counter_id);
-    try std.testing.expect(pos_final > pos_after);
+    const rebuild_final = image.rebuild_position;
+    try std.testing.expect(rebuild_final > rebuild_after);
+    try std.testing.expectEqual(@as(i64, 0), cm.get(image.subscriber_position.counter_id));
 }

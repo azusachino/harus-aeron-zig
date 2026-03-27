@@ -130,9 +130,9 @@ Acceptance:
 - `deploy/docker-compose.ci.yml`
 - `Makefile` if target wiring changes
 
-- [ ] Extend the finite Java smoke helper beyond `addSubscription` so publication creation is exercised explicitly.
-- [ ] Add a bounded publish/data-path scenario that proves a publication becomes usable after the ready response.
-- [ ] Keep the smoke harness finite and CI-appropriate.
+- [x] Extend the finite Java smoke helper beyond `addSubscription` so publication creation is exercised explicitly.
+- [x] Add a bounded publish/data-path scenario that proves a publication becomes usable after the ready response.
+- [x] Keep the smoke harness finite and CI-appropriate.
 
 Acceptance:
 - `make interop-smoke`
@@ -144,9 +144,9 @@ Acceptance:
 **Files:**
 - tracking docs plus any touched source/tests
 
-- [ ] Run `make check`.
-- [ ] Run `make interop-smoke`.
-- [ ] Update `.agents/publication_path_tasks.jsonl` and `.agents/PUBLICATION_PATH_TRACKER.md` with final status.
+- [x] Run `make check`.
+- [x] Run `make interop-smoke`.
+- [x] Update `.agents/publication_path_tasks.jsonl` and `.agents/PUBLICATION_PATH_TRACKER.md` with final status.
 - [ ] If this slice stabilizes, fold the result back into `docs/plan.md` as the next completed parity step.
 
 ---
@@ -169,9 +169,9 @@ Recommended parallel split:
 
 ## Risks
 
-1. Publication readiness now needs a stable log-file identity, but local publication buffers are still often heap-backed instead of clearly file-backed.
-2. The embedded-driver helper path may hide external-client gaps unless tests assert the ready payload directly.
-3. Adding the full ready payload can break existing simplified tests unless they are updated in the same slice.
+1. The remaining parity debt is now concentrated in `src/ipc/counters.zig`: Agrona-compatible metadata length, key/label offsets, and counter type ids still need cleanup.
+2. The embedded-driver helper path still exists as a fallback, even though the external Java smoke now passes on the wire contract alone.
+3. Publication/data-path interop is green, but the broader counters surface should be normalized before treating this whole area as fully upstream-complete.
 
 ## Done When
 

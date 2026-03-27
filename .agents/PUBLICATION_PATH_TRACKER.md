@@ -1,6 +1,6 @@
 # Publication Path Tracker
 
-Branch: `docs/publication-path-parity-plan`
+Branch: `feat/publication-path-upstream-parity`
 Date started: 2026-03-27
 
 ## Legend
@@ -32,8 +32,9 @@ Make the next parity slice concrete and agent-ready: publication command/respons
 - [x] Local implementation/task split documented.
 - [x] Publication-ready payload now carries upstream fields plus a mappable log-buffer path.
 - [x] `make check` is green after the publication-path wire/client changes.
-- [~] `make interop-smoke` now gets through publication mapping, connection, receiver SETUP/image creation, and first DATA frame.
-- [!] Java finite smoke still stalls later during repeated `publication.offer(...)`, so the remaining gap is now publication-window / offer-progress behavior rather than ready-payload parsing.
+- [x] `make interop-smoke` is green for finite Java publication + subscription data-path flow.
+- [x] Publication-window, image-log mapping, and client-owned subscriber-position gaps were closed locally.
+- [~] Remaining upstream parity backlog is now narrower: Agrona-compatible counters metadata/type-id layout still needs cleanup.
 
 ## Task Board
 
@@ -46,8 +47,8 @@ Make the next parity slice concrete and agent-ready: publication command/respons
 | P11-5 | conductor-response | Lead | done | `src/driver/conductor.zig`, `src/logbuffer/log_buffer.zig`, `src/driver/media_driver.zig` | `ON_PUBLICATION_READY` now emits registration id, both counter ids, and a log-buffer path; mapped file metadata is initialized for Java log-buffer mapping |
 | P11-6 | client-ready-consumption | Lead | done | `src/aeron.zig`, `src/publication.zig` | Client parses the full ready payload and can map the returned log buffer |
 | P11-7 | tests | Lead | done | `src/aeron.zig`, `src/driver/conductor.zig`, `test/driver/conductor_test.zig` | Local tests and `make check` are green after the publication-path change set |
-| P11-8 | interop | Heisenberg (5.4-mini) + Lead | in progress | `deploy/InteropSmoke.java`, `deploy/entrypoint-java.sh`, `deploy/docker-compose.ci.yml`, `src/driver/conductor.zig`, `src/driver/media_driver.zig`, `src/driver/sender.zig` | Smoke now reaches connected publication + image creation + first DATA; current blocker is later offer/data progress |
-| P11-9 | verification | Lead | in progress | `Makefile`, `.agents/PUBLICATION_PATH_TRACKER.md`, `.agents/publication_path_tasks.jsonl` | `make test-unit` is green; `make interop-smoke` now fails later at repeated offer progression |
+| P11-8 | interop | Heisenberg (5.4-mini) + Lead | done | `deploy/InteropSmoke.java`, `src/driver/conductor.zig`, `src/driver/media_driver.zig`, `src/driver/sender.zig`, `src/driver/receiver.zig`, `src/ipc/counters.zig` | Smoke is green after fixing publisher-limit visibility, mapped image log delivery, image metadata init, and client-owned subscriber-position semantics |
+| P11-9 | verification | Lead | done | `Makefile`, `.agents/PUBLICATION_PATH_TRACKER.md`, `.agents/publication_path_tasks.jsonl` | `make test-unit`, `make check`, and `make interop-smoke` are green |
 
 ## Evidence / Upstream References
 
@@ -60,10 +61,9 @@ Make the next parity slice concrete and agent-ready: publication command/respons
 
 ## Risks / Open Questions
 
-- Local publication buffers are not consistently represented as stable on-disk log files yet; the ready payload needs a credible `log_file_name` story.
-- Embedded-driver lookup by `(session_id, stream_id)` currently papers over missing wire metadata.
-- The bounded interop smoke now reaches Java publication creation, receiver-side SETUP, image creation, and the first DATA frame.
-- The remaining publication-path gap appears to be later offer-progress / flow-control behavior after the first successful DATA, not the original publication-ready or image-ready wire contracts.
+- Remaining parity debt is now mostly in `src/ipc/counters.zig`: metadata record length, label/key offsets, and Aeron counter type ids are still not fully Agrona-compatible.
+- Embedded-driver lookup by `(session_id, stream_id)` still exists as fallback in the Zig client, although the wire path is now sufficient for external Java publication/subscription smoke.
+- Receiver-side subscriber position semantics are now aligned enough for Java image polling, but the broader counters metadata surface should still be normalized against vendored Aeron before calling this area fully upstream-parity complete.
 
 ## Session Log
 
@@ -90,5 +90,7 @@ Make the next parity slice concrete and agent-ready: publication command/respons
 - Added publication log metadata connected/active-transport state and updated it from sender STATUS handling.
 - Reworked loopback interop so the driver emits an initial SETUP immediately and reaches receiver-side SETUP processing and image creation.
 - Expanded `ON_IMAGE_READY` from the previous 20-byte stub to the upstream `ImageBuffersReadyFlyweight` field layout used by the Java client.
-- `make test-unit` is green after the publication/image-ready follow-up.
-- `make interop-smoke` now reaches the first DATA frame and then stalls later at repeated `publication.offer(...)`.
+- Switched counter value stride to `128` bytes so Java sees the correct publisher-limit slot instead of stalling after the first offer.
+- Moved image delivery onto a mapped image log file, initialized its metadata, and advertised that file in `ON_IMAGE_READY`.
+- Stopped using the client-visible subscriber-position counter as receiver rebuild progress; Java now owns image consumption position and finite subscription polling succeeds.
+- `make test-unit`, `make check`, and `make interop-smoke` are green.
