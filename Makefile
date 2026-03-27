@@ -17,7 +17,7 @@ CONTAINER_ENGINE := $(shell if command -v docker >/dev/null 2>&1; then printf '%
 	else printf '%s' 'docker'; fi)
 endif
 
-.PHONY: fmt fmt-check build test lint check clean run tutorial-check lesson-lint \
+.PHONY: fmt fmt-check build test lint check clean clean-local run tutorial-check lesson-lint \
        fuzz bench stress \
        nix-image k8s-up k8s-down k8s-status k8s-logs colima-up colima-down \
        setup setup-interop setup-interop-base setup-upstream-aeron setup-upstream-zig \
@@ -88,6 +88,9 @@ tutorial-check:
 
 clean:
 	rm -rf zig-out .zig-cache .zig-global-cache
+
+clean-local:
+	rm -rf result throughput test/interop/aeron-all.jar ./nix-shell.*
 
 setup: setup-interop  ## Prepare local helper artifacts for interop and benchmarks
 
