@@ -178,7 +178,7 @@ Add a second `offer` call and assert `received_count == 2`. Verify that the seco
 
 ## Wire compatibility testing against real Java Aeron
 
-The setup in `docs/setup.md` describes a Docker-based approach:
+The setup in `docs/guides/setup.md` describes a Docker-based approach:
 
 1. Pull the official `aeronmd` Docker image.
 2. Start it with a shared `aeron_dir` volume mounted at `/dev/shm/aeron`.

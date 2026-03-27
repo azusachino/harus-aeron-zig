@@ -2,7 +2,7 @@
 
 **Date**: 2026-03-23
 **Status**: Approved
-**Audit basis**: `docs/audit-2026-03-23.md`
+**Audit basis**: `docs/audits/2026-03-23-wire-compatibility.md`
 
 ---
 
@@ -38,7 +38,7 @@ All other tasks are sequential within their lane.
 | **M2** — Zig-only driver working | End-to-end Zig pub/sub via CnC.dat; mmap log files on disk | I-6 through I-8 pass integration test | C-2 through C-4 written and reviewed |
 | **M3** — Java interop | Java `Aeron.connect()` succeeds; cross-language pub/sub smoke test passes | I-9 passes (gated on `AERON_INTEROP=1`) | C-5 through C-9 written and reviewed |
 
-A merge agent runs `make check` on the full tree at each milestone and updates `docs/plan-phase6.md`
+A merge agent runs `make check` on the full tree at each milestone and updates `docs/plans/phase6.md`
 before the next wave starts.
 
 ---
@@ -189,9 +189,9 @@ Module dependency map, estimated reading time per chapter.
 Each task is dispatched as a single sub-agent with:
 - A focused prompt: exact files to touch, acceptance criteria, `make check` as the exit gate
 - No shared mutable state between agents — each reads current repo state fresh
-- Status tracked in `docs/plan-phase6.md` (one row per task, updated by the agent on completion)
+- Status tracked in `docs/plans/phase6.md` (one row per task, updated by the agent on completion)
 
-**Agent prompt template**: `docs/agent-prompt-template.md`
+**Agent prompt template**: `docs/templates/phase6-sub-agent-prompt.md`
 
 ---
 
@@ -199,10 +199,10 @@ Each task is dispatched as a single sub-agent with:
 
 | File | Purpose |
 |------|---------|
-| `docs/audit-2026-03-23.md` | Full audit findings |
+| `docs/audits/2026-03-23-wire-compatibility.md` | Full audit findings |
 | `docs/specs/2026-03-23-phase6-interop-course-design.md` | This document |
-| `docs/plan-phase6.md` | Execution tracking table |
-| `docs/agent-prompt-template.md` | Reusable sub-agent prompt format |
+| `docs/plans/phase6.md` | Execution tracking table |
+| `docs/templates/phase6-sub-agent-prompt.md` | Reusable sub-agent prompt format |
 | `docs/course/lesson-gap-report.md` | Output of C-1 |
 | `docs/tutorial/part/*.md` | Tutorial chapters (C-2 through C-9) |
 | `src/driver/cnc.zig` | CnC.dat implementation (I-7) |

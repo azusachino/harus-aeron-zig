@@ -8,7 +8,7 @@
 
 **Tech Stack:** Zig 0.14, `std.posix` (mmap, sockets), `@cmpxchgStrong`/`@atomicLoad` for lock-free primitives, Docker Compose for Java interop smoke test.
 
-**Reference docs:** `docs/audit-2026-03-23.md` (bug details), `docs/specs/2026-03-23-phase6-interop-course-design.md` (approved design).
+**Reference docs:** `docs/audits/2026-03-23-wire-compatibility.md` (bug details), `docs/specs/2026-03-23-phase6-interop-course-design.md` (approved design).
 
 ---
 
@@ -622,12 +622,12 @@ Expected: fmt-check passes, build succeeds, all tests pass.
 
 - [ ] **Step 2: Update tracking table**
 
-In `docs/plan-phase6.md`, set M1 status to `done` and all I-1 through I-5, C-1 rows to `done`.
+In `docs/plans/phase6.md`, set M1 status to `done` and all I-1 through I-5, C-1 rows to `done`.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add docs/plan-phase6.md
+git add docs/plans/phase6.md
 git commit -m "chore: milestone M1 — structural fixes complete"
 ```
 
@@ -1201,7 +1201,7 @@ Expected: `round-trip 1 message` passes, `addPublication writes command` passes.
 - [ ] **Step 3: Update tracking table and commit**
 
 ```bash
-git add docs/plan-phase6.md
+git add docs/plans/phase6.md
 git commit -m "chore: milestone M2 — Zig-only driver working end-to-end"
 ```
 
@@ -1497,7 +1497,7 @@ Expected: both pub→sub directions pass.
 - [ ] **Step 3: Update tracking table and commit**
 
 ```bash
-git add docs/plan-phase6.md
+git add docs/plans/phase6.md
 git commit -m "chore: milestone M3 — Java interop complete"
 ```
 
@@ -1585,7 +1585,7 @@ git commit -m "docs: write course index with Zig-track and Aeron-track reading p
 
 ## Agent Prompt Template
 
-The sub-agent prompt template is already written at `docs/agent-prompt-template.md`.
+The sub-agent prompt template is already written at `docs/templates/phase6-sub-agent-prompt.md`.
 Read it before dispatching any sub-agent — it includes `Lane`, `Milestone`, and `Quick Reference`
 sections required for each task.
 

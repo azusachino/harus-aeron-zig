@@ -908,7 +908,7 @@ Phase 4 tasks: P4-1 standalone; P4-2,3,4 need Phase 1
 - Tasks with `(no deps)` label can be started in parallel immediately
 - Each task should result in a passing `make test` for its module
 - Use `make check` before marking any task done
-- Keep `docs/todo.md` updated as tasks complete
+- Keep `docs/plan.md` and dated `docs/plans/` entries updated as tasks complete
 - Cross-reference https://github.com/aeron-io/aeron for any protocol detail questions
 
 ---
@@ -1067,9 +1067,9 @@ Implement:
 Acceptance criteria:
 - `make setup`
 - `make interop`
-- documented reproducible workflow in `docs/setup.md`
+- documented reproducible workflow in `docs/guides/setup.md`
 
-**Status: DONE (2026-03-25)** — Deterministic Zig↔Java interop matrix (pub/sub, archive, cluster scenarios), single `make interop` entrypoint with k8s deployment under `deploy/interop/`, CI smoke path and heavier local paths. `docs/setup.md` updated with reproducible workflow.
+**Status: DONE (2026-03-25)** — Deterministic Zig↔Java interop matrix (pub/sub, archive, cluster scenarios), single `make interop` entrypoint with k8s deployment under `deploy/interop/`, CI smoke path and heavier local paths. `docs/guides/setup.md` updated with reproducible workflow.
 
 Dependencies:
 - Task P8-1
