@@ -1,0 +1,224 @@
+{
+  "layer": "protocol",
+  "our_file": "test/protocol/frame_codec_test.zig",
+  "upstream_class": "DataHeaderFlyweightTest",
+  "upstream_path": "aeron-client/src/test/java/io/aeron/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "protocol",
+  "our_file": "test/protocol/frame_codec_test.zig",
+  "upstream_class": "SetupFlyweightTest",
+  "upstream_path": "aeron-client/src/test/java/io/aeron/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "protocol",
+  "our_file": "test/protocol/frame_codec_test.zig",
+  "upstream_class": "StatusMessageFlyweightTest",
+  "upstream_path": "aeron-client/src/test/java/io/aeron/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "protocol",
+  "our_file": "test/protocol/uri_parser_test.zig",
+  "upstream_class": "ChannelUriTest",
+  "upstream_path": "aeron-client/src/test/java/io/aeron/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "protocol",
+  "our_file": "test/protocol/flow_control_test.zig",
+  "upstream_class": "ReceiverWindowTest",
+  "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "protocol",
+  "our_file": "test/protocol/frame_codec_test.zig",
+  "upstream_class": "FlyweightTest.shouldEncodeAndDecodeNakCorrectly",
+  "upstream_path": "aeron-client/src/test/java/io/aeron/FlyweightTest.java + aeron-client/src/main/java/io/aeron/protocol/NakFlyweight.java",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "protocol",
+  "our_file": "test/protocol/frame_codec_test.zig",
+  "upstream_class": "RttMeasurementFlyweight + aeron_receive_channel_endpoint_send_rttm",
+  "upstream_path": "aeron-client/src/main/java/io/aeron/protocol/RttMeasurementFlyweight.java + aeron-client/src/main/c/protocol/aeron_udp_protocol.h + aeron-driver/src/main/c/media/aeron_receive_channel_endpoint.c + aeron-driver/src/main/c/aeron_network_publication.c",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "protocol",
+  "our_file": "src/protocol/frame.zig",
+  "upstream_class": "ErrorFlyweightTest",
+  "upstream_path": "aeron-client/src/test/java/io/aeron/protocol/ErrorFlyweightTest.java + aeron-client/src/main/java/io/aeron/protocol/ErrorFlyweight.java",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "protocol",
+  "our_file": "src/protocol/frame.zig",
+  "upstream_class": "ResponseSetupFlyweight",
+  "upstream_path": "aeron-client/src/main/java/io/aeron/protocol/ResponseSetupFlyweight.java + aeron-client/src/main/c/protocol/aeron_udp_protocol.h",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "protocol",
+  "our_file": "src/protocol/frame.zig",
+  "upstream_class": "ResolutionEntryFlyweight",
+  "upstream_path": "aeron-client/src/main/java/io/aeron/protocol/ResolutionEntryFlyweight.java + aeron-client/src/main/c/protocol/aeron_udp_protocol.h",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "ipc",
+  "our_file": "src/driver/cnc.zig",
+  "upstream_class": "CncFileDescriptorTest",
+  "upstream_path": "aeron-client/src/test/java/io/aeron/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "ipc",
+  "our_file": "src/ipc/broadcast.zig",
+  "upstream_class": "BroadcastTransmitterTest",
+  "upstream_path": "aeron-client/src/test/c/concurrent/aeron_broadcast_transmitter_test.cpp",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "ipc",
+  "our_file": "src/ipc/broadcast.zig",
+  "upstream_class": "BroadcastReceiverTest",
+  "upstream_path": "aeron-client/src/test/c/concurrent/aeron_broadcast_receiver_test.cpp",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "ipc",
+  "our_file": "src/ipc/ring_buffer.zig",
+  "upstream_class": "ManyToOneRingBufferTest",
+  "upstream_path": "agrona/src/test/java/org/agrona/concurrent/ringbuffer/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "driver",
+  "our_file": "test/driver/session_establishment_test.zig",
+  "upstream_class": "PublicationImageTest",
+  "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "driver",
+  "our_file": "test/driver/session_establishment_test.zig",
+  "upstream_class": "DriverConductorTest",
+  "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "driver",
+  "our_file": "test/driver/publication_lifecycle_test.zig",
+  "upstream_class": "DriverConductorTest",
+  "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "driver",
+  "our_file": "test/driver/subscription_lifecycle_test.zig",
+  "upstream_class": "DriverConductorTest",
+  "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "driver",
+  "our_file": "test/driver/conductor_ipc_test.zig",
+  "upstream_class": "DriverConductorTest",
+  "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "driver",
+  "our_file": "test/driver/loss_and_recovery_test.zig",
+  "upstream_class": "LossHandlerTest",
+  "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "driver",
+  "our_file": "test/driver/loss_and_recovery_test.zig",
+  "upstream_class": "RetransmitHandlerTest",
+  "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "archive",
+  "our_file": "test/archive/catalog_test.zig",
+  "upstream_class": "CatalogTest",
+  "upstream_path": "aeron-archive/src/test/java/io/aeron/archive/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "archive",
+  "our_file": "test/archive/record_replay_test.zig",
+  "upstream_class": "ArchiveTest",
+  "upstream_path": "aeron-archive/src/test/java/io/aeron/archive/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "archive",
+  "our_file": "test/archive/segment_rotation_test.zig",
+  "upstream_class": "RecordingWriterTest",
+  "upstream_path": "aeron-archive/src/test/java/io/aeron/archive/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "cluster",
+  "our_file": "test/cluster/election_test.zig",
+  "upstream_class": "ElectionTest",
+  "upstream_path": "aeron-cluster/src/test/java/io/aeron/cluster/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "cluster",
+  "our_file": "test/cluster/log_replication_test.zig",
+  "upstream_class": "ClusterTimerTest",
+  "upstream_path": "aeron-cluster/src/test/java/io/aeron/cluster/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "cluster",
+  "our_file": "test/cluster/log_replication_test.zig",
+  "upstream_class": "LogReplicationTest",
+  "upstream_path": "aeron-cluster/src/test/java/io/aeron/cluster/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}
+{
+  "layer": "cluster",
+  "our_file": "test/cluster/failover_test.zig",
+  "upstream_class": "ClusterNodeTest",
+  "upstream_path": "aeron-cluster/src/test/java/io/aeron/cluster/",
+  "aeron_version": "1.50.2",
+  "status": "done"
+}

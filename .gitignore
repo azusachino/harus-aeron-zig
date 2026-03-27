@@ -20,6 +20,8 @@ zig-out/
 # Local helper artifacts
 test/interop/aeron-all.jar
 throughput
+vendor/aeron
+vendor/zig
 vendor/zig-std
 
 # Agent state (session-volatile)

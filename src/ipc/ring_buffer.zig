@@ -7,8 +7,8 @@ pub const INSUFFICIENT_CAPACITY: i32 = -1;
 pub const PADDING_MSG_TYPE_ID: i32 = -1;
 
 // Upstream command message types (client → driver)
-pub const CLIENT_KEEPALIVE_MSG_TYPE: i32 = 0x05;
-pub const TERMINATE_DRIVER_MSG_TYPE: i32 = 0x08;
+pub const CLIENT_KEEPALIVE_MSG_TYPE: i32 = 0x06;
+pub const TERMINATE_DRIVER_MSG_TYPE: i32 = 0x0E;
 
 // Metadata positions (last 128 bytes of buffer)
 pub const TAIL_POSITION_OFFSET: usize = 0;
@@ -105,13 +105,13 @@ pub const ManyToOneRingBuffer = struct {
 
         // Check if record would wrap around buffer end
         if (record_index + aligned_length > self.capacity) {
-            // Insert padding record
+            // Insert padding record — Agrona layout: length@0, type@4
             const padding_length = @as(i32, @intCast(self.capacity - record_index));
             const padding_addr = self.buffer.ptr + record_index;
-            const msg_type_ptr: *i32 = @ptrCast(@alignCast(padding_addr));
-            msg_type_ptr.* = PADDING_MSG_TYPE_ID;
-            const length_ptr: *i32 = @ptrCast(@alignCast(padding_addr + 4));
-            length_ptr.* = padding_length;
+            const pad_len_ptr: *i32 = @ptrCast(@alignCast(padding_addr));
+            pad_len_ptr.* = padding_length; // length at offset 0
+            const pad_type_ptr: *i32 = @ptrCast(@alignCast(padding_addr + 4));
+            pad_type_ptr.* = PADDING_MSG_TYPE_ID; // type at offset 4
 
             tail += padding_length;
             record_index = 0;
@@ -123,11 +123,13 @@ pub const ManyToOneRingBuffer = struct {
             tail = self.loadTail();
         }
 
-        // Write header
+        // Write header — Agrona layout: length@0 (negative sentinel), type@4
         const record_addr = self.buffer.ptr + record_index;
-        const msg_type_ptr: *i32 = @ptrCast(@alignCast(record_addr));
-        msg_type_ptr.* = msg_type_id;
-        const length_ptr: *i32 = @ptrCast(@alignCast(record_addr + 4));
+        const record_length = @as(i32, @intCast(RecordDescriptor.HEADER_LENGTH + data.len));
+        const length_ptr: *i32 = @ptrCast(@alignCast(record_addr));
+        @atomicStore(i32, length_ptr, -record_length, .release); // in-progress sentinel
+        const msg_type_ptr: *i32 = @ptrCast(@alignCast(record_addr + 4));
+        msg_type_ptr.* = msg_type_id; // type at offset 4
 
         // Copy payload
         if (data.len > 0) {
@@ -135,8 +137,8 @@ pub const ManyToOneRingBuffer = struct {
             @memcpy(payload_addr[0..data.len], data);
         }
 
-        // Commit with ordered store of actual length (header + payload, not aligned)
-        length_ptr.* = @as(i32, @intCast(RecordDescriptor.HEADER_LENGTH + data.len));
+        // Commit: write positive length (ordered store signals record is ready to read)
+        @atomicStore(i32, length_ptr, record_length, .release);
         return true;
     }
 
@@ -149,25 +151,26 @@ pub const ManyToOneRingBuffer = struct {
             const index = @as(usize, @intCast(head)) % self.capacity;
 
             const record_addr = self.buffer.ptr + index;
-            const msg_type_ptr: *i32 = @ptrCast(@alignCast(record_addr));
+
+            // Agrona layout: length@0 (negative=in-progress, 0=empty, positive=ready), type@4
+            const length_ptr: *i32 = @ptrCast(@alignCast(record_addr));
+            const record_length = @atomicLoad(i32, length_ptr, .acquire);
+
+            if (record_length <= 0) {
+                // Empty slot or writer in progress — no more records to read
+                break;
+            }
+
+            const msg_type_ptr: *i32 = @ptrCast(@alignCast(record_addr + 4));
             const msg_type_id = msg_type_ptr.*;
 
             if (msg_type_id == PADDING_MSG_TYPE_ID) {
-                // Skip padding
-                const length_ptr: *i32 = @ptrCast(@alignCast(record_addr + 4));
-                const record_length = length_ptr.*;
+                // Skip padding — advance head by the stored record length
                 head += record_length;
                 i += 1;
                 continue;
             }
 
-            if (msg_type_id == 0) {
-                // No more records
-                break;
-            }
-
-            const length_ptr: *i32 = @ptrCast(@alignCast(record_addr + 4));
-            const record_length = length_ptr.*;
             const msg_length = record_length - RecordDescriptor.HEADER_LENGTH;
 
             const payload_addr = record_addr + RecordDescriptor.HEADER_LENGTH;
@@ -197,6 +200,18 @@ test "record alignment" {
     try std.testing.expectEqual(16, RecordDescriptor.aligned(8));
 }
 
+test "ring buffer constants match agrona protocol values" {
+    try std.testing.expectEqual(@as(i32, 0x06), CLIENT_KEEPALIVE_MSG_TYPE);
+    try std.testing.expectEqual(@as(i32, 0x0E), TERMINATE_DRIVER_MSG_TYPE);
+    try std.testing.expectEqual(@as(usize, 128), METADATA_LENGTH);
+    try std.testing.expectEqual(@as(usize, 8), RecordDescriptor.HEADER_LENGTH);
+    try std.testing.expectEqual(@as(usize, 8), RecordDescriptor.ALIGNMENT);
+    try std.testing.expectEqual(@as(usize, 0), TAIL_POSITION_OFFSET);
+    try std.testing.expectEqual(@as(usize, 8), HEAD_CACHE_POSITION_OFFSET);
+    try std.testing.expectEqual(@as(usize, 16), HEAD_POSITION_OFFSET);
+    try std.testing.expectEqual(@as(usize, 24), CORRELATION_COUNTER_OFFSET);
+}
+
 test "single write and read roundtrip" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -221,6 +236,23 @@ test "single write and read roundtrip" {
     const fragments = rb.read(handler, @ptrCast(&received_msg), 10);
     try std.testing.expectEqual(fragments, 1);
     try std.testing.expectEqualSlices(u8, test_msg, received_msg);
+}
+
+test "write stores agrona record header as length then type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const buf = try arena.allocator().alloc(u8, 256);
+    @memset(buf, 0);
+
+    var rb = ManyToOneRingBuffer.init(buf);
+    const msg = "abc";
+    try std.testing.expect(rb.write(0x04, msg));
+
+    try std.testing.expectEqual(@as(i32, 11), std.mem.readInt(i32, buf[0..4], .little));
+    try std.testing.expectEqual(@as(i32, 0x04), std.mem.readInt(i32, buf[4..8], .little));
+    try std.testing.expectEqualSlices(u8, msg, buf[8 .. 8 + msg.len]);
+    try std.testing.expectEqual(@as(i64, 16), std.mem.readInt(i64, buf[rb.capacity + TAIL_POSITION_OFFSET ..][0..8], .little));
 }
 
 test "write until full returns false" {
@@ -298,4 +330,39 @@ test "wrap-around with padding" {
     }
 
     try std.testing.expect(write_count > 0);
+}
+
+test "wrap-around encodes padding record with length then padding type" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const buf = try arena.allocator().alloc(u8, 256);
+    @memset(buf, 0);
+
+    var rb = ManyToOneRingBuffer.init(buf);
+    try std.testing.expectEqual(@as(usize, 128), rb.capacity);
+
+    // 7 x 16-byte aligned records => head/tail at 112, leaving 16 bytes at the end.
+    for (0..7) |_| {
+        try std.testing.expect(rb.write(1, "abc"));
+    }
+
+    var read_count: i32 = 0;
+    const handler = struct {
+        fn handle(_: i32, _: []const u8, ctx: *anyopaque) void {
+            const count: *i32 = @ptrCast(@alignCast(ctx));
+            count.* += 1;
+        }
+    }.handle;
+    _ = rb.read(handler, @ptrCast(&read_count), 6);
+    try std.testing.expectEqual(@as(i32, 6), read_count);
+
+    try std.testing.expect(rb.write(2, "012345678"));
+
+    const padding_index: usize = 112;
+    try std.testing.expectEqual(@as(i32, 16), std.mem.readInt(i32, buf[padding_index..][0..4], .little));
+    try std.testing.expectEqual(@as(i32, PADDING_MSG_TYPE_ID), std.mem.readInt(i32, buf[padding_index + 4 ..][0..4], .little));
+    try std.testing.expectEqual(@as(i32, 17), std.mem.readInt(i32, buf[0..4], .little));
+    try std.testing.expectEqual(@as(i32, 2), std.mem.readInt(i32, buf[4..8], .little));
+    try std.testing.expectEqualSlices(u8, "012345678", buf[8..17]);
 }

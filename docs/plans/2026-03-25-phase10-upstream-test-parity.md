@@ -6,7 +6,7 @@
 
 **Architecture:** Scenario tests live under `test/{protocol,driver,archive,cluster}/`, each importing the `aeron` Zig module. A `test-scenarios` build step runs all four layers. Two GHA workflows run on every PR; a Docker Compose file drives the Java interop smoke test in CI without k8s.
 
-**Tech Stack:** Zig 0.15.2, Nix devShell, GitHub Actions, Docker Compose v2, Java 21 (Temurin), Aeron 1.46.7, `std.testing` only.
+**Tech Stack:** Zig 0.15.2, Nix devShell, GitHub Actions, Docker Compose v2, Java 21 (Temurin), Aeron 1.50.2, `std.testing` only.
 
 ---
 
@@ -44,7 +44,7 @@
 | `.github/workflows/interop.yml` | Full interop on main push + manual |
 | `deploy/docker-compose.ci.yml` | Lightweight Java+Zig interop for CI smoke |
 | `deploy/Dockerfile.zig` | Nix-based image running `make run` |
-| `deploy/Dockerfile.java-aeron` | Java image with Aeron 1.46.7 subscriber/publisher |
+| `deploy/Dockerfile.java-aeron` | Java image with Aeron 1.50.2 subscriber/publisher |
 
 ### Modified
 | File | Change |
@@ -125,25 +125,25 @@ These replace the prose `.md` equivalents for agent queries. Each file is one JS
 - [ ] **Step 1: Create `test/upstream_map.jsonl`**
 
 ```jsonl
-{"layer":"protocol","our_file":"test/protocol/frame_codec_test.zig","upstream_class":"DataHeaderFlyweightTest","upstream_path":"aeron-client/src/test/java/io/aeron/","aeron_version":"1.46.7","status":"pending"}
-{"layer":"protocol","our_file":"test/protocol/frame_codec_test.zig","upstream_class":"SetupFlyweightTest","upstream_path":"aeron-client/src/test/java/io/aeron/","aeron_version":"1.46.7","status":"pending"}
-{"layer":"protocol","our_file":"test/protocol/frame_codec_test.zig","upstream_class":"StatusMessageFlyweightTest","upstream_path":"aeron-client/src/test/java/io/aeron/","aeron_version":"1.46.7","status":"pending"}
-{"layer":"protocol","our_file":"test/protocol/uri_parser_test.zig","upstream_class":"ChannelUriTest","upstream_path":"aeron-client/src/test/java/io/aeron/","aeron_version":"1.46.7","status":"pending"}
-{"layer":"protocol","our_file":"test/protocol/flow_control_test.zig","upstream_class":"ReceiverWindowTest","upstream_path":"aeron-driver/src/test/java/io/aeron/driver/","aeron_version":"1.46.7","status":"pending"}
-{"layer":"driver","our_file":"test/driver/session_establishment_test.zig","upstream_class":"PublicationImageTest","upstream_path":"aeron-driver/src/test/java/io/aeron/driver/","aeron_version":"1.46.7","status":"pending"}
-{"layer":"driver","our_file":"test/driver/session_establishment_test.zig","upstream_class":"DriverConductorTest","upstream_path":"aeron-driver/src/test/java/io/aeron/driver/","aeron_version":"1.46.7","status":"pending"}
-{"layer":"driver","our_file":"test/driver/publication_lifecycle_test.zig","upstream_class":"DriverConductorTest","upstream_path":"aeron-driver/src/test/java/io/aeron/driver/","aeron_version":"1.46.7","status":"pending"}
-{"layer":"driver","our_file":"test/driver/subscription_lifecycle_test.zig","upstream_class":"DriverConductorTest","upstream_path":"aeron-driver/src/test/java/io/aeron/driver/","aeron_version":"1.46.7","status":"pending"}
-{"layer":"driver","our_file":"test/driver/conductor_ipc_test.zig","upstream_class":"DriverConductorTest","upstream_path":"aeron-driver/src/test/java/io/aeron/driver/","aeron_version":"1.46.7","status":"pending"}
-{"layer":"driver","our_file":"test/driver/loss_and_recovery_test.zig","upstream_class":"LossHandlerTest","upstream_path":"aeron-driver/src/test/java/io/aeron/driver/","aeron_version":"1.46.7","status":"pending"}
-{"layer":"driver","our_file":"test/driver/loss_and_recovery_test.zig","upstream_class":"RetransmitHandlerTest","upstream_path":"aeron-driver/src/test/java/io/aeron/driver/","aeron_version":"1.46.7","status":"pending"}
-{"layer":"archive","our_file":"test/archive/catalog_test.zig","upstream_class":"CatalogTest","upstream_path":"aeron-archive/src/test/java/io/aeron/archive/","aeron_version":"1.46.7","status":"pending"}
-{"layer":"archive","our_file":"test/archive/record_replay_test.zig","upstream_class":"ArchiveTest","upstream_path":"aeron-archive/src/test/java/io/aeron/archive/","aeron_version":"1.46.7","status":"pending"}
-{"layer":"archive","our_file":"test/archive/segment_rotation_test.zig","upstream_class":"RecordingWriterTest","upstream_path":"aeron-archive/src/test/java/io/aeron/archive/","aeron_version":"1.46.7","status":"pending"}
-{"layer":"cluster","our_file":"test/cluster/election_test.zig","upstream_class":"ElectionTest","upstream_path":"aeron-cluster/src/test/java/io/aeron/cluster/","aeron_version":"1.46.7","status":"pending"}
-{"layer":"cluster","our_file":"test/cluster/log_replication_test.zig","upstream_class":"ClusterTimerTest","upstream_path":"aeron-cluster/src/test/java/io/aeron/cluster/","aeron_version":"1.46.7","status":"pending"}
-{"layer":"cluster","our_file":"test/cluster/log_replication_test.zig","upstream_class":"LogReplicationTest","upstream_path":"aeron-cluster/src/test/java/io/aeron/cluster/","aeron_version":"1.46.7","status":"pending"}
-{"layer":"cluster","our_file":"test/cluster/failover_test.zig","upstream_class":"ClusterNodeTest","upstream_path":"aeron-cluster/src/test/java/io/aeron/cluster/","aeron_version":"1.46.7","status":"pending"}
+{"layer":"protocol","our_file":"test/protocol/frame_codec_test.zig","upstream_class":"DataHeaderFlyweightTest","upstream_path":"aeron-client/src/test/java/io/aeron/","aeron_version":"1.50.2","status":"pending"}
+{"layer":"protocol","our_file":"test/protocol/frame_codec_test.zig","upstream_class":"SetupFlyweightTest","upstream_path":"aeron-client/src/test/java/io/aeron/","aeron_version":"1.50.2","status":"pending"}
+{"layer":"protocol","our_file":"test/protocol/frame_codec_test.zig","upstream_class":"StatusMessageFlyweightTest","upstream_path":"aeron-client/src/test/java/io/aeron/","aeron_version":"1.50.2","status":"pending"}
+{"layer":"protocol","our_file":"test/protocol/uri_parser_test.zig","upstream_class":"ChannelUriTest","upstream_path":"aeron-client/src/test/java/io/aeron/","aeron_version":"1.50.2","status":"pending"}
+{"layer":"protocol","our_file":"test/protocol/flow_control_test.zig","upstream_class":"ReceiverWindowTest","upstream_path":"aeron-driver/src/test/java/io/aeron/driver/","aeron_version":"1.50.2","status":"pending"}
+{"layer":"driver","our_file":"test/driver/session_establishment_test.zig","upstream_class":"PublicationImageTest","upstream_path":"aeron-driver/src/test/java/io/aeron/driver/","aeron_version":"1.50.2","status":"pending"}
+{"layer":"driver","our_file":"test/driver/session_establishment_test.zig","upstream_class":"DriverConductorTest","upstream_path":"aeron-driver/src/test/java/io/aeron/driver/","aeron_version":"1.50.2","status":"pending"}
+{"layer":"driver","our_file":"test/driver/publication_lifecycle_test.zig","upstream_class":"DriverConductorTest","upstream_path":"aeron-driver/src/test/java/io/aeron/driver/","aeron_version":"1.50.2","status":"pending"}
+{"layer":"driver","our_file":"test/driver/subscription_lifecycle_test.zig","upstream_class":"DriverConductorTest","upstream_path":"aeron-driver/src/test/java/io/aeron/driver/","aeron_version":"1.50.2","status":"pending"}
+{"layer":"driver","our_file":"test/driver/conductor_ipc_test.zig","upstream_class":"DriverConductorTest","upstream_path":"aeron-driver/src/test/java/io/aeron/driver/","aeron_version":"1.50.2","status":"pending"}
+{"layer":"driver","our_file":"test/driver/loss_and_recovery_test.zig","upstream_class":"LossHandlerTest","upstream_path":"aeron-driver/src/test/java/io/aeron/driver/","aeron_version":"1.50.2","status":"pending"}
+{"layer":"driver","our_file":"test/driver/loss_and_recovery_test.zig","upstream_class":"RetransmitHandlerTest","upstream_path":"aeron-driver/src/test/java/io/aeron/driver/","aeron_version":"1.50.2","status":"pending"}
+{"layer":"archive","our_file":"test/archive/catalog_test.zig","upstream_class":"CatalogTest","upstream_path":"aeron-archive/src/test/java/io/aeron/archive/","aeron_version":"1.50.2","status":"pending"}
+{"layer":"archive","our_file":"test/archive/record_replay_test.zig","upstream_class":"ArchiveTest","upstream_path":"aeron-archive/src/test/java/io/aeron/archive/","aeron_version":"1.50.2","status":"pending"}
+{"layer":"archive","our_file":"test/archive/segment_rotation_test.zig","upstream_class":"RecordingWriterTest","upstream_path":"aeron-archive/src/test/java/io/aeron/archive/","aeron_version":"1.50.2","status":"pending"}
+{"layer":"cluster","our_file":"test/cluster/election_test.zig","upstream_class":"ElectionTest","upstream_path":"aeron-cluster/src/test/java/io/aeron/cluster/","aeron_version":"1.50.2","status":"pending"}
+{"layer":"cluster","our_file":"test/cluster/log_replication_test.zig","upstream_class":"ClusterTimerTest","upstream_path":"aeron-cluster/src/test/java/io/aeron/cluster/","aeron_version":"1.50.2","status":"pending"}
+{"layer":"cluster","our_file":"test/cluster/log_replication_test.zig","upstream_class":"LogReplicationTest","upstream_path":"aeron-cluster/src/test/java/io/aeron/cluster/","aeron_version":"1.50.2","status":"pending"}
+{"layer":"cluster","our_file":"test/cluster/failover_test.zig","upstream_class":"ClusterNodeTest","upstream_path":"aeron-cluster/src/test/java/io/aeron/cluster/","aeron_version":"1.50.2","status":"pending"}
 ```
 
 - [ ] **Step 2: Verify jq queries work**
@@ -344,7 +344,7 @@ Create `test/protocol/frame_codec_test.zig` with a single passing stub:
 
 ```zig
 // Upstream reference: aeron-client/src/test/java/io/aeron/DataHeaderFlyweightTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: (stub — see Task 4)
 const aeron = @import("aeron");
 _ = aeron;
@@ -356,7 +356,7 @@ Create `test/driver/session_establishment_test.zig`:
 
 ```zig
 // Upstream reference: aeron-driver/src/test/java/io/aeron/driver/PublicationImageTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: (stub — see Task 5)
 const aeron = @import("aeron");
 _ = aeron;
@@ -368,7 +368,7 @@ Create `test/archive/catalog_test.zig`:
 
 ```zig
 // Upstream reference: aeron-archive/src/test/java/io/aeron/archive/CatalogTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: (stub — see Task 6)
 const aeron = @import("aeron");
 _ = aeron;
@@ -380,7 +380,7 @@ Create `test/cluster/election_test.zig`:
 
 ```zig
 // Upstream reference: aeron-cluster/src/test/java/io/aeron/cluster/ElectionTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: (stub — see Task 7)
 const aeron = @import("aeron");
 _ = aeron;
@@ -424,7 +424,7 @@ Read `src/protocol/frame.zig` and `src/protocol/uri.zig` before implementing. Us
 
 - [ ] **Step 1: Read upstream reference**
 
-Upstream: `aeron-client/src/test/java/io/aeron/DataHeaderFlyweightTest.java` at tag `1.46.7`.
+Upstream: `aeron-client/src/test/java/io/aeron/DataHeaderFlyweightTest.java` at tag `1.50.2`.
 Scenarios to port: encode data header fields, decode them back, verify header type byte, verify version byte.
 
 - [ ] **Step 2: Read our frame types**
@@ -439,7 +439,7 @@ grep -n "pub const\|pub fn\|pub inline" src/protocol/frame.zig | head -40
 // Upstream reference: aeron-client/src/test/java/io/aeron/DataHeaderFlyweightTest.java
 //                    aeron-client/src/test/java/io/aeron/SetupFlyweightTest.java
 //                    aeron-client/src/test/java/io/aeron/StatusMessageFlyweightTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: frame_type, version, flags, stream_id, session_id, term_id, term_offset, frame_length
 
 const std = @import("std");
@@ -515,7 +515,7 @@ grep -n "pub const\|pub fn" src/protocol/uri.zig 2>/dev/null || grep -rn "Channe
 
 ```zig
 // Upstream reference: aeron-client/src/test/java/io/aeron/ChannelUriTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: parse aeron:udp URI, reject malformed, extract media, endpoint
 
 const std = @import("std");
@@ -562,7 +562,7 @@ grep -rn "ReceiverWindow\|receiver_window\|flow_control\|FlowControl" src/ --inc
 
 ```zig
 // Upstream reference: aeron-driver/src/test/java/io/aeron/driver/ReceiverWindowTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: initial window equals term_buffer_length, window does not exceed max
 
 const std = @import("std");
@@ -631,7 +631,7 @@ grep -n "pub fn\|pub const" src/driver/conductor.zig | head -50
 ```zig
 // Upstream reference: aeron-driver/src/test/java/io/aeron/driver/PublicationImageTest.java
 //                    aeron-driver/src/test/java/io/aeron/driver/DriverConductorTest.java (SETUP/STATUS cases)
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: session created on SETUP frame, image constructed with correct stream_id/session_id
 
 const std = @import("std");
@@ -674,7 +674,7 @@ test "DriverConductor: SETUP frame without matching subscription is ignored" {
 
 ```zig
 // Upstream reference: aeron-driver/src/test/java/io/aeron/driver/DriverConductorTest.java (add/remove pub)
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: add_publication creates log buffer, remove_publication cleans up
 
 const std = @import("std");
@@ -708,7 +708,7 @@ test "DriverConductor: remove unknown pub_id returns error" {
 
 ```zig
 // Upstream reference: aeron-driver/src/test/java/io/aeron/driver/DriverConductorTest.java (add/remove sub)
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: add_subscription, remove_subscription
 
 const std = @import("std");
@@ -736,7 +736,7 @@ test "DriverConductor: duplicate add_subscription on same channel/stream increme
 
 ```zig
 // Upstream reference: aeron-driver/src/test/java/io/aeron/driver/DriverConductorTest.java (IPC dispatch)
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: IPC command ADD_PUBLICATION dispatched through ring buffer
 
 const std = @import("std");
@@ -768,7 +768,7 @@ test "DriverConductor IPC: TERMINATE_DRIVER command sets shutdown flag" {
 ```zig
 // Upstream reference: aeron-driver/src/test/java/io/aeron/driver/LossHandlerTest.java
 //                    aeron-driver/src/test/java/io/aeron/driver/RetransmitHandlerTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: gap detected, NAK sent, retransmit triggered, duplicate suppressed
 
 const std = @import("std");
@@ -843,7 +843,7 @@ grep -n "pub fn\|pub const" src/archive/catalog.zig src/archive/recording.zig 2>
 
 ```zig
 // Upstream reference: aeron-archive/src/test/java/io/aeron/archive/CatalogTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: recording descriptor written, read back, index updated on close
 
 const std = @import("std");
@@ -893,7 +893,7 @@ test "Catalog: recording count increments after add" {
 
 ```zig
 // Upstream reference: aeron-archive/src/test/java/io/aeron/archive/ArchiveTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: record 10 messages, replay yields same messages in order
 
 const std = @import("std");
@@ -930,7 +930,7 @@ test "Archive: replay yields recorded messages in order" {
 
 ```zig
 // Upstream reference: aeron-archive/src/test/java/io/aeron/archive/RecordingWriterTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: segment file rotates when segment_length is exceeded
 
 const std = @import("std");
@@ -998,7 +998,7 @@ grep -n "pub fn\|pub const" src/cluster/election.zig src/cluster/log_replication
 
 ```zig
 // Upstream reference: aeron-cluster/src/test/java/io/aeron/cluster/ElectionTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: canvass phase, vote request, vote granted, leader elected
 
 const std = @import("std");
@@ -1039,7 +1039,7 @@ test "Election: leader elected after majority vote" {
 ```zig
 // Upstream reference: aeron-cluster/src/test/java/io/aeron/cluster/ClusterTimerTest.java
 //                    aeron-cluster/src/test/java/io/aeron/cluster/LogReplicationTest.java
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: follower replicates log entries, commit position advances
 
 const std = @import("std");
@@ -1073,7 +1073,7 @@ test "ClusterTimer: timer fires after deadline" {
 
 ```zig
 // Upstream reference: aeron-cluster/src/test/java/io/aeron/cluster/ClusterNodeTest.java (failover cases)
-// Aeron version: 1.46.7
+// Aeron version: 1.50.2
 // Coverage: leader failure triggers election, new leader elected, session redirected
 
 const std = @import("std");
@@ -1207,7 +1207,7 @@ jobs:
       - run: nix develop --command make build
       - run: docker compose -f deploy/docker-compose.ci.yml up --abort-on-container-exit --exit-code-from java-client
         env:
-          AERON_VERSION: "1.46.7"
+          AERON_VERSION: "1.50.2"
 
   core-pipeline:
     if: always()
@@ -1285,7 +1285,7 @@ services:
       context: deploy/
       dockerfile: Dockerfile.java-aeron
       args:
-        AERON_VERSION: "${AERON_VERSION:-1.46.7}"
+        AERON_VERSION: "${AERON_VERSION:-1.50.2}"
     networks: [aeron]
     depends_on:
       zig-driver:
@@ -1323,7 +1323,7 @@ CMD ["/app/aeron-driver"]
 
 ```dockerfile
 FROM eclipse-temurin:21-jre-alpine AS fetcher
-ARG AERON_VERSION=1.46.7
+ARG AERON_VERSION=1.50.2
 RUN apk add --no-cache curl && \
     curl -fsSL \
       "https://repo1.maven.org/maven2/io/aeron/aeron-all/${AERON_VERSION}/aeron-all-${AERON_VERSION}.jar" \

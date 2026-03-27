@@ -28,6 +28,12 @@ Internal living doc. Always read at session start. Update when architecture or c
 - Enter dev shell: `nix develop`
 - One-off command: `nix develop --command <cmd>` (or `make <target>` — handles this automatically)
 - Never install tools outside the flake — add to `devShells.default.packages` in `flake.nix`
+- `make setup-upstream-aeron` creates/refreshes a shallow clone of the official Aeron upstream in `vendor/aeron`
+- `make setup-upstream-zig` creates/refreshes a shallow clone of Zig `0.15.2` in `vendor/zig`
+- Prefer `vendor/aeron` as the first source of truth for upstream protocol/spec checks when it exists
+- Prefer `vendor/zig` as the first source of truth for Zig 0.15.2 API/source checks when it exists
+- `build.zig` explicitly links libc for executables/tests because the driver records `getpid()` in `cnc.dat`; do not remove that linkage unless the PID path is redesigned to avoid libc
+- Local interop iteration uses a reusable Zig Nix build-env image; warm it with `make setup-interop-base` and reuse it via `ZIG_BUILD_ENV_IMAGE`
 
 ## Tutorial Layer
 
@@ -54,6 +60,14 @@ Two parallel code trees — agents must maintain both:
 ## Project Context
 
 - Wire protocol reference: https://github.com/aeron-io/aeron (C++ driver, Java client)
+- Current upstream pin for interop/docs/tests: Aeron `1.50.2`
+- Local upstream source checkout should come from `make setup-upstream-aeron` and defaults to `release/1.50.x`
+- If `vendor/aeron` is missing or stale, refresh it before using secondary local docs or network lookups
+- Local Zig upstream source checkout should come from `make setup-upstream-zig` and defaults to tag `0.15.2`
+- If Zig API behavior is unclear, check `vendor/zig` before guessing from memory
+- For Agrona shared-memory IPC parity, prefer the vendored C client sources when the Java Agrona sources are not present:
+  `vendor/aeron/aeron-client/src/main/c/concurrent/aeron_broadcast_{descriptor,transmitter,receiver}.*`
+  and `vendor/aeron/aeron-client/src/test/c/concurrent/aeron_broadcast_*_test.cpp`
 - Key C file for UDP protocol: `aeron-driver/src/main/c/protocol/aeron_udp_protocol.h`
 - Key Java file for log buffer: `aeron-client/src/main/java/io/aeron/logbuffer/LogBufferDescriptor.java`
 - Term buffer: 3 partitions, each a power-of-2 size (default 16MB), memory-mapped
@@ -85,7 +99,8 @@ Two parallel code trees — agents must maintain both:
 - Archive operational: segment rotation across multiple persisted segments, catalog descriptor fidelity, restart reconstruction.
 - Cluster consensus fidelity: follower catch-up/rejoin, restart/election/commit continuity, session redirect and failover.
 - CnC tooling real: `stat`, `errors`, `loss`, `streams`, `events`, `cluster-tool` backed by actual mmap reads and counters.
-- Interop automated: Zig↔Java matrix (pub/sub, archive, cluster) under `deploy/interop/` with single `make interop` entrypoint; both directions passing.
+- Interop automated: local Zig↔Java smoke/full runs use `deploy/docker-compose.ci.yml` with `make interop` / `make interop-smoke`; prefer Colima + Docker client on macOS and Podman on Linux.
+- `make interop-smoke` uses the finite Java helper in `deploy/InteropSmoke.java` so the smoke target exits on a successful Java `addSubscription` / close cycle against the Zig driver instead of hanging on an endless sample.
 - **Known parity gaps**: IPC 95% (multi-destination, advanced keepalive), Cluster 90% (snapshot coordination, member discovery), URI 95% (media type extensions). See `.agents/PARITY_AUDIT.md`.
 - Performance baseline established: `src/bench/` (throughput/latency/fanout) + `test/stress/` soak scenarios for reconnect, archive replay, cluster failover.
 - Roadmap for next work lives in `docs/plan.md`; no active stale investigations.

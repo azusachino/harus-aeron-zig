@@ -51,21 +51,21 @@ pub const CountersMap = struct {
         while (i < self.max_counters) : (i += 1) {
             const counter_id = @as(i32, @intCast(i));
             const meta_offset = i * METADATA_LENGTH;
-            const state_ptr: *i32 = @ptrCast(@alignCast(&self.meta_buffer[meta_offset + RECORD_STATE_OFFSET]));
+            const state_ptr: *const [4]u8 = @ptrCast(&self.meta_buffer[meta_offset + RECORD_STATE_OFFSET]);
+            const state = std.mem.readInt(i32, state_ptr, .little);
 
-            const state = @atomicLoad(i32, state_ptr, .monotonic);
             if (state == RECORD_UNUSED or state == RECORD_RECLAIMED) {
-                // Initialize metadata
-                const type_id_ptr: *i32 = @ptrCast(@alignCast(&self.meta_buffer[meta_offset + TYPE_ID_OFFSET]));
-                type_id_ptr.* = type_id;
+                // Initialize metadata using writeInt for unaligned buffers
+                const type_id_ptr: *[4]u8 = @ptrCast(&self.meta_buffer[meta_offset + TYPE_ID_OFFSET]);
+                std.mem.writeInt(i32, type_id_ptr, type_id, .little);
 
-                const key_len_ptr: *i32 = @ptrCast(@alignCast(&self.meta_buffer[meta_offset + KEY_LENGTH_OFFSET]));
-                key_len_ptr.* = 0;
+                const key_len_ptr: *[4]u8 = @ptrCast(&self.meta_buffer[meta_offset + KEY_LENGTH_OFFSET]);
+                std.mem.writeInt(i32, key_len_ptr, 0, .little);
 
-                const label_len_ptr: *i32 = @ptrCast(@alignCast(&self.meta_buffer[meta_offset + LABEL_LENGTH_OFFSET]));
                 const max_label_len = METADATA_LENGTH - LABEL_DATA_OFFSET;
                 const actual_label_len = @min(label.len, max_label_len);
-                label_len_ptr.* = @as(i32, @intCast(actual_label_len));
+                const label_len_ptr: *[4]u8 = @ptrCast(&self.meta_buffer[meta_offset + LABEL_LENGTH_OFFSET]);
+                std.mem.writeInt(i32, label_len_ptr, @as(i32, @intCast(actual_label_len)), .little);
 
                 if (actual_label_len > 0) {
                     @memcpy(
@@ -77,8 +77,9 @@ pub const CountersMap = struct {
                 // Reset value to 0
                 self.set(counter_id, 0);
 
-                // Mark allocated (ordered write)
-                @atomicStore(i32, state_ptr, RECORD_ALLOCATED, .release);
+                // Mark allocated (ordered write) - use writeInt to avoid alignment issues
+                const state_write_ptr: *[4]u8 = @ptrCast(&self.meta_buffer[meta_offset + RECORD_STATE_OFFSET]);
+                std.mem.writeInt(i32, state_write_ptr, RECORD_ALLOCATED, .little);
 
                 return CounterHandle{ .counter_id = counter_id };
             }
@@ -89,8 +90,8 @@ pub const CountersMap = struct {
     pub fn free(self: *CountersMap, counter_id: i32) void {
         if (counter_id < 0 or counter_id >= @as(i32, @intCast(self.max_counters))) return;
         const meta_offset = @as(usize, @intCast(counter_id)) * METADATA_LENGTH;
-        const state_ptr: *i32 = @ptrCast(@alignCast(&self.meta_buffer[meta_offset + RECORD_STATE_OFFSET]));
-        @atomicStore(i32, state_ptr, RECORD_RECLAIMED, .release);
+        const state_ptr: *[4]u8 = @ptrCast(&self.meta_buffer[meta_offset + RECORD_STATE_OFFSET]);
+        std.mem.writeInt(i32, state_ptr, RECORD_RECLAIMED, .little);
     }
 
     // LESSON(counters): @atomicLoad with .acquire ensures this thread sees all writes prior to a .release store by another thread. See docs/tutorial/01-foundations/04-counters.md

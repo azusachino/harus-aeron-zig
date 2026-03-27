@@ -11,7 +11,7 @@
 Establish behavioural parity with the upstream `aeron-io/aeron` test suite by:
 
 1. Porting every upstream test scenario to idiomatic Zig tests in `test/`
-2. Running the real Java Aeron 1.46.7 client against our driver in GitHub Actions CI
+2. Running the real Java Aeron 1.50.2 client against our driver in GitHub Actions CI
 3. Replacing the existing k8s-based interop infrastructure with a lightweight, CI-native approach
 
 This is not line-coverage chasing. Success means every scenario in `test/upstream_map.jsonl` has a Zig test and a CI green tick.
@@ -131,7 +131,7 @@ jobs:
       - run: nix develop --command make build
       - run: docker compose -f deploy/docker-compose.ci.yml up --abort-on-container-exit --exit-code-from java-client
         env:
-          AERON_VERSION: "1.46.7"
+          AERON_VERSION: "1.50.2"
 
   core-pipeline:
     if: always()
@@ -195,7 +195,7 @@ docker compose -f deploy/docker-compose.ci.yml up --abort-on-container-exit
 # Passes if both containers exit 0
 ```
 
-Uses `actions/setup-java@v4` (JDK 21, Temurin) + Aeron 1.46.7 jar (Maven cached).
+Uses `actions/setup-java@v4` (JDK 21, Temurin) + Aeron 1.50.2 jar (Maven cached).
 
 ### Job 3: `interop-full` (main push + manual dispatch only)
 
@@ -289,7 +289,7 @@ services:
       context: deploy/
       dockerfile: Dockerfile.java-aeron
       args:
-        AERON_VERSION: "${AERON_VERSION:-1.46.7}"
+        AERON_VERSION: "${AERON_VERSION:-1.50.2}"
     networks: [aeron]
     depends_on: [zig-driver]
     environment:
@@ -321,7 +321,7 @@ When porting a test case from Java/C++ to Zig:
 4. **Reference upstream** — each test file opens with a comment block:
    ```zig
    // Upstream reference: aeron-driver/src/test/java/io/aeron/driver/DriverConductorTest.java
-   // Aeron version: 1.46.7
+   // Aeron version: 1.50.2
    // Coverage: add_publication, remove_publication, client_keepalive, terminate_driver
    ```
 5. **No `unreachable` in test paths** — use `try` and let errors surface cleanly
@@ -396,10 +396,10 @@ Update status to `[~]` when partially ported, `[x]` when all scenarios from that
 
 ## Aeron Version Pin
 
-All Java interop uses **Aeron 1.46.7** (already pinned in `Makefile`).
+All Java interop uses **Aeron 1.50.2** (already pinned in `Makefile`).
 
 Reference test classes fetched from:
-`https://github.com/aeron-io/aeron/tree/1.46.7/`
+`https://github.com/aeron-io/aeron/tree/1.50.2/`
 
 ---
 
@@ -416,7 +416,7 @@ Reference test classes fetched from:
 
 ## References
 
-- Upstream test classes: `https://github.com/aeron-io/aeron/tree/1.46.7/`
+- Upstream test classes: `https://github.com/aeron-io/aeron/tree/1.50.2/`
 - TigerBeetle CI pattern: `https://github.com/tigerbeetle/tigerbeetle/blob/main/.github/workflows/ci.yml`
 - xev nix+zig CI: `https://github.com/mitchellh/libxev/blob/main/.github/workflows/test.yml`
 - Parity audit: `.agents/PARITY_AUDIT.md`

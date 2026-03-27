@@ -1,22 +1,34 @@
 NIX_RUN := $(if $(IN_NIX_SHELL),,nix develop --command )
 export ZIG_GLOBAL_CACHE_DIR := $(CURDIR)/.zig-global-cache
 export ZIG_LOCAL_CACHE_DIR := $(CURDIR)/.zig-cache
-AERON_VERSION := 1.46.7
+AERON_VERSION := 1.50.2
 AERON_ALL_JAR_URL := https://repo1.maven.org/maven2/io/aeron/aeron-all/$(AERON_VERSION)/aeron-all-$(AERON_VERSION).jar
-AERON_ALL_JAR_SHA256 := ded2ed3c5b73991e31c439a7562a294e5d5566f955c3a9e81089a28a6b5b9d55
+AERON_UPSTREAM_REPO ?= https://github.com/aeron-io/aeron.git
+AERON_UPSTREAM_REF ?= release/1.50.x
+AERON_UPSTREAM_DIR ?= vendor/aeron
+ZIG_UPSTREAM_REPO ?= https://codeberg.org/ziglang/zig
+ZIG_UPSTREAM_REF ?= 0.15.2
+ZIG_UPSTREAM_DIR ?= vendor/zig
+INTEROP_ZIG_BUILD_ENV_IMAGE ?= harus-aeron-zig-build-env:latest
+
+ifeq ($(origin CONTAINER_ENGINE), undefined)
+CONTAINER_ENGINE := $(shell if command -v docker >/dev/null 2>&1; then printf '%s' 'docker'; \
+	elif command -v podman >/dev/null 2>&1; then printf '%s' 'podman'; \
+	else printf '%s' 'docker'; fi)
+endif
 
 .PHONY: fmt fmt-check build test lint check clean run tutorial-check lesson-lint \
        fuzz bench stress \
        nix-image k8s-up k8s-down k8s-status k8s-logs colima-up colima-down \
-       setup setup-interop \
-       interop interop-smoke interop-status interop-build interop-run test-interop
+       setup setup-interop setup-interop-base setup-upstream-aeron setup-upstream-zig \
+       interop interop-smoke interop-status interop-preflight test-protocol test-driver test-archive test-cluster test-scenarios status
 
 fmt:
-	$(NIX_RUN) zig fmt .
+	$(NIX_RUN) zig fmt src/ build.zig
 	$(NIX_RUN) prettier --write "**/*.{json,yaml,yml}"
 
 fmt-check:
-	$(NIX_RUN) zig fmt --check .
+	$(NIX_RUN) zig fmt --check src/ build.zig
 	$(NIX_RUN) prettier --check "**/*.{json,yaml,yml}"
 
 build:
@@ -37,15 +49,36 @@ test-unit:
 test-integration:
 	$(NIX_RUN) zig build test-integration
 
-test-interop:
-	bash test/interop/run.sh
+test-protocol:  ## Run protocol scenario tests
+	$(NIX_RUN) zig build test-protocol
+
+test-driver:  ## Run driver scenario tests
+	$(NIX_RUN) zig build test-driver
+
+test-archive:  ## Run archive scenario tests
+	$(NIX_RUN) zig build test-archive
+
+test-cluster:  ## Run cluster scenario tests
+	$(NIX_RUN) zig build test-cluster
+
+test-scenarios: test-protocol test-driver test-archive test-cluster  ## Run all scenario tests
 
 lint: fmt-check
 
 lesson-lint:  ## Verify all LESSON annotation slugs have a matching docs/tutorial/ chapter file
 	bash scripts/lesson-lint.sh
 
-check: fmt-check build test
+check: fmt-check build test test-scenarios lesson-lint  ## Full check: fmt + build + all tests
+
+status:  ## Show parity and chapter status from JSONL sources
+	@echo "=== Parity Gaps ==="
+	@jq -r '"\(.layer): \(.completeness_pct)% — gaps: \(.gaps | join(", "))"' .agents/parity_status.jsonl
+	@echo ""
+	@echo "=== Upstream Map — pending ==="
+	@jq -r 'select(.status == "pending") | "\(.layer)/\(.upstream_class)"' test/upstream_map.jsonl
+	@echo ""
+	@echo "=== Chapter Status — incomplete ==="
+	@jq -r 'select(.status != "done") | "\(.id) \(.slug): \(.status)"' .agents/chapter_status.jsonl
 
 run:
 	$(NIX_RUN) zig build run
@@ -59,23 +92,11 @@ clean:
 setup: setup-interop  ## Prepare local helper artifacts for interop and benchmarks
 
 setup-interop:
-	@mkdir -p test/interop vendor
+	@mkdir -p vendor
 	@std_dir="$$( $(NIX_RUN) zig env | sed -n 's/.*"std_dir": *"\([^"]*\)".*/\1/p' )"; \
 	if [ -n "$$std_dir" ]; then \
 		ln -sfn "$$std_dir" vendor/zig-std; \
 	fi
-	@tmp="$$(mktemp)"; \
-	curl -fsSL "$(AERON_ALL_JAR_URL)" -o "$$tmp"; \
-	if command -v shasum >/dev/null 2>&1; then \
-		printf '%s  %s\n' "$(AERON_ALL_JAR_SHA256)" "$$tmp" | shasum -a 256 -c - >/dev/null; \
-	elif command -v sha256sum >/dev/null 2>&1; then \
-		printf '%s  %s\n' "$(AERON_ALL_JAR_SHA256)" "$$tmp" | sha256sum -c - >/dev/null; \
-	else \
-		echo "No sha256 checker found (need shasum or sha256sum)" >&2; \
-		rm -f "$$tmp"; \
-		exit 1; \
-	fi; \
-	mv "$$tmp" test/interop/aeron-all.jar
 	@if [ ! -s throughput ]; then \
 		printf '%s\n' \
 			'#!/usr/bin/env sh' \
@@ -84,6 +105,38 @@ setup-interop:
 			'exec zig-out/bin/throughput-example "$$@"' > throughput; \
 			chmod +x throughput; \
 		fi
+
+setup-interop-base:
+	@$(MAKE) interop-preflight
+	@if $(CONTAINER_ENGINE) image inspect "$(INTEROP_ZIG_BUILD_ENV_IMAGE)" >/dev/null 2>&1; then \
+		echo "Using cached interop build env image: $(INTEROP_ZIG_BUILD_ENV_IMAGE)"; \
+	else \
+		echo "Building interop build env image: $(INTEROP_ZIG_BUILD_ENV_IMAGE)"; \
+		$(CONTAINER_ENGINE) build -f deploy/Dockerfile --target build-env -t "$(INTEROP_ZIG_BUILD_ENV_IMAGE)" .; \
+	fi
+
+setup-upstream-aeron:
+	@mkdir -p vendor
+	@if [ -d "$(AERON_UPSTREAM_DIR)/.git" ]; then \
+		git -C "$(AERON_UPSTREAM_DIR)" fetch --depth 1 origin "$(AERON_UPSTREAM_REF)"; \
+		git -C "$(AERON_UPSTREAM_DIR)" checkout --detach FETCH_HEAD; \
+	else \
+		rm -f "$(AERON_UPSTREAM_DIR)"; \
+		git clone --depth 1 --branch "$(AERON_UPSTREAM_REF)" "$(AERON_UPSTREAM_REPO)" "$(AERON_UPSTREAM_DIR)"; \
+	fi
+
+setup-upstream-zig:
+	@mkdir -p vendor
+	@if [ -d "$(ZIG_UPSTREAM_DIR)/.git" ]; then \
+		git -C "$(ZIG_UPSTREAM_DIR)" fetch --depth 1 origin "$(ZIG_UPSTREAM_REF)"; \
+		git -C "$(ZIG_UPSTREAM_DIR)" checkout --detach FETCH_HEAD; \
+	else \
+		rm -f "$(ZIG_UPSTREAM_DIR)"; \
+		git init "$(ZIG_UPSTREAM_DIR)" >/dev/null 2>&1; \
+		git -C "$(ZIG_UPSTREAM_DIR)" remote add origin "$(ZIG_UPSTREAM_REPO)"; \
+		git -C "$(ZIG_UPSTREAM_DIR)" fetch --depth 1 origin "$(ZIG_UPSTREAM_REF)"; \
+		git -C "$(ZIG_UPSTREAM_DIR)" checkout --detach FETCH_HEAD; \
+	fi
 
 # =============================================================================
 # Kubernetes (k3s via colima)
@@ -105,10 +158,10 @@ nix-image:
 	docker save harus-aeron-zig:latest | colima ssh -- sudo ctr -n k8s.io images import -
 
 k8s-up: nix-image
-	kubectl apply -k deploy/k8s/
+	kubectl apply -k k8s/
 
 k8s-down:
-	kubectl delete -k deploy/k8s/ --ignore-not-found
+	kubectl delete -k k8s/ --ignore-not-found
 
 k8s-status:
 	@echo "=== Pods ==="
@@ -137,18 +190,42 @@ stress:  ## Run stress tests
 # =============================================================================
 # Interop Testing
 # =============================================================================
-# Consolidated into single `make interop` target that:
-# - Builds OCI image (nix-image dependency)
-# - Compiles Java Aeron interop apps
-# - Deploys K8s jobs (java-pub-zig-sub, zig-pub-java-sub)
-# - Waits for completion and reports results
-# See: test/interop/k8s-verify.sh
+
+ifeq ($(origin COMPOSE), undefined)
+COMPOSE := $(shell if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then printf '%s' 'docker compose'; \
+	elif command -v podman-compose >/dev/null 2>&1; then printf '%s' 'podman-compose'; \
+	else printf '%s' 'docker compose'; fi)
+endif
+
+interop-preflight:
+	@if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then \
+		docker info >/dev/null 2>&1 || { \
+			echo "Docker daemon is not reachable. Start any Docker-compatible daemon, or point DOCKER_HOST at a live daemon."; \
+			exit 1; \
+		}; \
+	elif command -v podman-compose >/dev/null 2>&1; then \
+		command -v podman >/dev/null 2>&1 || { \
+			echo "podman-compose is installed but podman is not available."; \
+			exit 1; \
+		}; \
+		podman info >/dev/null 2>&1 || { \
+			echo "Podman is not reachable. Start the podman machine or set COMPOSE=\"docker compose\"."; \
+			exit 1; \
+		}; \
+	else \
+		echo "No supported compose runtime found. Install a Compose-compatible client such as Docker Compose or podman-compose."; \
+		exit 1; \
+	fi
 
 interop:  ## Run full interop test suite (100 messages, all scenarios)
-	bash test/interop/k8s-verify.sh
+	@$(MAKE) interop-preflight
+	@$(MAKE) setup-interop-base
+	AERON_VERSION=1.50.2 ZIG_BUILD_ENV_IMAGE=$(INTEROP_ZIG_BUILD_ENV_IMAGE) MSG_COUNT=100 $(COMPOSE) -f deploy/docker-compose.ci.yml up --build --abort-on-container-exit --exit-code-from java-client
 
 interop-smoke:  ## Run quick smoke interop test (10 messages, CI-friendly)
-	bash test/interop/k8s-verify.sh --smoke
+	@$(MAKE) interop-preflight
+	@$(MAKE) setup-interop-base
+	AERON_VERSION=1.50.2 ZIG_BUILD_ENV_IMAGE=$(INTEROP_ZIG_BUILD_ENV_IMAGE) MSG_COUNT=10 $(COMPOSE) -f deploy/docker-compose.ci.yml up --build --abort-on-container-exit --exit-code-from java-client
 
 interop-status:  ## Show status of running interop jobs
 	@echo "=== Interop Jobs ==="
@@ -157,23 +234,3 @@ interop-status:  ## Show status of running interop jobs
 	@echo ""
 	@echo "=== Interop Pods ==="
 	kubectl get pods -n aeron -l 'app.kubernetes.io/part-of in (interop,interop-smoke)' -o wide 2>/dev/null || true
-
-test-interop: interop  ## Backward-compatible alias for interop
-
-interop-build: nix-image  ## Build interop test images
-	docker build -t java-aeron:latest \
-		--build-arg AERON_VERSION=$(AERON_VERSION) \
-		--build-arg AERON_ALL_JAR_SHA256=$(AERON_ALL_JAR_SHA256) \
-		-f deploy/interop/Dockerfile.java-aeron deploy/interop/
-	nerdctl -n k8s.io image import $$(docker save java-aeron:latest | nerdctl -n k8s.io image load 2>&1 | grep -oP 'sha256:\S+') || \
-		docker save java-aeron:latest | nerdctl -n k8s.io image load
-
-interop-run:  ## Run interop test jobs in k3s (delete-before-create, idempotent)
-	kubectl create namespace aeron --dry-run=client -o yaml | kubectl apply -f -
-	kubectl delete jobs -n aeron -l app.kubernetes.io/part-of=interop --ignore-not-found
-	kubectl apply -k deploy/interop/
-	@echo "Waiting for interop jobs to complete..."
-	kubectl wait --for=condition=complete --timeout=180s jobs -n aeron -l app.kubernetes.io/part-of=interop || \
-		{ kubectl get jobs -n aeron -l app.kubernetes.io/part-of=interop -o wide >&2; \
-		  echo "Interop jobs did not complete (timeout or failure)" >&2; exit 1; }
-	@echo "All interop tests passed!"

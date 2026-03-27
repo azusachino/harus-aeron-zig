@@ -19,24 +19,35 @@ const CountersMap = counters.CountersMap;
 const Receiver = receiver_mod.Receiver;
 const Image = receiver_mod.Image;
 
-// Command type IDs
+// Command type IDs — match io.aeron.command.ControlProtocolEvents.
 pub const CMD_ADD_PUBLICATION: i32 = 0x01;
 pub const CMD_REMOVE_PUBLICATION: i32 = 0x02;
-pub const CMD_ADD_SUBSCRIPTION: i32 = 0x03;
-pub const CMD_REMOVE_SUBSCRIPTION: i32 = 0x04;
-pub const CMD_CLIENT_KEEPALIVE: i32 = 0x05;
-pub const CMD_ADD_COUNTER: i32 = 0x06;
-pub const CMD_REMOVE_COUNTER: i32 = 0x07;
-pub const CMD_TERMINATE_DRIVER: i32 = 0x08;
+pub const CMD_ADD_SUBSCRIPTION: i32 = 0x04;
+pub const CMD_REMOVE_SUBSCRIPTION: i32 = 0x05;
+pub const CMD_CLIENT_KEEPALIVE: i32 = 0x06;
+pub const CMD_ADD_COUNTER: i32 = 0x09;
+pub const CMD_REMOVE_COUNTER: i32 = 0x0A;
+pub const CMD_TERMINATE_DRIVER: i32 = 0x0E;
 
-// Response type IDs
-pub const RESPONSE_ON_PUBLICATION_READY: i32 = 0x10;
-pub const RESPONSE_ON_SUBSCRIPTION_READY: i32 = 0x11;
-pub const RESPONSE_ON_ERROR: i32 = 0x12;
-pub const RESPONSE_ON_IMAGE_READY: i32 = 0x13;
-pub const RESPONSE_ON_IMAGE_CLOSE: i32 = 0x14;
-pub const RESPONSE_ON_COUNTER_READY: i32 = 0x15;
+// Response type IDs — match io.aeron.command.ControlProtocolEvents.
+pub const RESPONSE_ON_ERROR: i32 = 0x0F01;
+pub const RESPONSE_ON_IMAGE_READY: i32 = 0x0F02;
+pub const RESPONSE_ON_PUBLICATION_READY: i32 = 0x0F03;
+pub const RESPONSE_ON_IMAGE_CLOSE: i32 = 0x0F05;
+pub const RESPONSE_ON_SUBSCRIPTION_READY: i32 = 0x0F07;
+pub const RESPONSE_ON_COUNTER_READY: i32 = 0x0F08;
 pub const RESPONSE_ON_OPERATION_SUCCESS: i32 = 0x0F04;
+
+const CORRELATED_COMMAND_LENGTH: usize = 16;
+const PUBLICATION_COMMAND_STREAM_ID_OFFSET: usize = CORRELATED_COMMAND_LENGTH;
+const PUBLICATION_COMMAND_CHANNEL_LENGTH_OFFSET: usize = PUBLICATION_COMMAND_STREAM_ID_OFFSET + 4;
+const PUBLICATION_COMMAND_CHANNEL_OFFSET: usize = PUBLICATION_COMMAND_CHANNEL_LENGTH_OFFSET + 4;
+const REMOVE_COMMAND_REGISTRATION_ID_OFFSET: usize = CORRELATED_COMMAND_LENGTH;
+const REMOVE_COMMAND_LENGTH: usize = REMOVE_COMMAND_REGISTRATION_ID_OFFSET + 8;
+const SUBSCRIPTION_COMMAND_REGISTRATION_CORRELATION_ID_OFFSET: usize = CORRELATED_COMMAND_LENGTH;
+const SUBSCRIPTION_COMMAND_STREAM_ID_OFFSET: usize = SUBSCRIPTION_COMMAND_REGISTRATION_CORRELATION_ID_OFFSET + 8;
+const SUBSCRIPTION_COMMAND_CHANNEL_LENGTH_OFFSET: usize = SUBSCRIPTION_COMMAND_STREAM_ID_OFFSET + 4;
+const SUBSCRIPTION_COMMAND_CHANNEL_OFFSET: usize = SUBSCRIPTION_COMMAND_CHANNEL_LENGTH_OFFSET + 4;
 
 pub const PublicationEntry = struct {
     registration_id: i64,
@@ -236,7 +247,7 @@ pub const DriverConductor = struct {
         std.mem.writeInt(i32, buf[8..12], session_id, .little);
         std.mem.writeInt(i32, buf[12..16], stream_id, .little);
         std.mem.writeInt(i32, buf[16..20], 0, .little); // reserved
-        self.broadcaster.transmit(RESPONSE_ON_IMAGE_CLOSE, &buf);
+        self.broadcaster.transmit(RESPONSE_ON_IMAGE_CLOSE, &buf) catch return;
     }
 
     fn sendImageReady(self: *DriverConductor, session_id: i32, stream_id: i32, registration_id: i64, initial_term_id: i32) void {
@@ -245,23 +256,23 @@ pub const DriverConductor = struct {
         std.mem.writeInt(i32, buf[8..12], session_id, .little);
         std.mem.writeInt(i32, buf[12..16], stream_id, .little);
         std.mem.writeInt(i32, buf[16..20], initial_term_id, .little);
-        self.broadcaster.transmit(RESPONSE_ON_IMAGE_READY, &buf);
+        self.broadcaster.transmit(RESPONSE_ON_IMAGE_READY, &buf) catch return;
     }
 
-    fn handleAddPublication(self: *DriverConductor, data: []const u8) void {
+    pub fn handleAddPublication(self: *DriverConductor, data: []const u8) void {
         // LESSON(conductor): Publication lifecycle—allocate session ID, create log buffer + counters, register with Sender. See docs/tutorial/03-driver/03-conductor.md
-        if (data.len < 24) return;
+        if (data.len < PUBLICATION_COMMAND_CHANNEL_OFFSET) return;
 
-        const correlation_id = std.mem.readInt(i64, data[0..8], .little);
-        const stream_id = std.mem.readInt(i32, data[16..20], .little);
-        const channel_len = std.mem.readInt(i32, data[20..24], .little);
+        const correlation_id = std.mem.readInt(i64, data[8..16], .little);
+        const stream_id = std.mem.readInt(i32, data[PUBLICATION_COMMAND_STREAM_ID_OFFSET .. PUBLICATION_COMMAND_STREAM_ID_OFFSET + 4], .little);
+        const channel_len = std.mem.readInt(i32, data[PUBLICATION_COMMAND_CHANNEL_LENGTH_OFFSET .. PUBLICATION_COMMAND_CHANNEL_LENGTH_OFFSET + 4], .little);
 
-        if (channel_len < 0 or data.len < 24 + @as(usize, @intCast(channel_len))) {
+        if (channel_len < 0 or data.len < PUBLICATION_COMMAND_CHANNEL_OFFSET + @as(usize, @intCast(channel_len))) {
             self.sendError(correlation_id, 1, "Invalid ADD_PUBLICATION message");
             return;
         }
 
-        const channel_data = data[24 .. 24 + @as(usize, @intCast(channel_len))];
+        const channel_data = data[PUBLICATION_COMMAND_CHANNEL_OFFSET .. PUBLICATION_COMMAND_CHANNEL_OFFSET + @as(usize, @intCast(channel_len))];
         const session_id = self.next_session_id;
         self.next_session_id +%= 1;
 
@@ -351,11 +362,11 @@ pub const DriverConductor = struct {
         self.sendPublicationReady(correlation_id, session_id, stream_id, pub_limit_handle.counter_id);
     }
 
-    fn handleRemovePublication(self: *DriverConductor, data: []const u8) void {
-        if (data.len < 16) return;
+    pub fn handleRemovePublication(self: *DriverConductor, data: []const u8) void {
+        if (data.len < REMOVE_COMMAND_LENGTH) return;
 
-        const correlation_id = std.mem.readInt(i64, data[0..8], .little);
-        const registration_id = std.mem.readInt(i64, data[8..16], .little);
+        const correlation_id = std.mem.readInt(i64, data[8..16], .little);
+        const registration_id = std.mem.readInt(i64, data[REMOVE_COMMAND_REGISTRATION_ID_OFFSET .. REMOVE_COMMAND_REGISTRATION_ID_OFFSET + 8], .little);
 
         var found_index: ?usize = null;
         for (self.publications.items, 0..) |pub_entry, i| {
@@ -380,23 +391,23 @@ pub const DriverConductor = struct {
         }
     }
 
-    fn handleAddSubscription(self: *DriverConductor, data: []const u8) void {
+    pub fn handleAddSubscription(self: *DriverConductor, data: []const u8) void {
         // LESSON(conductor): Subscription lifecycle—store channel + stream_id, wait for publisher SETUP to create Image. See docs/tutorial/03-driver/03-conductor.md
-        if (data.len < 24) return;
+        if (data.len < SUBSCRIPTION_COMMAND_CHANNEL_OFFSET) return;
 
-        const correlation_id = std.mem.readInt(i64, data[0..8], .little);
-        const registration_id = std.mem.readInt(i64, data[8..16], .little);
-        const stream_id = std.mem.readInt(i32, data[16..20], .little);
-        const channel_len = std.mem.readInt(i32, data[20..24], .little);
+        const correlation_id = std.mem.readInt(i64, data[8..16], .little);
+        const registration_id = std.mem.readInt(i64, data[SUBSCRIPTION_COMMAND_REGISTRATION_CORRELATION_ID_OFFSET .. SUBSCRIPTION_COMMAND_REGISTRATION_CORRELATION_ID_OFFSET + 8], .little);
+        const stream_id = std.mem.readInt(i32, data[SUBSCRIPTION_COMMAND_STREAM_ID_OFFSET .. SUBSCRIPTION_COMMAND_STREAM_ID_OFFSET + 4], .little);
+        const channel_len = std.mem.readInt(i32, data[SUBSCRIPTION_COMMAND_CHANNEL_LENGTH_OFFSET .. SUBSCRIPTION_COMMAND_CHANNEL_LENGTH_OFFSET + 4], .little);
 
         std.debug.print("[CONDUCTOR] ADD_SUBSCRIPTION: correlation={d} registration={d} stream={d} channel_len={d}\n", .{ correlation_id, registration_id, stream_id, channel_len });
 
-        if (channel_len < 0 or data.len < 24 + @as(usize, @intCast(channel_len))) {
+        if (channel_len < 0 or data.len < SUBSCRIPTION_COMMAND_CHANNEL_OFFSET + @as(usize, @intCast(channel_len))) {
             self.sendError(correlation_id, 1, "Invalid ADD_SUBSCRIPTION message");
             return;
         }
 
-        const channel_data = data[24 .. 24 + @as(usize, @intCast(channel_len))];
+        const channel_data = data[SUBSCRIPTION_COMMAND_CHANNEL_OFFSET .. SUBSCRIPTION_COMMAND_CHANNEL_OFFSET + @as(usize, @intCast(channel_len))];
 
         // Bind recv endpoint to channel port on first subscription (if not already bound)
         if (!self.recv_bound) {
@@ -431,14 +442,14 @@ pub const DriverConductor = struct {
             return;
         };
 
-        self.sendSubscriptionReady(correlation_id, stream_id);
+        self.sendSubscriptionReady(correlation_id, counters.NULL_COUNTER_ID);
     }
 
     pub fn handleRemoveSubscription(self: *DriverConductor, data: []const u8) void {
-        if (data.len < 16) return;
+        if (data.len < REMOVE_COMMAND_LENGTH) return;
 
-        const correlation_id = std.mem.readInt(i64, data[0..8], .little);
-        const registration_id = std.mem.readInt(i64, data[8..16], .little);
+        const correlation_id = std.mem.readInt(i64, data[8..16], .little);
+        const registration_id = std.mem.readInt(i64, data[REMOVE_COMMAND_REGISTRATION_ID_OFFSET .. REMOVE_COMMAND_REGISTRATION_ID_OFFSET + 8], .little);
 
         var found_index: ?usize = null;
         for (self.subscriptions.items, 0..) |sub_entry, i| {
@@ -481,7 +492,7 @@ pub const DriverConductor = struct {
         }
     }
 
-    fn handleClientKeepalive(self: *DriverConductor, data: []const u8) void {
+    pub fn handleClientKeepalive(self: *DriverConductor, data: []const u8) void {
         if (data.len < 8) return;
         const client_id = std.mem.readInt(i64, data[0..8], .little);
         // Update or register client liveness timestamp
@@ -498,7 +509,7 @@ pub const DriverConductor = struct {
         }) catch {};
     }
 
-    fn handleAddCounter(self: *DriverConductor, data: []const u8) void {
+    pub fn handleAddCounter(self: *DriverConductor, data: []const u8) void {
         // LESSON(conductor): Counter allocation—assign shared-memory slots for sender_position, publisher_limit, receiver_hwm, etc. See docs/tutorial/03-driver/03-conductor.md
         if (data.len < 16) return;
 
@@ -522,7 +533,7 @@ pub const DriverConductor = struct {
         self.sendCounterReady(correlation_id, handle.counter_id);
     }
 
-    fn handleRemoveCounter(self: *DriverConductor, data: []const u8) void {
+    pub fn handleRemoveCounter(self: *DriverConductor, data: []const u8) void {
         if (data.len < 12) return;
 
         const correlation_id = std.mem.readInt(i64, data[0..8], .little);
@@ -532,7 +543,7 @@ pub const DriverConductor = struct {
         _ = correlation_id;
     }
 
-    fn handleTerminateDriver(self: *DriverConductor) void {
+    pub fn handleTerminateDriver(self: *DriverConductor) void {
         signal.running.store(false, .release);
         std.debug.print("[CONDUCTOR] TERMINATE_DRIVER received — initiating graceful shutdown\n", .{});
         _ = self;
@@ -545,14 +556,14 @@ pub const DriverConductor = struct {
         std.mem.writeInt(i32, buf[8..12], session_id, .little);
         std.mem.writeInt(i32, buf[12..16], stream_id, .little);
         std.mem.writeInt(i32, buf[16..20], pub_limit_counter_id, .little);
-        self.broadcaster.transmit(RESPONSE_ON_PUBLICATION_READY, &buf);
+        self.broadcaster.transmit(RESPONSE_ON_PUBLICATION_READY, &buf) catch return;
     }
 
-    fn sendSubscriptionReady(self: *DriverConductor, correlation_id: i64, stream_id: i32) void {
+    fn sendSubscriptionReady(self: *DriverConductor, correlation_id: i64, channel_status_indicator_id: i32) void {
         var buf: [12]u8 = undefined;
         std.mem.writeInt(i64, buf[0..8], correlation_id, .little);
-        std.mem.writeInt(i32, buf[8..12], stream_id, .little);
-        self.broadcaster.transmit(RESPONSE_ON_SUBSCRIPTION_READY, &buf);
+        std.mem.writeInt(i32, buf[8..12], channel_status_indicator_id, .little);
+        self.broadcaster.transmit(RESPONSE_ON_SUBSCRIPTION_READY, &buf) catch return;
     }
 
     fn sendError(self: *DriverConductor, correlation_id: i64, error_code: i32, msg: []const u8) void {
@@ -563,7 +574,7 @@ pub const DriverConductor = struct {
         std.mem.writeInt(i32, buf[12..16], @as(i32, @intCast(msg.len)), .little);
 
         // Transmit header
-        self.broadcaster.transmit(RESPONSE_ON_ERROR, buf[0..16]);
+        self.broadcaster.transmit(RESPONSE_ON_ERROR, buf[0..16]) catch return;
 
         // If there's a message, we need to transmit it separately
         // For now, just transmit empty message if msg is too long
@@ -581,13 +592,13 @@ pub const DriverConductor = struct {
         var buf: [12]u8 = undefined;
         std.mem.writeInt(i64, buf[0..8], correlation_id, .little);
         std.mem.writeInt(i32, buf[8..12], counter_id, .little);
-        self.broadcaster.transmit(RESPONSE_ON_COUNTER_READY, &buf);
+        self.broadcaster.transmit(RESPONSE_ON_COUNTER_READY, &buf) catch return;
     }
 
     fn sendOperationSuccess(self: *DriverConductor, correlation_id: i64) void {
         var buf: [8]u8 = undefined;
         std.mem.writeInt(i64, buf[0..8], correlation_id, .little);
-        self.broadcaster.transmit(RESPONSE_ON_OPERATION_SUCCESS, &buf);
+        self.broadcaster.transmit(RESPONSE_ON_OPERATION_SUCCESS, &buf) catch return;
     }
 };
 
@@ -681,7 +692,8 @@ test "DriverConductor ADD_PUBLICATION creates entry and sends ready response" {
     var cmd_buf: [64]u8 = undefined;
     @memset(&cmd_buf, 0);
     const channel = "aeron:udp";
-    std.mem.writeInt(i64, cmd_buf[0..8], 12345, .little); // correlation_id
+    std.mem.writeInt(i64, cmd_buf[0..8], 77, .little); // client_id
+    std.mem.writeInt(i64, cmd_buf[8..16], 12345, .little); // correlation_id
     std.mem.writeInt(i32, cmd_buf[16..20], 42, .little); // stream_id
     std.mem.writeInt(i32, cmd_buf[20..24], @as(i32, @intCast(channel.len)), .little);
     @memcpy(cmd_buf[24 .. 24 + channel.len], channel);
@@ -731,22 +743,31 @@ test "DriverConductor ADD_SUBSCRIPTION creates entry and sends ready response" {
     conductor.recv_bound = true;
 
     // Simulate ADD_SUBSCRIPTION command
-    var cmd_buf: [64]u8 = undefined;
+    var cmd_buf: [80]u8 = undefined;
     @memset(&cmd_buf, 0);
     const channel = "aeron:udp";
-    std.mem.writeInt(i64, cmd_buf[0..8], 54321, .little); // correlation_id
-    std.mem.writeInt(i64, cmd_buf[8..16], -1, .little); // registration_id placeholder
-    std.mem.writeInt(i32, cmd_buf[16..20], 99, .little); // stream_id
-    std.mem.writeInt(i32, cmd_buf[20..24], @as(i32, @intCast(channel.len)), .little); // channel_len
-    @memcpy(cmd_buf[24 .. 24 + channel.len], channel);
+    std.mem.writeInt(i64, cmd_buf[0..8], 88, .little); // client_id
+    std.mem.writeInt(i64, cmd_buf[8..16], 54321, .little); // correlation_id
+    std.mem.writeInt(i64, cmd_buf[16..24], -1, .little); // registration correlation id
+    std.mem.writeInt(i32, cmd_buf[24..28], 99, .little); // stream_id
+    std.mem.writeInt(i32, cmd_buf[28..32], @as(i32, @intCast(channel.len)), .little); // channel_len
+    @memcpy(cmd_buf[32 .. 32 + channel.len], channel);
 
     // Directly call handler
-    conductor.handleAddSubscription(cmd_buf[0 .. 24 + channel.len]);
+    conductor.handleAddSubscription(cmd_buf[0 .. 32 + channel.len]);
 
     try testing.expectEqual(@as(usize, 1), conductor.subscriptions.items.len);
     try testing.expectEqual(@as(i32, 99), conductor.subscriptions.items[0].stream_id);
     try testing.expectEqual(@as(i64, 54321), conductor.subscriptions.items[0].registration_id);
     try testing.expectEqualStrings(channel, conductor.subscriptions.items[0].channel);
+
+    var rx = try broadcast.BroadcastReceiver.init(allocator, &bcast);
+    try testing.expect(rx.receiveNext());
+    try testing.expectEqual(RESPONSE_ON_SUBSCRIPTION_READY, rx.typeId());
+    try testing.expectEqual(@as(i32, 12), rx.length());
+    const payload = rx.buffer();
+    try testing.expectEqual(@as(i64, 54321), std.mem.readInt(i64, payload[0..8], .little));
+    try testing.expectEqual(counters.NULL_COUNTER_ID, std.mem.readInt(i32, payload[8..12], .little));
 }
 
 test "DriverConductor REMOVE_PUBLICATION cleans up entry" {
@@ -785,7 +806,8 @@ test "DriverConductor REMOVE_PUBLICATION cleans up entry" {
     var cmd_buf: [64]u8 = undefined;
     @memset(&cmd_buf, 0);
     const channel = "aeron:udp";
-    std.mem.writeInt(i64, cmd_buf[0..8], 11111, .little);
+    std.mem.writeInt(i64, cmd_buf[0..8], 77, .little);
+    std.mem.writeInt(i64, cmd_buf[8..16], 11111, .little);
     std.mem.writeInt(i32, cmd_buf[16..20], 42, .little);
     std.mem.writeInt(i32, cmd_buf[20..24], @as(i32, @intCast(channel.len)), .little);
     @memcpy(cmd_buf[24 .. 24 + channel.len], channel);
@@ -794,9 +816,10 @@ test "DriverConductor REMOVE_PUBLICATION cleans up entry" {
     try testing.expectEqual(@as(usize, 1), conductor.publications.items.len);
 
     // Remove it
-    var remove_buf: [16]u8 = undefined;
-    std.mem.writeInt(i64, remove_buf[0..8], 22222, .little); // different correlation_id for remove
-    std.mem.writeInt(i64, remove_buf[8..16], 11111, .little); // registration_id to remove
+    var remove_buf: [24]u8 = undefined;
+    std.mem.writeInt(i64, remove_buf[0..8], 77, .little); // client_id
+    std.mem.writeInt(i64, remove_buf[8..16], 22222, .little); // correlation_id for remove
+    std.mem.writeInt(i64, remove_buf[16..24], 11111, .little); // registration_id to remove
     conductor.handleRemovePublication(&remove_buf);
 
     try testing.expectEqual(@as(usize, 0), conductor.publications.items.len);
@@ -953,9 +976,10 @@ test "DriverConductor REMOVE_SUBSCRIPTION closes associated image" {
     try testing.expectEqual(@as(usize, 1), receiver.images.items.len);
 
     // Remove the subscription — expect image to be cleaned up
-    var remove_buf: [16]u8 = undefined;
-    std.mem.writeInt(i64, remove_buf[0..8], 0, .little);
-    std.mem.writeInt(i64, remove_buf[8..16], reg_id, .little);
+    var remove_buf: [24]u8 = undefined;
+    std.mem.writeInt(i64, remove_buf[0..8], 5, .little);
+    std.mem.writeInt(i64, remove_buf[8..16], 0, .little);
+    std.mem.writeInt(i64, remove_buf[16..24], reg_id, .little);
     conductor.handleRemoveSubscription(&remove_buf);
 
     try testing.expectEqual(@as(usize, 0), conductor.subscriptions.items.len);
@@ -999,9 +1023,10 @@ test "DriverConductor REMOVE_SUBSCRIPTION sends ON_OPERATION_SUCCESS" {
     }) catch unreachable;
 
     // Remove the subscription with correlation_id
-    var remove_buf: [16]u8 = undefined;
-    std.mem.writeInt(i64, remove_buf[0..8], correlation_id, .little);
-    std.mem.writeInt(i64, remove_buf[8..16], reg_id, .little);
+    var remove_buf: [24]u8 = undefined;
+    std.mem.writeInt(i64, remove_buf[0..8], 5, .little);
+    std.mem.writeInt(i64, remove_buf[8..16], correlation_id, .little);
+    std.mem.writeInt(i64, remove_buf[16..24], reg_id, .little);
     conductor.handleRemoveSubscription(&remove_buf);
 
     // Verify the broadcast sent ON_OPERATION_SUCCESS
@@ -1012,6 +1037,25 @@ test "DriverConductor REMOVE_SUBSCRIPTION sends ON_OPERATION_SUCCESS" {
 
     const payload = rx.buffer();
     try testing.expectEqual(correlation_id, std.mem.readInt(i64, payload[0..8], .little));
+}
+
+test "DriverConductor IPC event IDs match upstream control protocol" {
+    try testing.expectEqual(@as(i32, 0x01), CMD_ADD_PUBLICATION);
+    try testing.expectEqual(@as(i32, 0x02), CMD_REMOVE_PUBLICATION);
+    try testing.expectEqual(@as(i32, 0x04), CMD_ADD_SUBSCRIPTION);
+    try testing.expectEqual(@as(i32, 0x05), CMD_REMOVE_SUBSCRIPTION);
+    try testing.expectEqual(@as(i32, 0x06), CMD_CLIENT_KEEPALIVE);
+    try testing.expectEqual(@as(i32, 0x09), CMD_ADD_COUNTER);
+    try testing.expectEqual(@as(i32, 0x0A), CMD_REMOVE_COUNTER);
+    try testing.expectEqual(@as(i32, 0x0E), CMD_TERMINATE_DRIVER);
+
+    try testing.expectEqual(@as(i32, 0x0F01), RESPONSE_ON_ERROR);
+    try testing.expectEqual(@as(i32, 0x0F02), RESPONSE_ON_IMAGE_READY);
+    try testing.expectEqual(@as(i32, 0x0F03), RESPONSE_ON_PUBLICATION_READY);
+    try testing.expectEqual(@as(i32, 0x0F04), RESPONSE_ON_OPERATION_SUCCESS);
+    try testing.expectEqual(@as(i32, 0x0F05), RESPONSE_ON_IMAGE_CLOSE);
+    try testing.expectEqual(@as(i32, 0x0F07), RESPONSE_ON_SUBSCRIPTION_READY);
+    try testing.expectEqual(@as(i32, 0x0F08), RESPONSE_ON_COUNTER_READY);
 }
 
 test "DriverConductor TERMINATE_DRIVER stops signal" {

@@ -13,8 +13,8 @@ const loss_report_mod = @import("../loss_report.zig");
 const event_log_mod = @import("../event_log.zig");
 
 const DriverConductor = conductor.DriverConductor;
-const Sender = sender.Sender;
-const Receiver = receiver.Receiver;
+pub const Sender = sender.Sender;
+pub const Receiver = receiver.Receiver;
 const ManyToOneRingBuffer = ring_buffer.ManyToOneRingBuffer;
 const BroadcastTransmitter = broadcast.BroadcastTransmitter;
 const CountersMap = counters.CountersMap;
@@ -76,20 +76,30 @@ pub const MediaDriver = struct {
             if (err != error.PathAlreadyExists) return err;
         };
 
-        const cnc_path = try std.fmt.allocPrint(allocator, "{s}/CnC.dat", .{ctx_.aeron_dir});
+        const cnc_path = try std.fmt.allocPrint(allocator, "{s}/cnc.dat", .{ctx_.aeron_dir});
         defer allocator.free(cnc_path);
 
-        // LESSON(media-driver): CnC.dat is the shared-memory gateway between driver and all clients. It mmap's a single file containing to-driver ring buffer, to-clients broadcast buffer, counters metadata and values. All agents and external client processes read/write via this single file—true zero-copy IPC. See docs/tutorial/03-driver/04-media-driver.md
-        const cnc_cfg = @import("cnc.zig").CncConfig{
-            .to_driver_buffer_length = 1024 * 1024,
-            .to_clients_buffer_length = 1024 * 1024,
-            .counters_metadata_buffer_length = 1024 * 1024,
-            .counters_values_buffer_length = 4 * 1024 * 1024,
+        // LESSON(media-driver): cnc.dat is the shared-memory gateway between driver and all clients. It mmap's a single file containing to-driver ring buffer, to-clients broadcast buffer, counters metadata and values. All agents and external client processes read/write via this single file—true zero-copy IPC. See docs/tutorial/03-driver/04-media-driver.md
+        // Buffer sizes must include Agrona trailer lengths — see cnc.zig for constants.
+        // Spec reference bytes: to-driver=0x00100300, to-clients=0x00100080
+        const cnc = @import("cnc.zig");
+        const cnc_cfg = cnc.CncConfig{
+            .to_driver_buffer_length = 1024 * 1024 + cnc.RING_BUFFER_TRAILER_LENGTH,
+            .to_clients_buffer_length = 1024 * 1024 + cnc.BROADCAST_BUFFER_TRAILER_LENGTH,
+            .counters_metadata_buffer_length = 4 * 1024 * 1024,
+            .counters_values_buffer_length = 1024 * 1024,
+            .error_log_buffer_length = 1024 * 1024,
             .client_liveness_timeout_ns = ctx_.client_liveness_timeout_ns,
+            .start_timestamp_ms = std.time.milliTimestamp(),
+            .driver_pid = @as(i64, @intCast(std.c.getpid())),
         };
 
-        self.cnc = try @import("cnc.zig").CncFile.create(allocator, cnc_path, cnc_cfg);
+        self.cnc = try cnc.CncFile.create(allocator, cnc_path, cnc_cfg);
         errdefer self.cnc.?.deinit();
+
+        // Write initial driver heartbeat so Java client's connectToDriver() check passes
+        const now_ms: i64 = std.time.milliTimestamp();
+        self.cnc.?.setDriverHeartbeat(now_ms);
 
         // Use buffers from CnC
         self.ring_buffer_buf = self.cnc.?.toDriverBuffer();
@@ -245,6 +255,9 @@ pub const MediaDriver = struct {
         work_count += self.conductor_agent.doWork();
         work_count += self.sender_agent.doWork();
         work_count += self.receiver_agent.doWork();
+        if (self.cnc) |*c| {
+            c.setDriverHeartbeat(std.time.milliTimestamp());
+        }
         return work_count;
     }
 
@@ -300,6 +313,9 @@ pub const MediaDriver = struct {
 fn conductorThreadFunc(md: *MediaDriver) void {
     while (md.running.load(.acquire)) {
         _ = md.conductor_agent.doWork();
+        if (md.cnc) |*c| {
+            c.setDriverHeartbeat(std.time.milliTimestamp());
+        }
     }
 }
 
@@ -324,7 +340,7 @@ fn receiverThreadFunc(md: *MediaDriver) void {
 
 const testing = std.testing;
 
-test "MediaDriver: create and destroy with CnC.dat" {
+test "MediaDriver: create and destroy with cnc.dat" {
     const allocator = testing.allocator;
     const ctx = MediaDriverContext{
         .aeron_dir = "/tmp/aeron-test-create",
@@ -335,7 +351,7 @@ test "MediaDriver: create and destroy with CnC.dat" {
     defer md.destroy();
 
     try testing.expect(md.cnc != null);
-    try testing.expect(std.fs.cwd().access("/tmp/aeron-test-create/CnC.dat", .{}) == error.FileNotFound or true); // Access check
+    try testing.expect(std.fs.cwd().access("/tmp/aeron-test-create/cnc.dat", .{}) == error.FileNotFound or true); // Access check
 }
 
 test "MediaDriver: init and deinit" {
@@ -344,6 +360,29 @@ test "MediaDriver: init and deinit" {
     defer md.deinit();
 
     try testing.expect(md.running.load(.acquire) == false);
+}
+
+test "MediaDriver: doWork updates cnc heartbeat in embedded mode" {
+    const allocator = testing.allocator;
+    const ctx = MediaDriverContext{
+        .aeron_dir = "/tmp/aeron-test-heartbeat",
+    };
+    defer std.fs.deleteTreeAbsolute(ctx.aeron_dir) catch {};
+
+    const md = try MediaDriver.create(allocator, ctx);
+    defer md.destroy();
+
+    const cnc_mod = @import("cnc.zig");
+    const data_capacity = @as(usize, @intCast(md.cnc.?.toDriverBufferLength())) - @as(usize, cnc_mod.RING_BUFFER_TRAILER_LENGTH);
+    const heartbeat_off = cnc_mod.CNC_HEADER_SIZE + data_capacity + cnc_mod.CONSUMER_HEARTBEAT_OFFSET;
+
+    const before = std.mem.readInt(i64, md.cnc.?.mapped[heartbeat_off..][0..8], .little);
+    std.Thread.sleep(2 * std.time.ns_per_ms);
+    _ = md.doWork();
+    const after = std.mem.readInt(i64, md.cnc.?.mapped[heartbeat_off..][0..8], .little);
+
+    try testing.expect(after >= before);
+    try testing.expect(after > before);
 }
 
 test "MediaDriver: agents are initialized" {
