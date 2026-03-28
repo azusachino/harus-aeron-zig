@@ -20,11 +20,38 @@ fi
 
 echo "[CLIENT] Found cnc.dat: $(ls -l $AERON_DIR_PATH/cnc.dat)"
 
-# Run a finite Java smoke helper against the external Zig driver.
-exec java \
-    --add-opens java.base/jdk.internal.misc=ALL-UNNAMED \
-    --add-opens java.base/java.util.zip=ALL-UNNAMED \
+rm -f /tmp/smoke-ready /tmp/checker-done
+
+JAVA_OPTS="--add-opens java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/java.util.zip=ALL-UNNAMED"
+
+# Run InteropSmoke in background — it establishes pub/sub and populates counters.
+java $JAVA_OPTS \
     -Daeron.dir="$AERON_DIR_PATH" \
     -Daeron.sample.messageCount="${MSG_COUNT:-10}" \
     -cp /aeron-all.jar:/interop \
-    InteropSmoke
+    InteropSmoke &
+SMOKE_PID=$!
+
+# Run CountersChecker in foreground — it polls for counters to appear, then validates.
+java $JAVA_OPTS \
+    -Daeron.dir="$AERON_DIR_PATH" \
+    -cp /aeron-all.jar:/interop \
+    CountersChecker
+CHECKER_EXIT=$?
+
+# Wait for InteropSmoke to finish.
+wait $SMOKE_PID
+SMOKE_EXIT=$?
+
+# Report and exit with first non-zero.
+if [ "$SMOKE_EXIT" -ne 0 ]; then
+    echo "[CLIENT] InteropSmoke FAILED (exit=$SMOKE_EXIT)"
+    exit $SMOKE_EXIT
+fi
+
+if [ "$CHECKER_EXIT" -ne 0 ]; then
+    echo "[CLIENT] CountersChecker FAILED (exit=$CHECKER_EXIT)"
+    exit $CHECKER_EXIT
+fi
+
+echo "[CLIENT] All checks passed"

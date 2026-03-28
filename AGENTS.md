@@ -57,7 +57,7 @@ make run              # run media driver
 - `test/stress/` — long-running soak scenarios for reconnect, archive replay, cluster failover (`make stress`)
 - `deploy/interop/` — Zig↔Java interop matrix deployment; `make interop` entrypoint
 - `docs/plan.md` — phased implementation roadmap
-- `docs/architecture.md` — system architecture
+- `docs/guides/architecture.md` — system architecture
 
 ## Tutorial Layer
 

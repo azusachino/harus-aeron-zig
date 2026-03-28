@@ -31,4 +31,4 @@ make clean            # Remove build artifacts
 - `src/protocol/frame.zig` — Aeron wire frame structs
 - `src/driver/conductor.zig` — DriverConductor (core command/control)
 - `docs/plan.md` — phased implementation roadmap with all tasks
-- `docs/architecture.md` — full system architecture
+- `docs/guides/architecture.md` — full system architecture

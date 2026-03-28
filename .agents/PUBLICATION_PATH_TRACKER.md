@@ -1,6 +1,6 @@
 # Publication Path Tracker
 
-Branch: `feat/publication-path-upstream-parity`
+Branch: `fix/counters-metadata-parity`
 Date started: 2026-03-27
 
 ## Legend
@@ -34,7 +34,9 @@ Make the next parity slice concrete and agent-ready: publication command/respons
 - [x] `make check` is green after the publication-path wire/client changes.
 - [x] `make interop-smoke` is green for finite Java publication + subscription data-path flow.
 - [x] Publication-window, image-log mapping, and client-owned subscriber-position gaps were closed locally.
-- [~] Remaining upstream parity backlog is now narrower: Agrona-compatible counters metadata/type-id layout still needs cleanup.
+- [x] Remaining upstream parity backlog was narrowed to counters metadata/type-id compatibility.
+- [x] Agrona-compatible counters metadata/type-id cleanup is done on the follow-up branch.
+- [x] External Java `countersReader()` validation is green, including channel-status counters and counter-id handoff.
 
 ## Task Board
 
@@ -49,6 +51,9 @@ Make the next parity slice concrete and agent-ready: publication command/respons
 | P11-7 | tests | Lead | done | `src/aeron.zig`, `src/driver/conductor.zig`, `test/driver/conductor_test.zig` | Local tests and `make check` are green after the publication-path change set |
 | P11-8 | interop | Heisenberg (5.4-mini) + Lead | done | `deploy/InteropSmoke.java`, `src/driver/conductor.zig`, `src/driver/media_driver.zig`, `src/driver/sender.zig`, `src/driver/receiver.zig`, `src/ipc/counters.zig` | Smoke is green after fixing publisher-limit visibility, mapped image log delivery, image metadata init, and client-owned subscriber-position semantics |
 | P11-9 | verification | Lead | done | `Makefile`, `.agents/PUBLICATION_PATH_TRACKER.md`, `.agents/publication_path_tasks.jsonl` | `make test-unit`, `make check`, and `make interop-smoke` are green |
+| P12-1 | counters-parity | Lead + Ramanujan | done | `src/ipc/counters.zig`, `src/driver/conductor.zig`, `src/tools/streams.zig` | Agrona-compatible metadata layout and Aeron counter type ids are aligned locally |
+| P12-2 | verification | Lead | done | `Makefile`, `test/integration_test.zig`, `.agents/PUBLICATION_PATH_TRACKER.md`, `.agents/publication_path_tasks.jsonl` | `make check` is green after the counters metadata follow-up |
+| P12-3 | external-reader-validation | Lead + Arendt | done | `deploy/InteropSmoke.java`, `src/driver/conductor.zig`, `src/ipc/counters.zig`, `test/driver/conductor_test.zig`, `test/integration_test.zig` | Java now validates real `countersReader()` semantics, including channel-status ids and channel-key metadata |
 
 ## Evidence / Upstream References
 
@@ -61,7 +66,7 @@ Make the next parity slice concrete and agent-ready: publication command/respons
 
 ## Risks / Open Questions
 
-- Remaining parity debt is now mostly in `src/ipc/counters.zig`: metadata record length, label/key offsets, and Aeron counter type ids are still not fully Agrona-compatible.
+- Remaining parity debt is now narrower: the core counters metadata and Java-reader path are validated locally, but broader downstream tooling beyond `InteropSmoke.java` still needs external-reader coverage.
 - Embedded-driver lookup by `(session_id, stream_id)` still exists as fallback in the Zig client, although the wire path is now sufficient for external Java publication/subscription smoke.
 - Receiver-side subscriber position semantics are now aligned enough for Java image polling, but the broader counters metadata surface should still be normalized against vendored Aeron before calling this area fully upstream-parity complete.
 
@@ -94,3 +99,18 @@ Make the next parity slice concrete and agent-ready: publication command/respons
 - Moved image delivery onto a mapped image log file, initialized its metadata, and advertised that file in `ON_IMAGE_READY`.
 - Stopped using the client-visible subscriber-position counter as receiver rebuild progress; Java now owns image consumption position and finite subscription polling succeeds.
 - `make test-unit`, `make check`, and `make interop-smoke` are green.
+
+### 2026-03-27 - counters parity follow-up
+- Switched to `fix/counters-metadata-parity` from clean `main` after the publication-path PR landed.
+- Normalized `src/ipc/counters.zig` toward Agrona/CountersReader layout: `METADATA_LENGTH=512`, `KEY_OFFSET=16`, `LABEL_OFFSET=128`, `MAX_KEY_LENGTH=112`, `MAX_LABEL_LENGTH=380`, and value-record registration/owner/reference offsets.
+- Corrected Aeron driver counter type ids to upstream values for publisher limit, sender position, receiver HWM, subscriber position, and channel status.
+- Added upstream-style stream-counter key/value metadata population and updated local stream reporting to read stream identity from the metadata key before falling back to labels.
+- Updated the integration expectation so it asserts the corrected ownership boundary: driver-side inserts must not advance the client-owned subscriber-position counter.
+- `make check` is green on the follow-up branch.
+
+### 2026-03-27 - external reader verification follow-up
+- Added upstream-shaped channel-status counter allocation so publication and subscription channel status carry registration metadata plus channel-key metadata.
+- `ON_SUBSCRIPTION_READY` now returns a real receive-channel-status counter id instead of `NULL_COUNTER_ID`.
+- Tightened `deploy/InteropSmoke.java` to validate publisher-limit, sender-position, receiver-HWM, subscriber-position, and both channel-status counters through Java `countersReader()` and `channelStatusId()`.
+- Repaired affected driver and integration tests so the new channel-status contract is covered locally.
+- `make interop-smoke` and `make check` are green on `fix/counters-metadata-parity`.

@@ -306,4 +306,4 @@ early with a daemon/connectivity error before attempting `compose up`.
 **Subscriber receives 0 messages**
 
 The `java-pub→zig-sub` path may need the zig subscriber to start before the Java
-publisher. Check `docs/interop-investigation.md` for known issues and workarounds.
+publisher. Check `docs/investigations/java-pub-zig-sub.md` for known issues and workarounds.
