@@ -9,6 +9,8 @@ import org.agrona.DirectBuffer;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.status.CountersReader;
 
+import java.io.File;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.concurrent.TimeUnit;
@@ -63,6 +65,30 @@ public final class InteropSmoke
 
             awaitFragments(subscription, handler, state);
             verifyCounters(aeron, publication, subscription, publication.position());
+
+            // Signal CountersChecker that counters are ready for external validation
+            try
+            {
+                new File("/tmp/smoke-ready").createNewFile();
+            }
+            catch (final IOException ex)
+            {
+                System.out.println("WARN: Failed to create smoke-ready marker file: " + ex.getMessage());
+            }
+            System.out.println("Smoke OK — holding connection for external counter validation");
+
+            // Wait for checker to finish (up to 30s)
+            final File checkerDone = new File("/tmp/checker-done");
+            final long holdDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            while (!checkerDone.exists())
+            {
+                if (System.nanoTime() > holdDeadline)
+                {
+                    System.out.println("WARN: CountersChecker did not signal completion — proceeding to close");
+                    break;
+                }
+                sleepQuietly(100);
+            }
         }
 
         System.out.println("Smoke OK");

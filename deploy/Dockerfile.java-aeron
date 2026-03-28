@@ -5,7 +5,8 @@ RUN apk add --no-cache curl && \
       "https://repo1.maven.org/maven2/io/aeron/aeron-all/${AERON_VERSION}/aeron-all-${AERON_VERSION}.jar" \
       -o /aeron-all.jar
 COPY InteropSmoke.java /src/InteropSmoke.java
-RUN mkdir -p /out && javac -cp /aeron-all.jar -d /out /src/InteropSmoke.java
+COPY CountersChecker.java /src/CountersChecker.java
+RUN mkdir -p /out && javac -cp /aeron-all.jar -d /out /src/InteropSmoke.java /src/CountersChecker.java
 
 FROM eclipse-temurin:21-jre-alpine
 COPY --from=builder /aeron-all.jar /aeron-all.jar
