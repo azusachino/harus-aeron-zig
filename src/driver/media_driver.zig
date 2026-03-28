@@ -179,6 +179,15 @@ pub const MediaDriver = struct {
         return self;
     }
 
+    /// DEPRECATED: use `create` with a temporary CnC file instead.
+    /// This method allocates buffers on the heap without a CnC file, creating a divergent code path
+    /// from production. All new tests should use `create` with a temp aeron_dir (see test cases in cnc.zig).
+    ///
+    /// Migration path for existing tests:
+    /// - `var md = try MediaDriver.init(allocator, ctx);` → `const md = try MediaDriver.create(allocator, ctx);`
+    /// - Wrap in a defer cleanup: `defer std.fs.deleteTreeAbsolute(ctx.aeron_dir) catch {};`
+    /// - Update assertions: do NOT assume `md.cnc == null`; use `md.cnc != null` if needed.
+    ///
     /// Convenience wrapper that returns a stack value (for tests that don't call doWork).
     /// WARNING: Do NOT use the returned value's agents — pointers will be dangling.
     pub fn init(allocator: std.mem.Allocator, ctx_: MediaDriverContext) !MediaDriver {
@@ -231,6 +240,8 @@ pub const MediaDriver = struct {
         if (self.cnc) |*c| {
             c.deinit();
         } else {
+            // DEPRECATED: else branch exists only for MediaDriver.init (heap-allocated fallback).
+            // Once init is fully removed, this else branch and broadcaster cleanup can be deleted.
             self.broadcaster.deinit(self.allocator);
             self.allocator.free(self.ring_buffer_buf);
             self.allocator.free(self.counters_meta_buf);

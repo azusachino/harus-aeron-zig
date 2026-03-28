@@ -9,10 +9,8 @@ import java.io.File;
 import java.nio.MappedByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -46,30 +44,10 @@ public final class CountersChecker
         final MappedByteBuffer cncBuffer = IoUtil.mapExistingFile(cncFile, "cnc");
         final DirectBuffer cncMetaDataBuffer = CncFileDescriptor.createMetaDataBuffer(cncBuffer);
 
-        System.out.println("CountersChecker: CnC header dump:");
-        System.out.println("  cncVersion=" + cncMetaDataBuffer.getInt(0));
-        System.out.println("  toDriverBufLen=" + cncMetaDataBuffer.getInt(4));
-        System.out.println("  toClientsBufLen=" + cncMetaDataBuffer.getInt(8));
-        System.out.println("  countersMetaBufLen=" + cncMetaDataBuffer.getInt(12));
-        System.out.println("  countersValuesBufLen=" + cncMetaDataBuffer.getInt(16));
-
         final UnsafeBuffer countersMetaData = CncFileDescriptor.createCountersMetaDataBuffer(cncBuffer, cncMetaDataBuffer);
         final UnsafeBuffer countersValues = CncFileDescriptor.createCountersValuesBuffer(cncBuffer, cncMetaDataBuffer);
 
         final CountersReader reader = new CountersReader(countersMetaData, countersValues, StandardCharsets.US_ASCII);
-
-        System.out.println("CountersChecker: raw metadata dump (first 10 slots):");
-        for (int i = 0; i < 10; i++)
-        {
-            final int metaOffset = i * 512; // METADATA_LENGTH = 512
-            if (metaOffset + 8 > countersMetaData.capacity())
-            {
-                break;
-            }
-            final int recordState = countersMetaData.getInt(metaOffset);      // offset 0
-            final int typeId = countersMetaData.getInt(metaOffset + 4);       // offset 4
-            System.out.println("  slot " + i + ": state=" + recordState + " typeId=" + typeId);
-        }
 
         // Wait for InteropSmoke to signal that counters are populated
         System.out.println("CountersChecker: waiting for smoke-ready signal...");
@@ -101,24 +79,14 @@ public final class CountersChecker
         {
             typesFound = new HashSet<>();
             final Set<Integer> currentTypes = typesFound;
-            final Map<Integer, Integer> counterIdToType = new HashMap<>();
             reader.forEach((counterId, typeId, keyBuffer, label) ->
             {
                 currentTypes.add(typeId);
-                counterIdToType.put(counterId, typeId);
             });
 
             if (currentTypes.containsAll(requiredTypes))
             {
                 break;
-            }
-
-            // Log progress every 2 seconds
-            if (iterations % 20 == 0 && iterations > 0)
-            {
-                System.out.println("CountersChecker: polling... found types: " + currentTypes +
-                    " at slots: " + counterIdToType +
-                    " (waiting for: " + requiredTypes + ")");
             }
 
             if (System.nanoTime() > deadline)
