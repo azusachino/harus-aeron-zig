@@ -40,10 +40,19 @@ public final class MultiStreamSmoke
             final Publication[] publications = new Publication[STREAM_IDS.length];
             final Subscription[] subscriptions = new Subscription[STREAM_IDS.length];
 
+            // Add subscriptions first so the driver registers them before
+            // publications send SETUP frames (avoids conductor race).
+            for (int i = 0; i < STREAM_IDS.length; i++)
+            {
+                subscriptions[i] = aeron.addSubscription(CHANNEL, STREAM_IDS[i]);
+            }
+
+            // Brief pause for conductor to process ADD_SUBSCRIPTION commands.
+            Thread.sleep(500);
+
             for (int i = 0; i < STREAM_IDS.length; i++)
             {
                 publications[i] = aeron.addPublication(CHANNEL, STREAM_IDS[i]);
-                subscriptions[i] = aeron.addSubscription(CHANNEL, STREAM_IDS[i]);
             }
 
             // Wait for all publications to connect
