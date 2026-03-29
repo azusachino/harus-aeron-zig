@@ -54,4 +54,18 @@ if [ "$CHECKER_EXIT" -ne 0 ]; then
     exit $CHECKER_EXIT
 fi
 
+# Run MultiStreamSmoke — validates multi-stream publish/subscribe.
+java $JAVA_OPTS \
+    -Daeron.dir="$AERON_DIR_PATH" \
+    -cp /aeron-all.jar:/interop \
+    MultiStreamSmoke
+MULTISTREAM_EXIT=$?
+
+if [ "$MULTISTREAM_EXIT" -ne 0 ]; then
+    echo "[CLIENT] MultiStreamSmoke FAILED (exit=$MULTISTREAM_EXIT)"
+    exit $MULTISTREAM_EXIT
+fi
+
+echo "[CLIENT] MultiStreamSmoke passed"
+
 echo "[CLIENT] All checks passed"
