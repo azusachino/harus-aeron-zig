@@ -3,6 +3,7 @@
 // LESSON(media-driver): MediaDriver is the top-level facade that allocates and wires three agents (Conductor, Sender, Receiver), shared IPC buffers (ring buffer, broadcast, counters), and endpoints. It can run standalone (thread-per-agent) or embedded (doWork loop). See docs/tutorial/03-driver/04-media-driver.md
 
 const std = @import("std");
+const builtin = @import("builtin");
 pub const conductor = @import("conductor.zig");
 pub const sender = @import("sender.zig");
 pub const receiver = @import("receiver.zig");
@@ -139,10 +140,14 @@ pub const MediaDriver = struct {
         const bound = if (ctx_.listen_port != 0) blk: {
             const bind_addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, ctx_.listen_port);
             std.posix.bind(recv_fd, &bind_addr.any, bind_addr.getOsSockLen()) catch |err| {
-                std.debug.print("[DRIVER] Failed to bind to port {d}: {any}\n", .{ ctx_.listen_port, err });
+                if (builtin.mode == .Debug) {
+                    std.debug.print("[DRIVER] Failed to bind to port {d}: {any}\n", .{ ctx_.listen_port, err });
+                }
                 return err;
             };
-            std.debug.print("[DRIVER] Bound to 0.0.0.0:{d} (fd={d})\n", .{ ctx_.listen_port, recv_fd });
+            if (builtin.mode == .Debug) {
+                std.debug.print("[DRIVER] Bound to 0.0.0.0:{d} (fd={d})\n", .{ ctx_.listen_port, recv_fd });
+            }
             break :blk true;
         } else false;
 
