@@ -3,6 +3,7 @@
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-driver/src/main/java/io/aeron/driver/DriverConductor.java
 
 const std = @import("std");
+const builtin = @import("builtin");
 const ring_buffer = @import("../ipc/ring_buffer.zig");
 const broadcast = @import("../ipc/broadcast.zig");
 const counters = @import("../ipc/counters.zig");
@@ -174,7 +175,7 @@ pub const DriverConductor = struct {
         var i: usize = 0;
         while (i < self.clients.items.len) {
             if (self.clients.items[i].last_keepalive_ms < deadline) {
-                std.debug.print("[CONDUCTOR] Evicting timed-out client_id={d}\n", .{self.clients.items[i].client_id});
+                if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] Evicting timed-out client_id={d}\n", .{self.clients.items[i].client_id});
                 _ = self.clients.swapRemove(i);
             } else {
                 i += 1;
@@ -195,7 +196,7 @@ pub const DriverConductor = struct {
         defer self.allocator.free(setups);
 
         if (setups.len > 0) {
-            std.debug.print("[CONDUCTOR] Processing {d} setups\n", .{setups.len});
+            if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] Processing {d} setups\n", .{setups.len});
         }
 
         for (setups) |sig| {
@@ -205,11 +206,11 @@ pub const DriverConductor = struct {
             for (self.subscriptions.items) |sub| {
                 if (sub.stream_id == sig.stream_id) {
                     if (self.receiver.hasImage(sig.session_id, sig.stream_id)) {
-                        std.debug.print("[CONDUCTOR] Image already exists for session {d} stream {d}, skipping duplicate SETUP\n", .{ sig.session_id, sig.stream_id });
+                        if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] Image already exists for session {d} stream {d}, skipping duplicate SETUP\n", .{ sig.session_id, sig.stream_id });
                         found = true;
                         break;
                     }
-                    std.debug.print("[CONDUCTOR] Found subscription for stream {d}, creating image...\n", .{sig.stream_id});
+                    if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] Found subscription for stream {d}, creating image...\n", .{sig.stream_id});
                     found = true;
                     const image_log_file_name = if (self.aeron_dir.len != 0)
                         std.fmt.allocPrint(
@@ -305,7 +306,7 @@ pub const DriverConductor = struct {
                 }
             }
             if (!found) {
-                std.debug.print("[CONDUCTOR] No subscription found for stream {d} (active subs: {d})\n", .{ sig.stream_id, self.subscriptions.items.len });
+                if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] No subscription found for stream {d} (active subs: {d})\n", .{ sig.stream_id, self.subscriptions.items.len });
             }
         }
 
@@ -620,7 +621,7 @@ pub const DriverConductor = struct {
         const stream_id = std.mem.readInt(i32, data[SUBSCRIPTION_COMMAND_STREAM_ID_OFFSET .. SUBSCRIPTION_COMMAND_STREAM_ID_OFFSET + 4], .little);
         const channel_len = std.mem.readInt(i32, data[SUBSCRIPTION_COMMAND_CHANNEL_LENGTH_OFFSET .. SUBSCRIPTION_COMMAND_CHANNEL_LENGTH_OFFSET + 4], .little);
 
-        std.debug.print("[CONDUCTOR] ADD_SUBSCRIPTION: correlation={d} registration={d} stream={d} channel_len={d}\n", .{ correlation_id, registration_id, stream_id, channel_len });
+        if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] ADD_SUBSCRIPTION: correlation={d} registration={d} stream={d} channel_len={d}\n", .{ correlation_id, registration_id, stream_id, channel_len });
 
         if (channel_len < 0 or data.len < SUBSCRIPTION_COMMAND_CHANNEL_OFFSET + @as(usize, @intCast(channel_len))) {
             self.sendError(correlation_id, 1, "Invalid ADD_SUBSCRIPTION message");
@@ -783,7 +784,7 @@ pub const DriverConductor = struct {
 
     pub fn handleTerminateDriver(self: *DriverConductor) void {
         signal.running.store(false, .release);
-        std.debug.print("[CONDUCTOR] TERMINATE_DRIVER received — initiating graceful shutdown\n", .{});
+        if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] TERMINATE_DRIVER received — initiating graceful shutdown\n", .{});
         _ = self;
     }
 
