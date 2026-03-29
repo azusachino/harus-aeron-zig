@@ -1,6 +1,7 @@
 // Receiver duty agent — polls incoming UDP frames and dispatches by type
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-driver/src/main/c/aeron_receiver.c
 const std = @import("std");
+const builtin = @import("builtin");
 const logbuffer = @import("../logbuffer/log_buffer.zig");
 const metadata = @import("../logbuffer/metadata.zig");
 const counters = @import("../ipc/counters.zig");
@@ -38,7 +39,9 @@ pub const Image = struct {
         // doesn't stall waiting for data in an earlier (empty) partition.
         const term_count = @as(i64, active_term_id - initial_term_id);
         const initial_rebuild_position = term_count * @as(i64, term_length);
-        std.debug.print("[IMAGE] init: session={d} stream={d} initial_term_id={d} active_term_id={d} rebuild_start={d}\n", .{ session_id, stream_id, initial_term_id, active_term_id, initial_rebuild_position });
+        if (builtin.mode == .Debug) {
+            std.debug.print("[IMAGE] init: session={d} stream={d} initial_term_id={d} active_term_id={d} rebuild_start={d}\n", .{ session_id, stream_id, initial_term_id, active_term_id, initial_rebuild_position });
+        }
         return .{
             .session_id = session_id,
             .stream_id = stream_id,
@@ -316,9 +319,11 @@ pub const Receiver = struct {
                 }
 
                 const total = self.data_frames_total.fetchAdd(1, .monotonic) + 1;
-                std.debug.print("[RECEIVER] DATA frame #{d}: pkt_len={d} term_id={d} term_offset={d} frame_len={d} session={d} stream={d}\n", .{
-                    total, data.len, header.term_id, header.term_offset, header.frame_length, header.session_id, header.stream_id,
-                });
+                if (builtin.mode == .Debug) {
+                    std.debug.print("[RECEIVER] DATA frame #{d}: pkt_len={d} term_id={d} term_offset={d} frame_len={d} session={d} stream={d}\n", .{
+                        total, data.len, header.term_id, header.term_offset, header.frame_length, header.session_id, header.stream_id,
+                    });
+                }
 
                 const payload_len_raw = @as(i32, header.frame_length) - @as(i32, @intCast(protocol.DataHeader.LENGTH));
                 const payload_len: usize = if (payload_len_raw > 0) @intCast(payload_len_raw) else 0;
@@ -336,9 +341,11 @@ pub const Receiver = struct {
 
                             const written = image.insertFrame(self.counters_map, header, payload);
                             if (!written) {
-                                std.debug.print("[RECEIVER] insertFrame FAILED: session={d} stream={d} term_id={d} term_offset={d}\n", .{
-                                    header.session_id, header.stream_id, header.term_id, header.term_offset,
-                                });
+                                if (builtin.mode == .Debug) {
+                                    std.debug.print("[RECEIVER] insertFrame FAILED: session={d} stream={d} term_id={d} term_offset={d}\n", .{
+                                        header.session_id, header.stream_id, header.term_id, header.term_offset,
+                                    });
+                                }
                             }
 
                             if (self.event_log) |el| {
@@ -371,16 +378,20 @@ pub const Receiver = struct {
 
                 if (!found_image) {
                     _ = self.data_frames_before_image.fetchAdd(1, .monotonic);
-                    std.debug.print("[RECEIVER] DATA for unknown session={d} stream={d} (images={d}) term_id={d} term_offset={d}\n", .{
-                        header.session_id, header.stream_id, self.images.items.len, header.term_id, header.term_offset,
-                    });
+                    if (builtin.mode == .Debug) {
+                        std.debug.print("[RECEIVER] DATA for unknown session={d} stream={d} (images={d}) term_id={d} term_offset={d}\n", .{
+                            header.session_id, header.stream_id, self.images.items.len, header.term_id, header.term_offset,
+                        });
+                    }
                 }
 
                 self.mutex.unlock();
 
                 // Send STATUS outside the lock; image pointer is stable while driver is running
                 if (image_for_status) |img| {
-                    std.debug.print("[RECEIVER] sending STATUS to {any}\n", .{img.source_address});
+                    if (builtin.mode == .Debug) {
+                        std.debug.print("[RECEIVER] sending STATUS to {any}\n", .{img.source_address});
+                    }
                     self.sendStatus(img) catch |err| switch (err) {
                         error.WouldBlock => {},
                         else => std.log.err("receiver STATUS send failed session_id={} stream_id={} err={}", .{ img.session_id, img.stream_id, err }),
@@ -394,9 +405,11 @@ pub const Receiver = struct {
                     continue;
                 }
                 const setup = @as(*const protocol.SetupHeader, @ptrCast(@alignCast(&frame_data[0])));
-                std.debug.print("[RECEIVER] SETUP: session={d} stream={d} initial_term_id={d} active_term_id={d} src={any}\n", .{
-                    setup.session_id, setup.stream_id, setup.initial_term_id, setup.active_term_id, src_addr,
-                });
+                if (builtin.mode == .Debug) {
+                    std.debug.print("[RECEIVER] SETUP: session={d} stream={d} initial_term_id={d} active_term_id={d} src={any}\n", .{
+                        setup.session_id, setup.stream_id, setup.initial_term_id, setup.active_term_id, src_addr,
+                    });
+                }
                 self.mutex.lock();
                 self.pending_setups.append(self.allocator, .{
                     .session_id = setup.session_id,
@@ -443,7 +456,9 @@ pub const Receiver = struct {
             if (err == error.WouldBlock) {
                 return 0;
             }
-            std.debug.print("[RECEIVER] recv error: {any}\n", .{err});
+            if (builtin.mode == .Debug) {
+                std.debug.print("[RECEIVER] recv error: {any}\n", .{err});
+            }
             return 0;
         };
 
