@@ -421,6 +421,27 @@ pub const DriverConductor = struct {
         }
 
         const channel_data = data[PUBLICATION_COMMAND_CHANNEL_OFFSET .. PUBLICATION_COMMAND_CHANNEL_OFFSET + @as(usize, @intCast(channel_len))];
+
+        // Check if publication already exists for this channel+stream_id
+        for (self.publications.items) |*pub_entry| {
+            if (pub_entry.stream_id == stream_id and std.mem.eql(u8, pub_entry.channel, channel_data)) {
+                // Duplicate add: increment ref_count and send ON_PUBLICATION_READY with existing entry details
+                pub_entry.ref_count += 1;
+                if (pub_entry.network_pub) |np| {
+                    self.sendPublicationReady(
+                        correlation_id,
+                        pub_entry.registration_id,
+                        pub_entry.session_id,
+                        pub_entry.stream_id,
+                        np.publisher_limit.counter_id,
+                        pub_entry.channel_status_indicator_counter_id,
+                        pub_entry.log_file_name,
+                    );
+                }
+                return;
+            }
+        }
+
         const session_id = self.next_session_id;
         self.next_session_id +%= 1;
 
@@ -592,22 +613,28 @@ pub const DriverConductor = struct {
         }
 
         if (found_index) |idx| {
-            const removed = self.publications.swapRemove(idx);
-            if (removed.network_pub) |np| {
-                self.counters_map.free(np.sender_position.counter_id);
-                self.counters_map.free(np.publisher_limit.counter_id);
-                self.sender.onRemovePublication(removed.session_id, removed.stream_id);
-                self.allocator.destroy(np);
+            // Decrement ref_count first
+            self.publications.items[idx].ref_count -= 1;
+
+            // Only free resources when ref_count reaches 0
+            if (self.publications.items[idx].ref_count <= 0) {
+                const removed = self.publications.swapRemove(idx);
+                if (removed.network_pub) |np| {
+                    self.counters_map.free(np.sender_position.counter_id);
+                    self.counters_map.free(np.publisher_limit.counter_id);
+                    self.sender.onRemovePublication(removed.session_id, removed.stream_id);
+                    self.allocator.destroy(np);
+                }
+                if (removed.channel_status_indicator_counter_id != counters.NULL_COUNTER_ID) {
+                    self.counters_map.free(removed.channel_status_indicator_counter_id);
+                }
+                if (removed.log_buffer) |lb| {
+                    lb.deinit();
+                    self.allocator.destroy(lb);
+                }
+                self.allocator.free(removed.channel);
+                self.allocator.free(removed.log_file_name);
             }
-            if (removed.channel_status_indicator_counter_id != counters.NULL_COUNTER_ID) {
-                self.counters_map.free(removed.channel_status_indicator_counter_id);
-            }
-            if (removed.log_buffer) |lb| {
-                lb.deinit();
-                self.allocator.destroy(lb);
-            }
-            self.allocator.free(removed.channel);
-            self.allocator.free(removed.log_file_name);
             self.sendOperationSuccess(correlation_id);
         }
     }
