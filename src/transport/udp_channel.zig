@@ -14,6 +14,8 @@ pub const UdpChannel = struct {
     control_mode: ?AeronUri.ControlMode,
     session_id: ?i32,
     term_length: ?u32,
+    so_sndbuf: ?usize, // SO_SNDBUF hint in bytes
+    so_rcvbuf: ?usize, // SO_RCVBUF hint in bytes
 
     // LESSON(udp-transport): String parsing with error propagation via !T return type. Allocator ownership is caller's responsibility. See docs/tutorial/02-data-path/03-udp-transport.md
     pub fn parse(allocator: std.mem.Allocator, uri_str: []const u8) !UdpChannel {
@@ -34,6 +36,8 @@ pub const UdpChannel = struct {
             .control_mode = aeron_uri.controlMode(),
             .session_id = aeron_uri.sessionId(),
             .term_length = aeron_uri.termLength(),
+            .so_sndbuf = aeron_uri.socketSndbuf(),
+            .so_rcvbuf = aeron_uri.socketRcvbuf(),
         };
 
         if (aeron_uri.media_type == .ipc) {

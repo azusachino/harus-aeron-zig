@@ -30,6 +30,7 @@ pub const NetworkPublication = struct {
     dest_address: std.net.Address,
     mtu: i32,
     last_setup_time_ms: i64,
+    last_heartbeat_time_ms: i64,
 };
 
 pub const Sender = struct {
@@ -105,6 +106,13 @@ pub const Sender = struct {
         const pub_limit = self.counters_map.get(publication.publisher_limit.counter_id);
 
         if (sender_pos >= pub_limit) {
+            // Send heartbeat when idle (no data to send)
+            if (now_ms - publication.last_heartbeat_time_ms >= 200) {
+                if (self.sendHeartbeatFrame(publication)) {
+                    publication.last_heartbeat_time_ms = now_ms;
+                    work_count += 1;
+                }
+            }
             return work_count;
         }
 
@@ -148,6 +156,42 @@ pub const Sender = struct {
             else => {
                 std.log.err(
                     "sender setup send failed session_id={} stream_id={} err={}",
+                    .{ publication.session_id, publication.stream_id, err },
+                );
+                return false;
+            },
+        }
+    }
+
+    fn sendHeartbeatFrame(_: *Sender, publication: *NetworkPublication) bool {
+        // Zero-length DATA frame at current sender position to keep receiver image alive
+        const meta = publication.log_buffer.metaData();
+        const term_count = meta.activeTermCount();
+        const current_term_id = publication.initial_term_id +% term_count;
+        const active_partition = metadata.activePartitionIndex(term_count);
+        const raw_tail = meta.rawTailVolatile(active_partition);
+        const term_offset = metadata.termOffset(raw_tail, publication.log_buffer.term_length);
+
+        var frame_buffer: [protocol.DataHeader.LENGTH]u8 align(@alignOf(protocol.DataHeader)) = undefined;
+        const header: *protocol.DataHeader = @ptrCast(&frame_buffer);
+
+        header.frame_length = 0;
+        header.version = protocol.VERSION;
+        header.flags = protocol.DataHeader.BEGIN_FLAG | protocol.DataHeader.END_FLAG;
+        header.type = @intFromEnum(protocol.FrameType.data);
+        header.term_offset = term_offset;
+        header.session_id = publication.session_id;
+        header.stream_id = publication.stream_id;
+        header.term_id = current_term_id;
+        header.reserved_value = 0;
+
+        if (publication.send_channel.send(publication.dest_address, &frame_buffer)) |_| {
+            return true;
+        } else |err| switch (err) {
+            error.WouldBlock => return false,
+            else => {
+                std.log.err(
+                    "sender heartbeat send failed session_id={} stream_id={} err={}",
                     .{ publication.session_id, publication.stream_id, err },
                 );
                 return false;
@@ -403,6 +447,7 @@ test "Sender: onAddPublication adds to list" {
         .dest_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
         .mtu = 1408,
         .last_setup_time_ms = 0,
+        .last_heartbeat_time_ms = 0,
     };
 
     try sender.onAddPublication(&publication);
@@ -436,6 +481,7 @@ test "Sender: onRemovePublication removes from list" {
         .dest_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
         .mtu = 1408,
         .last_setup_time_ms = 0,
+        .last_heartbeat_time_ms = 0,
     };
 
     var publication2 = NetworkPublication{
@@ -449,6 +495,7 @@ test "Sender: onRemovePublication removes from list" {
         .dest_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40124),
         .mtu = 1408,
         .last_setup_time_ms = 0,
+        .last_heartbeat_time_ms = 0,
     };
 
     try sender.onAddPublication(&publication1);
@@ -597,6 +644,7 @@ test "Sender: STATUS updates publisher limit" {
         .dest_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
         .mtu = 1408,
         .last_setup_time_ms = 0,
+        .last_heartbeat_time_ms = 0,
     };
     try sender.onAddPublication(&publication);
 
@@ -634,4 +682,67 @@ test "Sender: sendDataFrames reads committed frame from log buffer" {
     for (4..64) |i| {
         try std.testing.expectEqual(@as(u8, @intCast(i % 256)), term_buffer[i]);
     }
+}
+
+test "Sender: heartbeat sent when publication idle" {
+    const allocator = std.testing.allocator;
+    var meta align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
+    var values align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
+    var counters_map = counters.CountersMap.init(&meta, &values);
+    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer std.posix.close(sock);
+    var send_endpoint = endpoint.SendChannelEndpoint{ .socket = sock };
+
+    const sender_pos = counters_map.allocate(counters.SENDER_POSITION, "sender-pos");
+    const pub_limit = counters_map.allocate(counters.PUBLISHER_LIMIT, "pub-limit");
+
+    // Set sender_pos == pub_limit to simulate idle state
+    counters_map.set(sender_pos.counter_id, 0);
+    counters_map.set(pub_limit.counter_id, 0);
+
+    var sender = try Sender.init(allocator, &send_endpoint, &counters_map);
+    defer sender.deinit();
+
+    var log_buf = try logbuffer.LogBuffer.init(allocator, 64 * 1024);
+    defer log_buf.deinit();
+
+    var publication = NetworkPublication{
+        .session_id = 42,
+        .stream_id = 1,
+        .initial_term_id = 0,
+        .log_buffer = &log_buf,
+        .sender_position = sender_pos,
+        .publisher_limit = pub_limit,
+        .send_channel = &send_endpoint,
+        .dest_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
+        .mtu = 1408,
+        .last_setup_time_ms = 0,
+        .last_heartbeat_time_ms = 0,
+    };
+    try sender.onAddPublication(&publication);
+
+    // Time 50: triggers SETUP (last_setup_time_ms=0, delta=50 >= 50)
+    sender.setCurrentTimeMs(50);
+    var work = sender.doWork();
+    // SETUP may succeed or fail depending on socket; heartbeat not due yet
+    // At minimum: no crash. Heartbeat needs 200ms from time 0.
+
+    // Time 150ms: no heartbeat yet (need 200ms interval from 0)
+    sender.setCurrentTimeMs(150);
+    work = sender.doWork();
+    // Heartbeat not due (150 - 0 < 200)
+
+    // Time 200ms: heartbeat should be sent (idle, 200ms elapsed)
+    sender.setCurrentTimeMs(200);
+    work = sender.doWork();
+    try std.testing.expect(work >= 1); // Heartbeat (and possibly SETUP)
+
+    // Verify heartbeat_time was updated
+    try std.testing.expectEqual(@as(i64, 200), sender.publications.items[0].last_heartbeat_time_ms);
+
+    // Time 400ms: next heartbeat should fire
+    sender.setCurrentTimeMs(400);
+    work = sender.doWork();
+    try std.testing.expect(work >= 1); // Next heartbeat
+    try std.testing.expectEqual(@as(i64, 400), sender.publications.items[0].last_heartbeat_time_ms);
 }

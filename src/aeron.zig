@@ -309,6 +309,45 @@ pub const Aeron = struct {
 
         return correlation_id;
     }
+
+    pub fn removePublication(self: *Aeron, registration_id: i64) !void {
+        const correlation_id = self.to_driver_ring_buffer.nextCorrelationId();
+
+        var buf: [24]u8 = undefined;
+        std.mem.writeInt(i64, buf[0..8], self.client_id, .little);
+        std.mem.writeInt(i64, buf[8..16], correlation_id, .little);
+        std.mem.writeInt(i64, buf[16..24], registration_id, .little);
+
+        if (!self.to_driver_ring_buffer.write(driver.conductor.CMD_REMOVE_PUBLICATION, &buf)) {
+            return error.RingBufferFull;
+        }
+
+        if (self.publications.fetchRemove(registration_id)) |entry| {
+            entry.value.deinit(self.allocator);
+            self.allocator.destroy(entry.value);
+        }
+    }
+
+    pub fn removeSubscription(self: *Aeron, registration_id: i64) !void {
+        const correlation_id = self.to_driver_ring_buffer.nextCorrelationId();
+
+        var buf: [24]u8 = undefined;
+        std.mem.writeInt(i64, buf[0..8], self.client_id, .little);
+        std.mem.writeInt(i64, buf[8..16], correlation_id, .little);
+        std.mem.writeInt(i64, buf[16..24], registration_id, .little);
+
+        if (!self.to_driver_ring_buffer.write(driver.conductor.CMD_REMOVE_SUBSCRIPTION, &buf)) {
+            return error.RingBufferFull;
+        }
+
+        if (self.subscriptions.fetchRemove(registration_id)) |entry| {
+            for (entry.value.images()) |img| {
+                self.allocator.destroy(img);
+            }
+            entry.value.deinit();
+            self.allocator.destroy(entry.value);
+        }
+    }
 };
 
 test {
@@ -543,4 +582,96 @@ test "Aeron sendKeepaliveIfDue writes client keepalive command" {
     try std.testing.expectEqual(@as(usize, 8), capture.payload.len);
     try std.testing.expectEqual(@as(i64, 33), std.mem.readInt(i64, capture.payload[0..8], .little));
     try std.testing.expectEqual(@as(i32, 0), aeron.sendKeepaliveIfDue());
+}
+
+test "Aeron removePublication encodes upstream RemoveMessageFlyweight layout" {
+    const allocator = std.testing.allocator;
+
+    var ring_storage align(8) = [_]u8{0} ** 512;
+    @memset(&ring_storage, 0);
+
+    var aeron = Aeron{
+        .ctx = .{},
+        .allocator = allocator,
+        .cnc_file = undefined,
+        .to_driver_ring_buffer = ipc.ring_buffer.ManyToOneRingBuffer.init(&ring_storage),
+        .to_clients_broadcast_receiver = undefined,
+        .counters_map = undefined,
+        .client_id = 11,
+        .last_keepalive_ms = 0,
+        .publications = .{},
+        .subscriptions = .{},
+        .pending_subscription_streams = .{},
+        .embedded_driver = null,
+    };
+    defer aeron.publications.deinit(allocator);
+    defer aeron.subscriptions.deinit(allocator);
+    defer aeron.pending_subscription_streams.deinit(allocator);
+
+    try aeron.removePublication(777);
+
+    const Capture = struct {
+        msg_type: i32 = 0,
+        payload: []const u8 = "",
+    };
+    const handler = struct {
+        fn handle(msg_type_id: i32, data: []const u8, ctx: *anyopaque) void {
+            const capture: *Capture = @ptrCast(@alignCast(ctx));
+            capture.msg_type = msg_type_id;
+            capture.payload = data;
+        }
+    }.handle;
+
+    var capture = Capture{};
+    try std.testing.expectEqual(@as(i32, 1), aeron.to_driver_ring_buffer.read(handler, @ptrCast(&capture), 1));
+    try std.testing.expectEqual(driver.conductor.CMD_REMOVE_PUBLICATION, capture.msg_type);
+    try std.testing.expectEqual(@as(usize, 24), capture.payload.len);
+    try std.testing.expectEqual(@as(i64, 11), std.mem.readInt(i64, capture.payload[0..8], .little));
+    try std.testing.expectEqual(@as(i64, 777), std.mem.readInt(i64, capture.payload[16..24], .little));
+}
+
+test "Aeron removeSubscription encodes upstream RemoveMessageFlyweight layout" {
+    const allocator = std.testing.allocator;
+
+    var ring_storage align(8) = [_]u8{0} ** 512;
+    @memset(&ring_storage, 0);
+
+    var aeron = Aeron{
+        .ctx = .{},
+        .allocator = allocator,
+        .cnc_file = undefined,
+        .to_driver_ring_buffer = ipc.ring_buffer.ManyToOneRingBuffer.init(&ring_storage),
+        .to_clients_broadcast_receiver = undefined,
+        .counters_map = undefined,
+        .client_id = 13,
+        .last_keepalive_ms = 0,
+        .publications = .{},
+        .subscriptions = .{},
+        .pending_subscription_streams = .{},
+        .embedded_driver = null,
+    };
+    defer aeron.publications.deinit(allocator);
+    defer aeron.subscriptions.deinit(allocator);
+    defer aeron.pending_subscription_streams.deinit(allocator);
+
+    try aeron.removeSubscription(888);
+
+    const Capture = struct {
+        msg_type: i32 = 0,
+        payload: []const u8 = "",
+    };
+    const handler = struct {
+        fn handle(msg_type_id: i32, data: []const u8, ctx: *anyopaque) void {
+            const capture: *Capture = @ptrCast(@alignCast(ctx));
+            capture.msg_type = msg_type_id;
+            capture.payload = data;
+        }
+    }.handle;
+
+    var capture = Capture{};
+    try std.testing.expectEqual(@as(i32, 1), aeron.to_driver_ring_buffer.read(handler, @ptrCast(&capture), 1));
+    try std.testing.expectEqual(driver.conductor.CMD_REMOVE_SUBSCRIPTION, capture.msg_type);
+    try std.testing.expectEqual(@as(usize, 24), capture.payload.len);
+    try std.testing.expectEqual(@as(i64, 13), std.mem.readInt(i64, capture.payload[0..8], .little));
+    try std.testing.expectEqual(@as(i64, 888), std.mem.readInt(i64, capture.payload[16..24], .little));
 }

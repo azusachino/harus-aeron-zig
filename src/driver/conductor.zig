@@ -25,6 +25,7 @@ const Image = receiver_mod.Image;
 // Command type IDs — match io.aeron.command.ControlProtocolEvents.
 pub const CMD_ADD_PUBLICATION: i32 = 0x01;
 pub const CMD_REMOVE_PUBLICATION: i32 = 0x02;
+pub const CMD_ADD_EXCLUSIVE_PUBLICATION: i32 = 0x03;
 pub const CMD_ADD_SUBSCRIPTION: i32 = 0x04;
 pub const CMD_REMOVE_SUBSCRIPTION: i32 = 0x05;
 pub const CMD_CLIENT_KEEPALIVE: i32 = 0x06;
@@ -547,6 +548,7 @@ pub const DriverConductor = struct {
             .dest_address = dest_address,
             .mtu = 1408,
             .last_setup_time_ms = 0,
+            .last_heartbeat_time_ms = 0,
         };
         self.sender.onAddPublication(net_pub) catch {
             self.allocator.destroy(net_pub);
@@ -596,6 +598,14 @@ pub const DriverConductor = struct {
             channel_status_handle.counter_id,
             log_file_name,
         );
+    }
+
+    pub fn handleAddExclusivePublication(self: *DriverConductor, data: []const u8) void {
+        // Exclusive publications use the same command layout as regular publications.
+        // The difference is they are never merged with existing publications for the
+        // same channel+stream. Since we don't implement publication merging yet,
+        // the behavior is identical.
+        self.handleAddPublication(data);
     }
 
     pub fn handleRemovePublication(self: *DriverConductor, data: []const u8) void {
@@ -884,6 +894,7 @@ fn handleMessage(msg_type_id: i32, data: []const u8, ctx: *anyopaque) void {
     switch (msg_type_id) {
         CMD_ADD_PUBLICATION => self.handleAddPublication(data),
         CMD_REMOVE_PUBLICATION => self.handleRemovePublication(data),
+        CMD_ADD_EXCLUSIVE_PUBLICATION => self.handleAddExclusivePublication(data),
         CMD_ADD_SUBSCRIPTION => self.handleAddSubscription(data),
         CMD_REMOVE_SUBSCRIPTION => self.handleRemoveSubscription(data),
         CMD_CLIENT_KEEPALIVE => self.handleClientKeepalive(data),
@@ -1343,6 +1354,7 @@ test "DriverConductor REMOVE_SUBSCRIPTION sends ON_OPERATION_SUCCESS" {
 test "DriverConductor IPC event IDs match upstream control protocol" {
     try testing.expectEqual(@as(i32, 0x01), CMD_ADD_PUBLICATION);
     try testing.expectEqual(@as(i32, 0x02), CMD_REMOVE_PUBLICATION);
+    try testing.expectEqual(@as(i32, 0x03), CMD_ADD_EXCLUSIVE_PUBLICATION);
     try testing.expectEqual(@as(i32, 0x04), CMD_ADD_SUBSCRIPTION);
     try testing.expectEqual(@as(i32, 0x05), CMD_REMOVE_SUBSCRIPTION);
     try testing.expectEqual(@as(i32, 0x06), CMD_CLIENT_KEEPALIVE);
