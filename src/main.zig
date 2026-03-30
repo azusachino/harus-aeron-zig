@@ -31,6 +31,26 @@ pub fn main() !void {
             ctx.aeron_dir = opts.aeron_dir;
             if (opts.term_buffer_length) |v| ctx.term_buffer_length = v;
             if (opts.mtu_length) |v| ctx.mtu_length = v;
+
+            const idle_mod = @import("ipc/idle_strategy.zig");
+            if (std.mem.eql(u8, opts.idle_strategy, "busy")) {
+                ctx.conductor_idle_strategy = idle_mod.IdleStrategy.initBusySpin();
+                ctx.sender_idle_strategy = idle_mod.IdleStrategy.initBusySpin();
+                ctx.receiver_idle_strategy = idle_mod.IdleStrategy.initBusySpin();
+            } else if (std.mem.eql(u8, opts.idle_strategy, "yield")) {
+                ctx.conductor_idle_strategy = idle_mod.IdleStrategy.initYielding();
+                ctx.sender_idle_strategy = idle_mod.IdleStrategy.initYielding();
+                ctx.receiver_idle_strategy = idle_mod.IdleStrategy.initYielding();
+            } else if (std.mem.eql(u8, opts.idle_strategy, "sleep")) {
+                ctx.conductor_idle_strategy = idle_mod.IdleStrategy.initSleeping(1_000_000); // 1ms
+                ctx.sender_idle_strategy = idle_mod.IdleStrategy.initSleeping(1_000_000);
+                ctx.receiver_idle_strategy = idle_mod.IdleStrategy.initSleeping(1_000_000);
+            } else {
+                ctx.conductor_idle_strategy = idle_mod.IdleStrategy.initDefaultBackoff();
+                ctx.sender_idle_strategy = idle_mod.IdleStrategy.initDefaultBackoff();
+                ctx.receiver_idle_strategy = idle_mod.IdleStrategy.initDefaultBackoff();
+            }
+
             try runDriver(allocator, ctx);
         },
         .archive => try runArchive(allocator),
@@ -74,7 +94,6 @@ fn runDriver(allocator: std.mem.Allocator, ctx: media_driver.MediaDriverContext)
 
     while (signal.isRunning()) {
         _ = md.doWork();
-        std.Thread.sleep(1 * std.time.ns_per_ms);
     }
     std.log.info("MediaDriver shutting down.", .{});
 }

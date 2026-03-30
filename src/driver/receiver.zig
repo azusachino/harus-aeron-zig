@@ -22,6 +22,7 @@ pub const Image = struct {
     rebuild_position: i64, // tracks gap filling progress
     source_address: std.net.Address,
     nak_state: NakState,
+    last_activity_ns: i64,
 
     pub fn init(
         session_id: i32,
@@ -54,6 +55,7 @@ pub const Image = struct {
             .rebuild_position = initial_rebuild_position,
             .source_address = source_address,
             .nak_state = NakState.init(log_buffer.allocator, stream_id),
+            .last_activity_ns = @as(i64, @intCast(std.time.nanoTimestamp())),
         };
     }
 
@@ -205,7 +207,7 @@ pub const NakState = struct {
                 return;
             }
         }
-        if (self.gap_list.items.len == 0) self.first_gap_ns = @intCast(@as(i128, std.time.nanoTimestamp()));
+        if (self.gap_list.items.len == 0) self.first_gap_ns = @as(i64, @intCast(std.time.nanoTimestamp()));
         try self.gap_list.append(self.allocator, .{ .offset = offset, .length = length });
     }
 
@@ -341,6 +343,7 @@ pub const Receiver = struct {
                 for (self.images.items) |image| {
                     if (image.session_id == header.session_id and image.stream_id == header.stream_id) {
                         found_image = true;
+                        image.last_activity_ns = @as(i64, @intCast(std.time.nanoTimestamp()));
                         if (payload_offset + payload_len <= frame_data.len) {
                             const payload = frame_data[payload_offset .. payload_offset + payload_len];
 
@@ -354,7 +357,7 @@ pub const Receiver = struct {
                             }
 
                             if (self.event_log) |el| {
-                                const evt_now: i64 = @intCast(@as(i128, std.time.nanoTimestamp()));
+                                const evt_now: i64 = @as(i64, @intCast(std.time.nanoTimestamp()));
                                 el.log(.frame_in, evt_now, image.session_id, image.stream_id, payload);
                             }
 
@@ -366,12 +369,12 @@ pub const Receiver = struct {
                                     std.log.err("receiver failed to record NAK gap session_id={} stream_id={} err={}", .{ image.session_id, image.stream_id, err });
                                 };
                                 if (self.loss_report_instance) |lr| {
-                                    const lnow: i64 = @intCast(@as(i128, std.time.nanoTimestamp()));
+                                    const lnow: i64 = @as(i64, @intCast(std.time.nanoTimestamp()));
                                     lr.recordObservation(@as(i64, @intCast(payload.len)), lnow, image.session_id, image.stream_id, "aeron:udp");
                                 }
                             }
 
-                            const now = @as(i64, @intCast(@as(i128, std.time.nanoTimestamp())));
+                            const now = @as(i64, @intCast(std.time.nanoTimestamp()));
                             if (image.nak_state.shouldSend(now)) {
                                 self.sendNak(image) catch {};
                                 image.nak_state.clear();
@@ -525,7 +528,7 @@ pub const Receiver = struct {
 
             // Log send_nak event
             if (self.event_log) |el| {
-                const nak_now: i64 = @intCast(@as(i128, std.time.nanoTimestamp()));
+                const nak_now: i64 = @as(i64, @intCast(std.time.nanoTimestamp()));
                 el.log(.send_nak, nak_now, image.session_id, image.stream_id, nak_bytes);
             }
         }
@@ -572,7 +575,7 @@ test "NAK: adjacent gaps produce one coalesced NAK" {
 
 test "NAK: no NAK sent within delay window" {
     const allocator = std.testing.allocator;
-    // Use an injectable base_time to avoid non-determinism from std.time.nanoTimestamp().
+    // Use an injectable base_time to avoid non-determinism from @as(i64, @intCast(std.time.nanoTimestamp())).
     // NakState.initWithTime(allocator, stream_id, first_gap_ns) sets first_gap_ns directly.
     var nak_state = NakState.initWithTime(allocator, 1001, 0);
     defer nak_state.deinit();

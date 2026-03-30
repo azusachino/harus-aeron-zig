@@ -20,6 +20,7 @@ pub const CliOptions = struct {
     aeron_dir: []const u8 = "/dev/shm/aeron",
     term_buffer_length: ?i32 = null,
     mtu_length: ?i32 = null,
+    idle_strategy: []const u8 = "backoff",
 };
 
 pub fn parse(args: []const []const u8) CliOptions {
@@ -76,6 +77,8 @@ pub fn parse(args: []const []const u8) CliOptions {
             opts.term_buffer_length = std.fmt.parseInt(i32, arg["-Daeron.term.buffer.length=".len..], 10) catch null;
         } else if (std.mem.startsWith(u8, arg, "-Daeron.mtu.length=")) {
             opts.mtu_length = std.fmt.parseInt(i32, arg["-Daeron.mtu.length=".len..], 10) catch null;
+        } else if (std.mem.startsWith(u8, arg, "--idle-strategy=")) {
+            opts.idle_strategy = arg["--idle-strategy=".len..];
         }
     }
 

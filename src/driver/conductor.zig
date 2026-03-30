@@ -9,6 +9,7 @@ const broadcast = @import("../ipc/broadcast.zig");
 const counters = @import("../ipc/counters.zig");
 const receiver_mod = @import("receiver.zig");
 const sender_mod = @import("sender.zig");
+const flow_control = @import("flow_control.zig");
 const logbuffer = @import("../logbuffer/log_buffer.zig");
 const frame = @import("../protocol/frame.zig");
 const transport_uri = @import("../transport/udp_channel.zig");
@@ -104,6 +105,9 @@ pub const DriverConductor = struct {
     recv_bound: bool,
     current_time_ms: i64,
     aeron_dir: []const u8,
+    client_liveness_timeout_ns: i64,
+    image_liveness_timeout_ns: i64,
+    publication_connection_timeout_ns: i64,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -115,6 +119,9 @@ pub const DriverConductor = struct {
         recv_ep: *endpoint_mod.ReceiveChannelEndpoint,
         recv_bound: bool,
         aeron_dir: []const u8,
+        client_liveness_timeout_ns: i64,
+        image_liveness_timeout_ns: i64,
+        publication_connection_timeout_ns: i64,
     ) !DriverConductor {
         return DriverConductor{
             .ring_buffer = ring_buffer_ptr,
@@ -131,6 +138,9 @@ pub const DriverConductor = struct {
             .next_session_id = 1,
             .current_time_ms = 0,
             .aeron_dir = aeron_dir,
+            .client_liveness_timeout_ns = client_liveness_timeout_ns,
+            .image_liveness_timeout_ns = image_liveness_timeout_ns,
+            .publication_connection_timeout_ns = publication_connection_timeout_ns,
         };
     }
 
@@ -172,7 +182,7 @@ pub const DriverConductor = struct {
     /// In upstream Aeron this triggers publication/subscription cleanup for the dead client.
     /// Here we remove the client entry; full resource teardown is left to explicit REMOVE commands.
     pub fn checkClientLiveness(self: *DriverConductor) void {
-        const deadline = self.current_time_ms - CLIENT_LIVENESS_TIMEOUT_MS;
+        const deadline = self.current_time_ms - @divTrunc(self.client_liveness_timeout_ns, std.time.ns_per_ms);
         var i: usize = 0;
         while (i < self.clients.items.len) {
             if (self.clients.items[i].last_keepalive_ms < deadline) {
@@ -184,12 +194,59 @@ pub const DriverConductor = struct {
         }
     }
 
+    pub fn checkImageLiveness(self: *DriverConductor) void {
+        const now_ns = self.current_time_ms * std.time.ns_per_ms;
+        const deadline_ns = now_ns - self.image_liveness_timeout_ns;
+
+        self.receiver.mutex.lock();
+        var i: usize = 0;
+        while (i < self.receiver.images.items.len) {
+            const image = self.receiver.images.items[i];
+            if (image.last_activity_ns < deadline_ns) {
+                if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] Image timeout: session={d} stream={d}\n", .{ image.session_id, image.stream_id });
+                // Remove image from receiver
+                _ = self.receiver.images.swapRemove(i);
+                self.receiver.mutex.unlock();
+
+                // Notify clients via ON_UNAVAILABLE_IMAGE
+                self.sendImageClose(image.session_id, image.stream_id, 0); // TODO: find subscription registration id?
+
+                // Cleanup image resources
+                var mutable_image = image;
+                mutable_image.deinit();
+                self.allocator.destroy(image);
+
+                self.receiver.mutex.lock();
+            } else {
+                i += 1;
+            }
+        }
+        self.receiver.mutex.unlock();
+    }
+
+    pub fn checkPublicationLiveness(self: *DriverConductor) void {
+        const now_ns = self.current_time_ms * std.time.ns_per_ms;
+        const deadline_ns = now_ns - self.publication_connection_timeout_ns;
+
+        for (self.publications.items) |pub_entry| {
+            if (pub_entry.network_pub) |np| {
+                if (np.last_activity_ns < deadline_ns) {
+                    if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] Publication timeout: session={d} stream={d}\n", .{ pub_entry.session_id, pub_entry.stream_id });
+                    var meta = pub_entry.log_buffer.?.metaData();
+                    meta.setIsConnected(false);
+                }
+            }
+        }
+    }
+
     pub fn doWork(self: *DriverConductor) i32 {
         // LESSON(conductor): Command dispatch via ring buffer polling + SETUP signal processing in one work cycle. See docs/tutorial/03-driver/03-conductor.md
         var work: i32 = 0;
         work += self.ring_buffer.read(handleMessage, @ptrCast(self), 10);
 
-        // Check client liveness and evict timed-out clients
+        // Check liveness and evict timed-out resources
+        self.checkImageLiveness();
+        self.checkPublicationLiveness();
         self.checkClientLiveness();
 
         // Drain receiver SETUP signals
@@ -537,6 +594,15 @@ pub const DriverConductor = struct {
             self.sendError(correlation_id, 2, "Out of memory");
             return;
         };
+        // Initialize flow control strategy
+        const fc_strategy = if (udp_ch) |ch|
+            if (ch.isMulticast())
+                flow_control.FlowControl{ .min_multicast = flow_control.MinMulticastFlowControl.init(self.allocator, self.image_liveness_timeout_ns) }
+            else
+                flow_control.FlowControl{ .unicast = .{} }
+        else
+            flow_control.FlowControl{ .unicast = .{} };
+
         net_pub.* = sender_mod.NetworkPublication{
             .session_id = session_id,
             .stream_id = stream_id,
@@ -549,6 +615,8 @@ pub const DriverConductor = struct {
             .mtu = 1408,
             .last_setup_time_ms = 0,
             .last_heartbeat_time_ms = 0,
+            .last_activity_ns = @as(i64, @intCast(std.time.nanoTimestamp())),
+            .flow_control_strategy = fc_strategy,
         };
         self.sender.onAddPublication(net_pub) catch {
             self.allocator.destroy(net_pub);
@@ -633,6 +701,10 @@ pub const DriverConductor = struct {
                     self.counters_map.free(np.sender_position.counter_id);
                     self.counters_map.free(np.publisher_limit.counter_id);
                     self.sender.onRemovePublication(removed.session_id, removed.stream_id);
+                    if (np.flow_control_strategy == .min_multicast) {
+                        var mutable_np = np.*;
+                        mutable_np.flow_control_strategy.min_multicast.deinit();
+                    }
                     self.allocator.destroy(np);
                 }
                 if (removed.channel_status_indicator_counter_id != counters.NULL_COUNTER_ID) {
@@ -937,7 +1009,7 @@ test "DriverConductor init and deinit" {
     var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
     defer sender.deinit();
 
-    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp");
+    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp", 5_000_000_000, 5_000_000_000, 5_000_000_000);
     defer conductor.deinit();
 
     try testing.expectEqual(@as(i32, 1), conductor.next_session_id);
@@ -975,7 +1047,7 @@ test "DriverConductor ADD_PUBLICATION creates entry and sends ready response" {
     var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
     defer sender.deinit();
 
-    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp");
+    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp", 5_000_000_000, 5_000_000_000, 5_000_000_000);
     defer conductor.deinit();
 
     // Simulate ADD_PUBLICATION command
@@ -1042,7 +1114,7 @@ test "DriverConductor ADD_SUBSCRIPTION creates entry and sends ready response" {
     var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
     defer sender.deinit();
 
-    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp");
+    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp", 5_000_000_000, 5_000_000_000, 5_000_000_000);
     defer conductor.deinit();
 
     // Skip socket binding for dummy socket in tests
@@ -1109,7 +1181,7 @@ test "DriverConductor REMOVE_PUBLICATION cleans up entry" {
     var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
     defer sender.deinit();
 
-    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp");
+    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp", 5_000_000_000, 5_000_000_000, 5_000_000_000);
     defer conductor.deinit();
 
     // Add a publication first
@@ -1145,7 +1217,7 @@ fn makeTestConductor(
     sender: *sender_mod.Sender,
     recv_ep: *endpoint_mod.ReceiveChannelEndpoint,
 ) !DriverConductor {
-    const conductor = try DriverConductor.init(allocator, rb, bcast, cm, receiver, sender, recv_ep, true, "/tmp");
+    const conductor = try DriverConductor.init(allocator, rb, bcast, cm, receiver, sender, recv_ep, true, "/tmp", 5_000_000_000, 5_000_000_000, 5_000_000_000);
     return conductor;
 }
 

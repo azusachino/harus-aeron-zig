@@ -38,6 +38,7 @@ pub const Image = @import("image.zig").Image;
 
 pub const AeronContext = struct {
     aeron_dir: []const u8 = "/tmp/aeron",
+    idle_strategy: ?ipc.idle_strategy.IdleStrategy = null,
 };
 
 // LESSON(what-is-aeron): Aeron is a factory and lifecycle container for the client-side API. It holds the cnc.dat file handle, ring buffer and broadcast receiver for driver communication, and hash maps of owned Publication and Subscription instances. The embedded_driver field is optional—clients can spawn their own driver or connect to an existing one via cnc.dat. See docs/tutorial/00-orientation/01-what-is-aeron.md
@@ -48,6 +49,7 @@ pub const Aeron = struct {
     to_driver_ring_buffer: ipc.ring_buffer.ManyToOneRingBuffer,
     to_clients_broadcast_receiver: ipc.broadcast.BroadcastReceiver,
     counters_map: ipc.counters.CountersMap,
+    idle_strategy: ipc.idle_strategy.IdleStrategy,
     client_id: i64,
     last_keepalive_ms: i64 = 0,
 
@@ -84,6 +86,7 @@ pub const Aeron = struct {
             .to_driver_ring_buffer = to_driver_ring_buffer,
             .to_clients_broadcast_receiver = ipc.broadcast.BroadcastReceiver.wrap(to_clients),
             .counters_map = ipc.counters.CountersMap.init(counters_meta, counters_values),
+            .idle_strategy = ctx.idle_strategy orelse ipc.idle_strategy.IdleStrategy.initDefaultBackoff(),
             .client_id = client_id,
             .last_keepalive_ms = 0,
             .publications = .{},
@@ -156,7 +159,7 @@ pub const Aeron = struct {
 
     // LESSON(what-is-zig): doWork is the client's polling loop. It drains all pending messages from the driver's broadcast buffer: RESPONSE_ON_PUBLICATION_READY (allocates ExclusivePublication with log buffer), RESPONSE_ON_SUBSCRIPTION_READY (allocates Subscription), RESPONSE_ON_IMAGE_READY (adds Image to subscription for a new publisher session). Call this in your application's main loop to discover new publications and subscriptions. See docs/tutorial/00-orientation/02-what-is-zig.md
     pub fn doWork(self: *Aeron) i32 {
-        _ = self.sendKeepaliveIfDue();
+        const keepalive_work = self.sendKeepaliveIfDue();
         var work: i32 = 0;
         while (self.to_clients_broadcast_receiver.receiveNext()) {
             const msg_type_id = self.to_clients_broadcast_receiver.typeId();
@@ -247,7 +250,10 @@ pub const Aeron = struct {
                 work += 1;
             }
         }
-        return work;
+
+        const total_work = work + keepalive_work;
+        self.idle_strategy.idle(total_work);
+        return total_work;
     }
 
     pub fn getPublication(self: *Aeron, registration_id: i64) ?*ExclusivePublication {
@@ -382,10 +388,11 @@ test "Aeron addSubscription encodes upstream SubscriptionMessageFlyweight layout
         .to_clients_broadcast_receiver = undefined,
         .counters_map = undefined,
         .client_id = 7,
-        .last_keepalive_ms = 0,
+        .last_keepalive_ms = std.time.milliTimestamp(),
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},
+        .idle_strategy = ipc.idle_strategy.IdleStrategy.initBusySpin(),
         .embedded_driver = null,
     };
     defer aeron.publications.deinit(allocator);
@@ -432,10 +439,11 @@ test "Aeron addPublication encodes upstream PublicationMessageFlyweight layout" 
         .to_clients_broadcast_receiver = undefined,
         .counters_map = undefined,
         .client_id = 9,
-        .last_keepalive_ms = 0,
+        .last_keepalive_ms = std.time.milliTimestamp(),
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},
+        .idle_strategy = ipc.idle_strategy.IdleStrategy.initBusySpin(),
         .embedded_driver = null,
     };
     defer aeron.publications.deinit(allocator);
@@ -512,10 +520,11 @@ test "Aeron doWork parses full publication-ready payload and maps log buffer" {
         .to_clients_broadcast_receiver = ipc.broadcast.BroadcastReceiver.wrap(bcast.full_buffer),
         .counters_map = counters_map,
         .client_id = 12,
-        .last_keepalive_ms = 0,
+        .last_keepalive_ms = std.time.milliTimestamp(),
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},
+        .idle_strategy = ipc.idle_strategy.IdleStrategy.initBusySpin(),
         .embedded_driver = null,
     };
     defer {
@@ -555,6 +564,7 @@ test "Aeron sendKeepaliveIfDue writes client keepalive command" {
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},
+        .idle_strategy = ipc.idle_strategy.IdleStrategy.initBusySpin(),
         .embedded_driver = null,
     };
     defer aeron.publications.deinit(allocator);
@@ -598,10 +608,11 @@ test "Aeron removePublication encodes upstream RemoveMessageFlyweight layout" {
         .to_clients_broadcast_receiver = undefined,
         .counters_map = undefined,
         .client_id = 11,
-        .last_keepalive_ms = 0,
+        .last_keepalive_ms = std.time.milliTimestamp(),
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},
+        .idle_strategy = ipc.idle_strategy.IdleStrategy.initBusySpin(),
         .embedded_driver = null,
     };
     defer aeron.publications.deinit(allocator);
@@ -644,10 +655,11 @@ test "Aeron removeSubscription encodes upstream RemoveMessageFlyweight layout" {
         .to_clients_broadcast_receiver = undefined,
         .counters_map = undefined,
         .client_id = 13,
-        .last_keepalive_ms = 0,
+        .last_keepalive_ms = std.time.milliTimestamp(),
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},
+        .idle_strategy = ipc.idle_strategy.IdleStrategy.initBusySpin(),
         .embedded_driver = null,
     };
     defer aeron.publications.deinit(allocator);

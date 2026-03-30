@@ -10,6 +10,7 @@ pub const receiver = @import("receiver.zig");
 const ring_buffer = @import("../ipc/ring_buffer.zig");
 const broadcast = @import("../ipc/broadcast.zig");
 const counters = @import("../ipc/counters.zig");
+const idle_strategy = @import("../ipc/idle_strategy.zig");
 const loss_report_mod = @import("../loss_report.zig");
 const event_log_mod = @import("../event_log.zig");
 
@@ -19,6 +20,7 @@ pub const Receiver = receiver.Receiver;
 const ManyToOneRingBuffer = ring_buffer.ManyToOneRingBuffer;
 const BroadcastTransmitter = broadcast.BroadcastTransmitter;
 const CountersMap = counters.CountersMap;
+const IdleStrategy = idle_strategy.IdleStrategy;
 
 // LESSON(media-driver): MediaDriverContext holds all tunable driver parameters (buffer sizes, timeouts, MTU, port). Callers pass this struct to create/init; Zig's partial-field initialisation makes overriding a single setting clean: .{ .mtu_length = 8192 }. See docs/tutorial/03-driver/04-media-driver.md
 pub const MediaDriverContext = struct {
@@ -27,8 +29,12 @@ pub const MediaDriverContext = struct {
     ipc_term_buffer_length: i32 = 64 * 1024,
     mtu_length: i32 = 1408,
     client_liveness_timeout_ns: i64 = 5_000_000_000,
+    image_liveness_timeout_ns: i64 = 5_000_000_000,
     publication_connection_timeout_ns: i64 = 5_000_000_000,
     listen_port: u16 = 0, // 0 = ephemeral, non-zero = bind to specific port
+    conductor_idle_strategy: ?IdleStrategy = null,
+    sender_idle_strategy: ?IdleStrategy = null,
+    receiver_idle_strategy: ?IdleStrategy = null,
 };
 
 pub const MediaDriver = struct {
@@ -37,6 +43,9 @@ pub const MediaDriver = struct {
     conductor_agent: DriverConductor,
     sender_agent: Sender,
     receiver_agent: Receiver,
+    conductor_idle_strategy: IdleStrategy,
+    sender_idle_strategy: IdleStrategy,
+    receiver_idle_strategy: IdleStrategy,
     running: std.atomic.Value(bool),
     conductor_thread: ?std.Thread = null,
     sender_thread: ?std.Thread = null,
@@ -120,6 +129,9 @@ pub const MediaDriver = struct {
 
         self.allocator = allocator;
         self.ctx = ctx_;
+        self.conductor_idle_strategy = ctx_.conductor_idle_strategy orelse IdleStrategy.initDefaultBackoff();
+        self.sender_idle_strategy = ctx_.sender_idle_strategy orelse IdleStrategy.initDefaultBackoff();
+        self.receiver_idle_strategy = ctx_.receiver_idle_strategy orelse IdleStrategy.initDefaultBackoff();
         self.running = std.atomic.Value(bool).init(false);
         self.conductor_thread = null;
         self.sender_thread = null;
@@ -178,6 +190,9 @@ pub const MediaDriver = struct {
             &self.recv_endpoint,
             bound,
             ctx_.aeron_dir,
+            ctx_.client_liveness_timeout_ns,
+            ctx_.image_liveness_timeout_ns,
+            ctx_.publication_connection_timeout_ns,
         );
         errdefer self.conductor_agent.deinit();
 
@@ -224,6 +239,9 @@ pub const MediaDriver = struct {
             .conductor_agent = undefined,
             .sender_agent = undefined,
             .receiver_agent = undefined,
+            .conductor_idle_strategy = IdleStrategy.initBusySpin(),
+            .sender_idle_strategy = IdleStrategy.initBusySpin(),
+            .receiver_idle_strategy = IdleStrategy.initBusySpin(),
             .running = std.atomic.Value(bool).init(false),
             .ring_buffer_buf = ring_buffer_buf,
             .counters_meta_buf = counters_meta_buf,
@@ -283,6 +301,7 @@ pub const MediaDriver = struct {
         if (self.cnc) |*c| {
             c.setDriverHeartbeat(std.time.milliTimestamp());
         }
+        self.conductor_idle_strategy.idle(work_count);
         return work_count;
     }
 
@@ -337,10 +356,11 @@ pub const MediaDriver = struct {
 // Thread function for conductor agent
 fn conductorThreadFunc(md: *MediaDriver) void {
     while (md.running.load(.acquire)) {
-        _ = md.conductor_agent.doWork();
+        const work_count = md.conductor_agent.doWork();
         if (md.cnc) |*c| {
             c.setDriverHeartbeat(std.time.milliTimestamp());
         }
+        md.conductor_idle_strategy.idle(work_count);
     }
 }
 
@@ -348,14 +368,16 @@ fn conductorThreadFunc(md: *MediaDriver) void {
 fn senderThreadFunc(md: *MediaDriver) void {
     while (md.running.load(.acquire)) {
         md.sender_agent.setCurrentTimeMs(std.time.milliTimestamp());
-        _ = md.sender_agent.doWork();
+        const work_count = md.sender_agent.doWork();
+        md.sender_idle_strategy.idle(work_count);
     }
 }
 
 // Thread function for receiver agent
 fn receiverThreadFunc(md: *MediaDriver) void {
     while (md.running.load(.acquire)) {
-        _ = md.receiver_agent.doWork();
+        const work_count = md.receiver_agent.doWork();
+        md.receiver_idle_strategy.idle(work_count);
     }
 }
 

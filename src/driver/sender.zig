@@ -8,6 +8,7 @@ const counters = @import("../ipc/counters.zig");
 const protocol = @import("../protocol/frame.zig");
 const endpoint = @import("../transport/endpoint.zig");
 const event_log_mod = @import("../event_log.zig");
+const flow_control = @import("flow_control.zig");
 const INVALID_SOCKET: std.posix.socket_t = std.math.maxInt(std.posix.socket_t);
 
 pub const RetransmitRequest = struct {
@@ -31,6 +32,8 @@ pub const NetworkPublication = struct {
     mtu: i32,
     last_setup_time_ms: i64,
     last_heartbeat_time_ms: i64,
+    last_activity_ns: i64,
+    flow_control_strategy: flow_control.FlowControl,
 };
 
 pub const Sender = struct {
@@ -103,7 +106,17 @@ pub const Sender = struct {
 
         // Get current positions from counters
         const sender_pos = self.counters_map.get(publication.sender_position.counter_id);
-        const pub_limit = self.counters_map.get(publication.publisher_limit.counter_id);
+        const current_limit = self.counters_map.get(publication.publisher_limit.counter_id);
+
+        // Update limit via flow control onIdle
+        const pub_limit = publication.flow_control_strategy.onIdle(
+            self.current_time_ms * std.time.ns_per_ms,
+            current_limit,
+            sender_pos,
+        );
+        if (pub_limit != current_limit) {
+            self.counters_map.set(publication.publisher_limit.counter_id, pub_limit);
+        }
 
         if (sender_pos >= pub_limit) {
             // Send heartbeat when idle (no data to send)
@@ -387,10 +400,18 @@ pub const Sender = struct {
         // publisher-limit counter that both the driver and client publication observe. See docs/tutorial/03-driver/01-sender.md
         for (self.publications.items) |publication| {
             if (publication.session_id == session_id and publication.stream_id == stream_id) {
-                const receiver_position = @as(i64, consumption_term_id - publication.initial_term_id) * publication.log_buffer.term_length +
-                    consumption_term_offset;
-                const new_limit = receiver_position + receiver_window;
+                const new_limit = publication.flow_control_strategy.onStatusMessage(
+                    session_id,
+                    stream_id,
+                    consumption_term_id,
+                    consumption_term_offset,
+                    receiver_window,
+                    publication.initial_term_id,
+                    publication.log_buffer.term_length,
+                    self.current_time_ms * std.time.ns_per_ms,
+                );
                 self.counters_map.set(publication.publisher_limit.counter_id, new_limit);
+                publication.last_activity_ns = self.current_time_ms * std.time.ns_per_ms;
                 var meta = publication.log_buffer.metaData();
                 meta.setIsConnected(true);
                 meta.setActiveTransportCount(1);
@@ -448,6 +469,8 @@ test "Sender: onAddPublication adds to list" {
         .mtu = 1408,
         .last_setup_time_ms = 0,
         .last_heartbeat_time_ms = 0,
+        .last_activity_ns = 0,
+        .flow_control_strategy = flow_control.FlowControl{ .unicast = .{} },
     };
 
     try sender.onAddPublication(&publication);
@@ -482,6 +505,8 @@ test "Sender: onRemovePublication removes from list" {
         .mtu = 1408,
         .last_setup_time_ms = 0,
         .last_heartbeat_time_ms = 0,
+        .last_activity_ns = 0,
+        .flow_control_strategy = flow_control.FlowControl{ .unicast = .{} },
     };
 
     var publication2 = NetworkPublication{
@@ -496,6 +521,8 @@ test "Sender: onRemovePublication removes from list" {
         .mtu = 1408,
         .last_setup_time_ms = 0,
         .last_heartbeat_time_ms = 0,
+        .last_activity_ns = 0,
+        .flow_control_strategy = flow_control.FlowControl{ .unicast = .{} },
     };
 
     try sender.onAddPublication(&publication1);
@@ -645,6 +672,8 @@ test "Sender: STATUS updates publisher limit" {
         .mtu = 1408,
         .last_setup_time_ms = 0,
         .last_heartbeat_time_ms = 0,
+        .last_activity_ns = 0,
+        .flow_control_strategy = flow_control.FlowControl{ .unicast = .{} },
     };
     try sender.onAddPublication(&publication);
 
@@ -718,6 +747,8 @@ test "Sender: heartbeat sent when publication idle" {
         .mtu = 1408,
         .last_setup_time_ms = 0,
         .last_heartbeat_time_ms = 0,
+        .last_activity_ns = 0,
+        .flow_control_strategy = flow_control.FlowControl{ .unicast = .{} },
     };
     try sender.onAddPublication(&publication);
 
