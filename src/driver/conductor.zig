@@ -42,6 +42,7 @@ pub const RESPONSE_ON_IMAGE_CLOSE: i32 = 0x0F05;
 pub const RESPONSE_ON_SUBSCRIPTION_READY: i32 = 0x0F07;
 pub const RESPONSE_ON_COUNTER_READY: i32 = 0x0F08;
 pub const RESPONSE_ON_OPERATION_SUCCESS: i32 = 0x0F04;
+pub const RESPONSE_ON_EXCLUSIVE_PUBLICATION_READY: i32 = 0x0F06;
 
 const CORRELATED_COMMAND_LENGTH: usize = 16;
 const PUBLICATION_COMMAND_STREAM_ID_OFFSET: usize = CORRELATED_COMMAND_LENGTH;
@@ -466,6 +467,10 @@ pub const DriverConductor = struct {
     }
 
     pub fn handleAddPublication(self: *DriverConductor, data: []const u8) void {
+        self.handleAddPublicationWithType(data, RESPONSE_ON_PUBLICATION_READY, false);
+    }
+
+    fn handleAddPublicationWithType(self: *DriverConductor, data: []const u8, response_type: i32, is_exclusive: bool) void {
         // LESSON(conductor): Publication lifecycle—allocate session ID, create log buffer + counters, register with Sender. See docs/tutorial/03-driver/03-conductor.md
         if (data.len < PUBLICATION_COMMAND_CHANNEL_OFFSET) return;
 
@@ -480,23 +485,27 @@ pub const DriverConductor = struct {
 
         const channel_data = data[PUBLICATION_COMMAND_CHANNEL_OFFSET .. PUBLICATION_COMMAND_CHANNEL_OFFSET + @as(usize, @intCast(channel_len))];
 
-        // Check if publication already exists for this channel+stream_id
-        for (self.publications.items) |*pub_entry| {
-            if (pub_entry.stream_id == stream_id and std.mem.eql(u8, pub_entry.channel, channel_data)) {
-                // Duplicate add: increment ref_count and send ON_PUBLICATION_READY with existing entry details
-                pub_entry.ref_count += 1;
-                if (pub_entry.network_pub) |np| {
-                    self.sendPublicationReady(
-                        correlation_id,
-                        pub_entry.registration_id,
-                        pub_entry.session_id,
-                        pub_entry.stream_id,
-                        np.publisher_limit.counter_id,
-                        pub_entry.channel_status_indicator_counter_id,
-                        pub_entry.log_file_name,
-                    );
+        // Exclusive publications are never merged — each gets its own resources.
+        // Only concurrent publications share an existing entry for the same channel+stream.
+        if (!is_exclusive) {
+            for (self.publications.items) |*pub_entry| {
+                if (pub_entry.stream_id == stream_id and std.mem.eql(u8, pub_entry.channel, channel_data)) {
+                    // Duplicate add: increment ref_count and send ON_PUBLICATION_READY with existing entry details
+                    pub_entry.ref_count += 1;
+                    if (pub_entry.network_pub) |np| {
+                        self.sendPublicationReady(
+                            response_type,
+                            correlation_id,
+                            pub_entry.registration_id,
+                            pub_entry.session_id,
+                            pub_entry.stream_id,
+                            np.publisher_limit.counter_id,
+                            pub_entry.channel_status_indicator_counter_id,
+                            pub_entry.log_file_name,
+                        );
+                    }
+                    return;
                 }
-                return;
             }
         }
 
@@ -658,6 +667,7 @@ pub const DriverConductor = struct {
         };
 
         self.sendPublicationReady(
+            response_type,
             correlation_id,
             correlation_id,
             session_id,
@@ -669,11 +679,10 @@ pub const DriverConductor = struct {
     }
 
     pub fn handleAddExclusivePublication(self: *DriverConductor, data: []const u8) void {
-        // Exclusive publications use the same command layout as regular publications.
-        // The difference is they are never merged with existing publications for the
-        // same channel+stream. Since we don't implement publication merging yet,
-        // the behavior is identical.
-        self.handleAddPublication(data);
+        // Exclusive publications never merge with existing publications for the same
+        // channel+stream. They get their own response code so the Java client constructs
+        // an ExclusivePublication instead of a ConcurrentPublication.
+        self.handleAddPublicationWithType(data, RESPONSE_ON_EXCLUSIVE_PUBLICATION_READY, true);
     }
 
     pub fn handleRemovePublication(self: *DriverConductor, data: []const u8) void {
@@ -903,6 +912,7 @@ pub const DriverConductor = struct {
 
     fn sendPublicationReady(
         self: *DriverConductor,
+        response_type: i32,
         correlation_id: i64,
         registration_id: i64,
         session_id: i32,
@@ -924,7 +934,7 @@ pub const DriverConductor = struct {
         std.mem.writeInt(i32, payload[28..32], channel_status_indicator_id, .little);
         std.mem.writeInt(i32, payload[32..36], @as(i32, @intCast(log_file_name.len)), .little);
         @memcpy(payload[36..], log_file_name);
-        self.broadcaster.transmit(RESPONSE_ON_PUBLICATION_READY, payload) catch return;
+        self.broadcaster.transmit(response_type, payload) catch return;
     }
 
     fn sendSubscriptionReady(self: *DriverConductor, correlation_id: i64, channel_status_indicator_id: i32) void {

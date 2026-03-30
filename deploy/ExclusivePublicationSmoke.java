@@ -75,52 +75,19 @@ public final class ExclusivePublicationSmoke
                             "Expected " + MESSAGE_COUNT + " messages, got " + state.receivedCount);
                     }
 
-                    // Now attempt to add a second exclusive publication on the same channel/stream
-                    // This should fail or remain NOT_CONNECTED because the first publication
-                    // holds exclusive access
+                    // A second exclusive publication on the same channel/stream is valid — each gets
+                    // its own independent session (Aeron exclusive = exclusive per session, not per stream).
+                    // Upstream: ExclusivePublicationTest#shouldPublishFromIndependentExclusivePublications
                     try (Publication publication2 = aeron.addExclusivePublication(CHANNEL, STREAM_ID))
                     {
-                        // Try to connect the second publication with timeout
-                        final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-                        boolean connected = false;
-                        while (System.nanoTime() < deadline)
-                        {
-                            if (publication2.isConnected())
-                            {
-                                connected = true;
-                                break;
-                            }
-                            sleepQuietly(10);
-                        }
+                        awaitConnected(publication2, "publication2");
 
-                        // If we got here and the second publication is connected, try to offer
-                        if (connected)
-                        {
-                            final String testPayload = "should-fail";
-                            final byte[] testData = testPayload.getBytes(StandardCharsets.US_ASCII);
-                            final UnsafeBuffer testBuffer = new UnsafeBuffer(testData);
+                        final String testPayload = "exclusive-msg-second";
+                        final byte[] testData = testPayload.getBytes(StandardCharsets.US_ASCII);
+                        final UnsafeBuffer testBuffer = new UnsafeBuffer(testData);
 
-                            try
-                            {
-                                final long position = publication2.offer(testBuffer, 0, testData.length);
-                                if (position > 0)
-                                {
-                                    // Second publication successfully offered data - exclusive semantics violated
-                                    System.out.println("FAIL: Second exclusive publication should not be able to publish");
-                                    System.exit(1);
-                                }
-                            }
-                            catch (final Exception ex)
-                            {
-                                // Expected: second publication cannot offer due to exclusive lock
-                                System.out.println("Second publication offer failed as expected: " + ex.getMessage());
-                            }
-                        }
-                        else
-                        {
-                            // Expected: second publication remains NOT_CONNECTED due to exclusive access
-                            System.out.println("Second publication remained NOT_CONNECTED as expected");
-                        }
+                        awaitOffer(publication2, testBuffer, testData.length, "publication2");
+                        System.out.println("Second exclusive publication sent independently as expected");
                     }
 
                     // Signal successful completion
