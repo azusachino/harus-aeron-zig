@@ -101,26 +101,37 @@ pub const ManyToOneRingBuffer = struct {
             }
         }
 
-        var record_index = @as(usize, @intCast(tail)) % self.capacity;
-
-        // Check if record would wrap around buffer end
-        if (record_index + aligned_length > self.capacity) {
-            // Insert padding record — Agrona layout: length@0, type@4
-            const padding_length = @as(i32, @intCast(self.capacity - record_index));
-            const padding_addr = self.buffer.ptr + record_index;
-            const pad_len_ptr: *i32 = @ptrCast(@alignCast(padding_addr));
-            pad_len_ptr.* = padding_length; // length at offset 0
-            const pad_type_ptr: *i32 = @ptrCast(@alignCast(padding_addr + 4));
-            pad_type_ptr.* = PADDING_MSG_TYPE_ID; // type at offset 4
-
-            tail += padding_length;
-            record_index = 0;
-        }
-
+        // CAS loop: compute padding before attempting CAS
         // LESSON(ring-buffer): CAS loop retries on contention until one writer claims the tail range. No spinlock. See docs/tutorial/01-foundations/02-ring-buffer.md
         // LESSON(ring-buffer): Only the tail cursor is claimed atomically; data copy happens after, so writers don't block each other. See docs/tutorial/01-foundations/02-ring-buffer.md
-        while (!self.casTail(tail, tail + @as(i64, @intCast(aligned_length)))) {
+        var record_index = @as(usize, @intCast(tail)) % self.capacity;
+        var padding: usize = 0;
+
+        // Compute padding if record would wrap
+        if (record_index + aligned_length > self.capacity) {
+            padding = self.capacity - record_index;
+        }
+
+        // CAS to claim tail + aligned_length + padding atomically
+        const total_claim = @as(i64, @intCast(aligned_length + padding));
+        while (!self.casTail(tail, tail + total_claim)) {
+            // CAS failed; reload tail and recompute record_index and padding
             tail = self.loadTail();
+            record_index = @as(usize, @intCast(tail)) % self.capacity;
+            padding = 0;
+            if (record_index + aligned_length > self.capacity) {
+                padding = self.capacity - record_index;
+            }
+        }
+
+        // AFTER CAS succeeds: write padding record if needed
+        if (padding > 0) {
+            const padding_addr = self.buffer.ptr + record_index;
+            const pad_len_ptr: *i32 = @ptrCast(@alignCast(padding_addr));
+            pad_len_ptr.* = @as(i32, @intCast(padding)); // length at offset 0
+            const pad_type_ptr: *i32 = @ptrCast(@alignCast(padding_addr + 4));
+            pad_type_ptr.* = PADDING_MSG_TYPE_ID; // type at offset 4
+            record_index = 0; // actual record goes at buffer start
         }
 
         // Write header — Agrona layout: length@0 (negative sentinel), type@4

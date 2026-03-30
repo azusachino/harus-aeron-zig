@@ -739,7 +739,11 @@ pub const DriverConductor = struct {
                     // Notify clients that the image has closed
                     self.sendImageClose(image.session_id, image.stream_id, registration_id);
                     self.receiver.mutex.lock();
+                    // Free image counters to prevent leaks
+                    self.counters_map.free(image.receiver_hwm.counter_id);
+                    self.counters_map.free(image.subscriber_position.counter_id);
                     // Free the image resources; log_buffer was allocated by conductor on SETUP
+                    image.deinit();
                     image.log_buffer.deinit();
                     self.allocator.destroy(image.log_buffer);
                     self.allocator.destroy(image);
@@ -806,7 +810,7 @@ pub const DriverConductor = struct {
         const counter_id = std.mem.readInt(i32, data[8..12], .little);
 
         self.counters_map.free(counter_id);
-        _ = correlation_id;
+        self.sendOperationSuccess(correlation_id);
     }
 
     pub fn handleTerminateDriver(self: *DriverConductor) void {
@@ -849,25 +853,16 @@ pub const DriverConductor = struct {
     }
 
     fn sendError(self: *DriverConductor, correlation_id: i64, error_code: i32, msg: []const u8) void {
-        // Allocate buffer for response: correlation_id (8) + error_code (4) + msg_len (4) + message
-        var buf: [16]u8 = undefined;
+        const total_len = 16 + msg.len;
+        const buf = self.allocator.alloc(u8, total_len) catch return;
+        defer self.allocator.free(buf);
         std.mem.writeInt(i64, buf[0..8], correlation_id, .little);
         std.mem.writeInt(i32, buf[8..12], error_code, .little);
         std.mem.writeInt(i32, buf[12..16], @as(i32, @intCast(msg.len)), .little);
-
-        // Transmit header
-        self.broadcaster.transmit(RESPONSE_ON_ERROR, buf[0..16]) catch return;
-
-        // If there's a message, we need to transmit it separately
-        // For now, just transmit empty message if msg is too long
         if (msg.len > 0) {
-            // Create another transmission with just the message data
-            // This is simplified; a real impl might batch this differently
-            const msg_buf = self.allocator.alloc(u8, msg.len) catch return;
-            defer self.allocator.free(msg_buf);
-            @memcpy(msg_buf, msg);
-            // Note: this transmits as separate record; real impl would include in response
+            @memcpy(buf[16..], msg);
         }
+        self.broadcaster.transmit(RESPONSE_ON_ERROR, buf) catch return;
     }
 
     fn sendCounterReady(self: *DriverConductor, correlation_id: i64, counter_id: i32) void {

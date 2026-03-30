@@ -38,11 +38,18 @@ pub const ExclusivePublication = struct {
         mtu: i32,
         log_buffer: *logbuffer.LogBuffer,
     ) ExclusivePublication {
-        const meta = log_buffer.metaData();
+        var meta = log_buffer.metaData();
         const active_term_count = meta.activeTermCount();
         const partition = metadata.activePartitionIndex(active_term_count);
         const term_buffer = log_buffer.termBuffer(partition);
         const term_id = initial_term_id + active_term_count;
+
+        // Get pointer to raw_tail slot in metadata for this partition
+        const raw_tail_offset = metadata.TERM_TAIL_COUNTERS_OFFSET + (partition * @sizeOf(i64));
+        const raw_tail_ptr: *i64 = @ptrCast(@alignCast(&meta.buffer[raw_tail_offset]));
+
+        // Initialize metadata with the starting term_id (offset starts at 0)
+        meta.setRawTailVolatile(partition, term_appender.TermAppender.packTail(term_id, 0));
 
         return .{
             .session_id = session_id,
@@ -56,7 +63,7 @@ pub const ExclusivePublication = struct {
             .publisher_limit_counter_id = counters.NULL_COUNTER_ID,
             .is_closed = false,
             .owns_log_buffer = false,
-            .appender = term_appender.TermAppender.init(term_buffer, term_id),
+            .appender = term_appender.TermAppender.init(term_buffer, raw_tail_ptr),
         };
     }
 
@@ -167,8 +174,8 @@ test "ExclusivePublication offer writes to log buffer" {
     // Verify data in log buffer
     const term0 = log_buf.termBuffer(0);
     const frame_length = std.mem.readInt(i32, term0[0..4], .little);
-    const expected_aligned_len = std.mem.alignForward(i32, @as(i32, @intCast(frame.DataHeader.LENGTH + test_payload.len)), frame.FRAME_ALIGNMENT);
-    try std.testing.expectEqual(expected_aligned_len, frame_length);
+    const expected_unaligned_len = @as(i32, @intCast(frame.DataHeader.LENGTH + test_payload.len));
+    try std.testing.expectEqual(expected_unaligned_len, frame_length);
     try std.testing.expectEqualSlices(u8, test_payload, term0[frame.DataHeader.LENGTH .. frame.DataHeader.LENGTH + test_payload.len]);
 }
 
