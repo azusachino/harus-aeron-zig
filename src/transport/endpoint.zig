@@ -24,6 +24,21 @@ const IPV6_JOIN_GROUP: u32 = switch (builtin.os.tag) {
     .linux => 20,
     else => 20,
 };
+const IP_MULTICAST_TTL: u32 = switch (builtin.os.tag) {
+    .macos, .ios, .watchos, .tvos => 10,
+    .linux => 33,
+    else => 10,
+};
+const IP_MULTICAST_IF: u32 = switch (builtin.os.tag) {
+    .macos, .ios, .watchos, .tvos => 9,
+    .linux => 32,
+    else => 9,
+};
+const IPV6_MULTICAST_HOPS: u32 = switch (builtin.os.tag) {
+    .macos, .ios, .watchos, .tvos => 10,
+    .linux => 20,
+    else => 10,
+};
 
 // LESSON(udp-transport): SOCK_NONBLOCK avoids a separate fcntl() call. On Linux this is
 // an atomic socket + nonblock setup. On macOS it still requires FIONBIO — Zig's std.posix
@@ -40,8 +55,35 @@ pub const SendChannelEndpoint = struct {
         );
         errdefer std.posix.close(sock);
 
+        // Apply socket buffer options if specified
+        if (channel.so_sndbuf) |sndbuf| {
+            const val: i32 = @intCast(sndbuf);
+            try std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, &std.mem.toBytes(val));
+        }
+
+        // Apply multicast TTL if specified and destination is multicast
+        if (channel.ttl) |ttl_val| {
+            if (channel.is_multicast) {
+                if (family == std.posix.AF.INET) {
+                    const ttl_i32: i32 = @intCast(ttl_val);
+                    try std.posix.setsockopt(sock, std.posix.IPPROTO.IP, IP_MULTICAST_TTL, &std.mem.toBytes(ttl_i32));
+                } else if (family == std.posix.AF.INET6) {
+                    const ttl_i32: i32 = @intCast(ttl_val);
+                    try std.posix.setsockopt(sock, std.posix.IPPROTO.IPV6, IPV6_MULTICAST_HOPS, &std.mem.toBytes(ttl_i32));
+                }
+            }
+        }
+
+        // Apply multicast interface if specified and destination is multicast
         if (channel.local_address) |addr| {
-            try std.posix.bind(sock, &addr.any, addr.getOsSockLen());
+            if (channel.is_multicast) {
+                if (family == std.posix.AF.INET) {
+                    try std.posix.setsockopt(sock, std.posix.IPPROTO.IP, IP_MULTICAST_IF, &std.mem.toBytes(addr.in.sa.addr));
+                }
+            } else {
+                // Bind to interface for unicast
+                try std.posix.bind(sock, &addr.any, addr.getOsSockLen());
+            }
         }
 
         return SendChannelEndpoint{ .socket = sock };
@@ -76,6 +118,12 @@ pub const ReceiveChannelEndpoint = struct {
         if (channel.is_multicast) {
             // LESSON(udp-transport): SO_REUSEPORT allows multiple sockets to bind to the same mcast group; needed for multi-subscriber scenarios. See docs/tutorial/02-data-path/03-udp-transport.md
             try std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEPORT, &std.mem.toBytes(@as(i32, 1)));
+        }
+
+        // Apply socket buffer options if specified
+        if (channel.so_rcvbuf) |rcvbuf| {
+            const val: i32 = @intCast(rcvbuf);
+            try std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, &std.mem.toBytes(val));
         }
 
         var bound_address: std.net.Address = undefined;
@@ -151,4 +199,31 @@ test "Endpoint: open receive endpoint" {
     defer ep.close();
     try std.testing.expectEqual(@as(u16, 0), ep.bound_address.getPort());
     try std.testing.expectEqual(std.posix.AF.INET, ep.bound_address.any.family);
+}
+
+test "Endpoint: socket buffer options applied" {
+    const allocator = std.testing.allocator;
+    var channel = try UdpChannel.parse(allocator, "aeron:udp?endpoint=127.0.0.1:0|so-sndbuf=256k|so-rcvbuf=512k");
+    defer channel.deinit(allocator);
+
+    try std.testing.expectEqual(@as(?usize, 256 * 1024), channel.so_sndbuf);
+    try std.testing.expectEqual(@as(?usize, 512 * 1024), channel.so_rcvbuf);
+
+    var recv_ep = try ReceiveChannelEndpoint.open(&channel);
+    defer recv_ep.close();
+
+    var send_ep = try SendChannelEndpoint.open(&channel);
+    defer send_ep.close();
+}
+
+test "Endpoint: multicast TTL applied" {
+    const allocator = std.testing.allocator;
+    var channel = try UdpChannel.parse(allocator, "aeron:udp?endpoint=224.0.1.1:40456|interface=127.0.0.1|ttl=16");
+    defer channel.deinit(allocator);
+
+    try std.testing.expect(channel.is_multicast);
+    try std.testing.expectEqual(@as(?u8, 16), channel.ttl);
+
+    var ep = try SendChannelEndpoint.open(&channel);
+    defer ep.close();
 }

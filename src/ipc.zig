@@ -5,3 +5,4 @@
 pub const ring_buffer = @import("ipc/ring_buffer.zig");
 pub const broadcast = @import("ipc/broadcast.zig");
 pub const counters = @import("ipc/counters.zig");
+pub const idle_strategy = @import("ipc/idle_strategy.zig");

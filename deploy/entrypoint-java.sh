@@ -54,4 +54,46 @@ if [ "$CHECKER_EXIT" -ne 0 ]; then
     exit $CHECKER_EXIT
 fi
 
+# Run MultiStreamSmoke — validates multi-stream publish/subscribe.
+java $JAVA_OPTS \
+    -Daeron.dir="$AERON_DIR_PATH" \
+    -cp /aeron-all.jar:/interop \
+    MultiStreamSmoke
+MULTISTREAM_EXIT=$?
+
+if [ "$MULTISTREAM_EXIT" -ne 0 ]; then
+    echo "[CLIENT] MultiStreamSmoke FAILED (exit=$MULTISTREAM_EXIT)"
+    exit $MULTISTREAM_EXIT
+fi
+
+echo "[CLIENT] MultiStreamSmoke passed"
+
+# Run ExclusivePublicationSmoke — validates exclusive publication semantics.
+java $JAVA_OPTS \
+    -Daeron.dir="$AERON_DIR_PATH" \
+    -cp /aeron-all.jar:/interop \
+    ExclusivePublicationSmoke
+EXCLUSIVE_EXIT=$?
+
+if [ "$EXCLUSIVE_EXIT" -ne 0 ]; then
+    echo "[CLIENT] ExclusivePublicationSmoke FAILED (exit=$EXCLUSIVE_EXIT)"
+    exit $EXCLUSIVE_EXIT
+fi
+
+echo "[CLIENT] ExclusivePublicationSmoke passed"
+
+# Run ReconnectSmoke — validates client disconnect/reconnect while driver stays up.
+java $JAVA_OPTS \
+    -Daeron.dir="$AERON_DIR_PATH" \
+    -cp /aeron-all.jar:/interop \
+    ReconnectSmoke
+RECONNECT_EXIT=$?
+
+if [ "$RECONNECT_EXIT" -ne 0 ]; then
+    echo "[CLIENT] ReconnectSmoke FAILED (exit=$RECONNECT_EXIT)"
+    exit $RECONNECT_EXIT
+fi
+
+echo "[CLIENT] ReconnectSmoke passed"
+
 echo "[CLIENT] All checks passed"

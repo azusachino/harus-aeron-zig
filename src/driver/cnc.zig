@@ -71,6 +71,7 @@ pub const CncFile = struct {
 
         const ptr = try std.posix.mmap(null, total, std.posix.PROT.READ | std.posix.PROT.WRITE, .{ .TYPE = .SHARED }, file.handle, 0);
         const mapped = @as([*]align(std.heap.page_size_min) u8, @ptrCast(ptr))[0..total];
+        @memset(mapped, 0);
 
         // Write header fields
         std.mem.writeInt(i32, mapped[VERSION_OFFSET..][0..4], CNC_VERSION, .little);

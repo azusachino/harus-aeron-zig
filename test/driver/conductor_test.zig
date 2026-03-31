@@ -35,7 +35,7 @@ test "DriverConductor: handleAddPublication and handleRemovePublication" {
     var receiver = try aeron.driver.Receiver.init(allocator, &recv_ep, sender.send_endpoint, &cm, null);
     defer receiver.deinit();
 
-    var conductor = try aeron.driver.conductor.DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp");
+    var conductor = try aeron.driver.conductor.DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp", 5_000_000_000, 5_000_000_000, 5_000_000_000);
     defer conductor.deinit();
     conductor.recv_bound = true;
 
@@ -105,7 +105,7 @@ test "DriverConductor: handleAddSubscription and handleRemoveSubscription" {
     var receiver = try aeron.driver.Receiver.init(allocator, &recv_ep, sender.send_endpoint, &cm, null);
     defer receiver.deinit();
 
-    var conductor = try aeron.driver.conductor.DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp");
+    var conductor = try aeron.driver.conductor.DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp", 5_000_000_000, 5_000_000_000, 5_000_000_000);
     defer conductor.deinit();
 
     // 1. Add subscription

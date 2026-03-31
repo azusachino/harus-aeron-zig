@@ -21,7 +21,7 @@ endif
        fuzz bench stress \
        nix-image k8s-up k8s-down k8s-status k8s-logs colima-up colima-down \
        setup setup-interop setup-interop-base setup-upstream-aeron setup-upstream-zig \
-       interop interop-smoke interop-status interop-preflight test-protocol test-driver test-archive test-cluster test-scenarios status
+       interop interop-smoke interop-status interop-preflight test-protocol test-driver test-archive test-cluster test-scenarios examples status
 
 fmt:
 	$(NIX_RUN) zig fmt src/ build.zig
@@ -63,6 +63,9 @@ test-cluster:  ## Run cluster scenario tests
 
 test-scenarios: test-protocol test-driver test-archive test-cluster  ## Run all scenario tests
 
+examples:  ## Build all examples
+	$(NIX_RUN) zig build examples
+
 lint: fmt-check
 
 lesson-lint:  ## Verify all LESSON annotation slugs have a matching docs/tutorial/ chapter file
@@ -72,13 +75,13 @@ check: fmt-check build test test-scenarios lesson-lint  ## Full check: fmt + bui
 
 status:  ## Show parity and chapter status from JSONL sources
 	@echo "=== Parity Gaps ==="
-	@jq -r '"\(.layer): \(.completeness_pct)% — gaps: \(.gaps | join(", "))"' .agents/parity_status.jsonl
+	@jq -r '"\(.layer): \(.completeness_pct)% — gaps: \(.gaps | join(", "))"' .agents/registry/parity_status.jsonl
 	@echo ""
 	@echo "=== Upstream Map — pending ==="
 	@jq -r 'select(.status == "pending") | "\(.layer)/\(.upstream_class)"' test/upstream_map.jsonl
 	@echo ""
 	@echo "=== Chapter Status — incomplete ==="
-	@jq -r 'select(.status != "done") | "\(.id) \(.slug): \(.status)"' .agents/chapter_status.jsonl
+	@jq -r 'select(.status != "done") | "\(.id) \(.slug): \(.status)"' .agents/registry/chapter_status.jsonl
 
 run:
 	$(NIX_RUN) zig build run

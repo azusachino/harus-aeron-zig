@@ -3,11 +3,13 @@
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-driver/src/main/java/io/aeron/driver/DriverConductor.java
 
 const std = @import("std");
+const builtin = @import("builtin");
 const ring_buffer = @import("../ipc/ring_buffer.zig");
 const broadcast = @import("../ipc/broadcast.zig");
 const counters = @import("../ipc/counters.zig");
 const receiver_mod = @import("receiver.zig");
 const sender_mod = @import("sender.zig");
+const flow_control = @import("flow_control.zig");
 const logbuffer = @import("../logbuffer/log_buffer.zig");
 const frame = @import("../protocol/frame.zig");
 const transport_uri = @import("../transport/udp_channel.zig");
@@ -24,6 +26,7 @@ const Image = receiver_mod.Image;
 // Command type IDs — match io.aeron.command.ControlProtocolEvents.
 pub const CMD_ADD_PUBLICATION: i32 = 0x01;
 pub const CMD_REMOVE_PUBLICATION: i32 = 0x02;
+pub const CMD_ADD_EXCLUSIVE_PUBLICATION: i32 = 0x03;
 pub const CMD_ADD_SUBSCRIPTION: i32 = 0x04;
 pub const CMD_REMOVE_SUBSCRIPTION: i32 = 0x05;
 pub const CMD_CLIENT_KEEPALIVE: i32 = 0x06;
@@ -39,6 +42,7 @@ pub const RESPONSE_ON_IMAGE_CLOSE: i32 = 0x0F05;
 pub const RESPONSE_ON_SUBSCRIPTION_READY: i32 = 0x0F07;
 pub const RESPONSE_ON_COUNTER_READY: i32 = 0x0F08;
 pub const RESPONSE_ON_OPERATION_SUCCESS: i32 = 0x0F04;
+pub const RESPONSE_ON_EXCLUSIVE_PUBLICATION_READY: i32 = 0x0F06;
 
 const CORRELATED_COMMAND_LENGTH: usize = 16;
 const PUBLICATION_COMMAND_STREAM_ID_OFFSET: usize = CORRELATED_COMMAND_LENGTH;
@@ -102,6 +106,9 @@ pub const DriverConductor = struct {
     recv_bound: bool,
     current_time_ms: i64,
     aeron_dir: []const u8,
+    client_liveness_timeout_ns: i64,
+    image_liveness_timeout_ns: i64,
+    publication_connection_timeout_ns: i64,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -113,6 +120,9 @@ pub const DriverConductor = struct {
         recv_ep: *endpoint_mod.ReceiveChannelEndpoint,
         recv_bound: bool,
         aeron_dir: []const u8,
+        client_liveness_timeout_ns: i64,
+        image_liveness_timeout_ns: i64,
+        publication_connection_timeout_ns: i64,
     ) !DriverConductor {
         return DriverConductor{
             .ring_buffer = ring_buffer_ptr,
@@ -129,6 +139,9 @@ pub const DriverConductor = struct {
             .next_session_id = 1,
             .current_time_ms = 0,
             .aeron_dir = aeron_dir,
+            .client_liveness_timeout_ns = client_liveness_timeout_ns,
+            .image_liveness_timeout_ns = image_liveness_timeout_ns,
+            .publication_connection_timeout_ns = publication_connection_timeout_ns,
         };
     }
 
@@ -170,14 +183,60 @@ pub const DriverConductor = struct {
     /// In upstream Aeron this triggers publication/subscription cleanup for the dead client.
     /// Here we remove the client entry; full resource teardown is left to explicit REMOVE commands.
     pub fn checkClientLiveness(self: *DriverConductor) void {
-        const deadline = self.current_time_ms - CLIENT_LIVENESS_TIMEOUT_MS;
+        const deadline = self.current_time_ms - @divTrunc(self.client_liveness_timeout_ns, std.time.ns_per_ms);
         var i: usize = 0;
         while (i < self.clients.items.len) {
             if (self.clients.items[i].last_keepalive_ms < deadline) {
-                std.debug.print("[CONDUCTOR] Evicting timed-out client_id={d}\n", .{self.clients.items[i].client_id});
+                if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] Evicting timed-out client_id={d}\n", .{self.clients.items[i].client_id});
                 _ = self.clients.swapRemove(i);
             } else {
                 i += 1;
+            }
+        }
+    }
+
+    pub fn checkImageLiveness(self: *DriverConductor) void {
+        const now_ns = self.current_time_ms * std.time.ns_per_ms;
+        const deadline_ns = now_ns - self.image_liveness_timeout_ns;
+
+        self.receiver.mutex.lock();
+        var i: usize = 0;
+        while (i < self.receiver.images.items.len) {
+            const image = self.receiver.images.items[i];
+            if (image.last_activity_ns < deadline_ns) {
+                if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] Image timeout: session={d} stream={d}\n", .{ image.session_id, image.stream_id });
+                // Remove image from receiver
+                _ = self.receiver.images.swapRemove(i);
+                self.receiver.mutex.unlock();
+
+                // Notify clients via ON_UNAVAILABLE_IMAGE
+                const registration_id = self.counters_map.getCounterRegistrationId(image.subscriber_position.counter_id);
+                self.sendImageClose(image.session_id, image.stream_id, registration_id);
+
+                // Cleanup image resources
+                var mutable_image = image;
+                mutable_image.deinit();
+                self.allocator.destroy(image);
+
+                self.receiver.mutex.lock();
+            } else {
+                i += 1;
+            }
+        }
+        self.receiver.mutex.unlock();
+    }
+
+    pub fn checkPublicationLiveness(self: *DriverConductor) void {
+        const now_ns = self.current_time_ms * std.time.ns_per_ms;
+        const deadline_ns = now_ns - self.publication_connection_timeout_ns;
+
+        for (self.publications.items) |pub_entry| {
+            if (pub_entry.network_pub) |np| {
+                if (np.last_activity_ns < deadline_ns) {
+                    if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] Publication timeout: session={d} stream={d}\n", .{ pub_entry.session_id, pub_entry.stream_id });
+                    var meta = pub_entry.log_buffer.?.metaData();
+                    meta.setIsConnected(false);
+                }
             }
         }
     }
@@ -187,7 +246,9 @@ pub const DriverConductor = struct {
         var work: i32 = 0;
         work += self.ring_buffer.read(handleMessage, @ptrCast(self), 10);
 
-        // Check client liveness and evict timed-out clients
+        // Check liveness and evict timed-out resources
+        self.checkImageLiveness();
+        self.checkPublicationLiveness();
         self.checkClientLiveness();
 
         // Drain receiver SETUP signals
@@ -195,7 +256,7 @@ pub const DriverConductor = struct {
         defer self.allocator.free(setups);
 
         if (setups.len > 0) {
-            std.debug.print("[CONDUCTOR] Processing {d} setups\n", .{setups.len});
+            if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] Processing {d} setups\n", .{setups.len});
         }
 
         for (setups) |sig| {
@@ -205,11 +266,11 @@ pub const DriverConductor = struct {
             for (self.subscriptions.items) |sub| {
                 if (sub.stream_id == sig.stream_id) {
                     if (self.receiver.hasImage(sig.session_id, sig.stream_id)) {
-                        std.debug.print("[CONDUCTOR] Image already exists for session {d} stream {d}, skipping duplicate SETUP\n", .{ sig.session_id, sig.stream_id });
+                        if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] Image already exists for session {d} stream {d}, skipping duplicate SETUP\n", .{ sig.session_id, sig.stream_id });
                         found = true;
                         break;
                     }
-                    std.debug.print("[CONDUCTOR] Found subscription for stream {d}, creating image...\n", .{sig.stream_id});
+                    if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] Found subscription for stream {d}, creating image...\n", .{sig.stream_id});
                     found = true;
                     const image_log_file_name = if (self.aeron_dir.len != 0)
                         std.fmt.allocPrint(
@@ -288,6 +349,7 @@ pub const DriverConductor = struct {
                         sig.initial_term_id,
                         0,
                         @as(i32, @divTrunc(sig.term_length, 4)),
+                        0, // receiver_id = 0 for initial internal status
                     );
                     self.receiver.sendStatus(image) catch {};
 
@@ -305,7 +367,7 @@ pub const DriverConductor = struct {
                 }
             }
             if (!found) {
-                std.debug.print("[CONDUCTOR] No subscription found for stream {d} (active subs: {d})\n", .{ sig.stream_id, self.subscriptions.items.len });
+                if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] No subscription found for stream {d} (active subs: {d})\n", .{ sig.stream_id, self.subscriptions.items.len });
             }
         }
 
@@ -318,6 +380,7 @@ pub const DriverConductor = struct {
                 status.consumption_term_id,
                 status.consumption_term_offset,
                 status.receiver_window,
+                status.receiver_id,
             );
             work += 1;
         }
@@ -407,6 +470,10 @@ pub const DriverConductor = struct {
     }
 
     pub fn handleAddPublication(self: *DriverConductor, data: []const u8) void {
+        self.handleAddPublicationWithType(data, RESPONSE_ON_PUBLICATION_READY, false);
+    }
+
+    fn handleAddPublicationWithType(self: *DriverConductor, data: []const u8, response_type: i32, is_exclusive: bool) void {
         // LESSON(conductor): Publication lifecycle—allocate session ID, create log buffer + counters, register with Sender. See docs/tutorial/03-driver/03-conductor.md
         if (data.len < PUBLICATION_COMMAND_CHANNEL_OFFSET) return;
 
@@ -420,6 +487,31 @@ pub const DriverConductor = struct {
         }
 
         const channel_data = data[PUBLICATION_COMMAND_CHANNEL_OFFSET .. PUBLICATION_COMMAND_CHANNEL_OFFSET + @as(usize, @intCast(channel_len))];
+
+        // Exclusive publications are never merged — each gets its own resources.
+        // Only concurrent publications share an existing entry for the same channel+stream.
+        if (!is_exclusive) {
+            for (self.publications.items) |*pub_entry| {
+                if (pub_entry.stream_id == stream_id and std.mem.eql(u8, pub_entry.channel, channel_data)) {
+                    // Duplicate add: increment ref_count and send ON_PUBLICATION_READY with existing entry details
+                    pub_entry.ref_count += 1;
+                    if (pub_entry.network_pub) |np| {
+                        self.sendPublicationReady(
+                            response_type,
+                            correlation_id,
+                            pub_entry.registration_id,
+                            pub_entry.session_id,
+                            pub_entry.stream_id,
+                            np.publisher_limit.counter_id,
+                            pub_entry.channel_status_indicator_counter_id,
+                            pub_entry.log_file_name,
+                        );
+                    }
+                    return;
+                }
+            }
+        }
+
         const session_id = self.next_session_id;
         self.next_session_id +%= 1;
 
@@ -514,6 +606,15 @@ pub const DriverConductor = struct {
             self.sendError(correlation_id, 2, "Out of memory");
             return;
         };
+        // Initialize flow control strategy
+        const fc_strategy = if (udp_ch) |ch|
+            if (ch.isMulticast())
+                flow_control.FlowControl{ .min_multicast = flow_control.MinMulticastFlowControl.init(self.allocator, self.image_liveness_timeout_ns) }
+            else
+                flow_control.FlowControl{ .unicast = .{} }
+        else
+            flow_control.FlowControl{ .unicast = .{} };
+
         net_pub.* = sender_mod.NetworkPublication{
             .session_id = session_id,
             .stream_id = stream_id,
@@ -525,6 +626,9 @@ pub const DriverConductor = struct {
             .dest_address = dest_address,
             .mtu = 1408,
             .last_setup_time_ms = 0,
+            .last_heartbeat_time_ms = 0,
+            .last_activity_ns = @as(i64, @intCast(std.time.nanoTimestamp())),
+            .flow_control_strategy = fc_strategy,
         };
         self.sender.onAddPublication(net_pub) catch {
             self.allocator.destroy(net_pub);
@@ -566,6 +670,7 @@ pub const DriverConductor = struct {
         };
 
         self.sendPublicationReady(
+            response_type,
             correlation_id,
             correlation_id,
             session_id,
@@ -574,6 +679,13 @@ pub const DriverConductor = struct {
             channel_status_handle.counter_id,
             log_file_name,
         );
+    }
+
+    pub fn handleAddExclusivePublication(self: *DriverConductor, data: []const u8) void {
+        // Exclusive publications never merge with existing publications for the same
+        // channel+stream. They get their own response code so the Java client constructs
+        // an ExclusivePublication instead of a ConcurrentPublication.
+        self.handleAddPublicationWithType(data, RESPONSE_ON_EXCLUSIVE_PUBLICATION_READY, true);
     }
 
     pub fn handleRemovePublication(self: *DriverConductor, data: []const u8) void {
@@ -591,22 +703,32 @@ pub const DriverConductor = struct {
         }
 
         if (found_index) |idx| {
-            const removed = self.publications.swapRemove(idx);
-            if (removed.network_pub) |np| {
-                self.counters_map.free(np.sender_position.counter_id);
-                self.counters_map.free(np.publisher_limit.counter_id);
-                self.sender.onRemovePublication(removed.session_id, removed.stream_id);
-                self.allocator.destroy(np);
+            // Decrement ref_count first
+            self.publications.items[idx].ref_count -= 1;
+
+            // Only free resources when ref_count reaches 0
+            if (self.publications.items[idx].ref_count <= 0) {
+                const removed = self.publications.swapRemove(idx);
+                if (removed.network_pub) |np| {
+                    self.counters_map.free(np.sender_position.counter_id);
+                    self.counters_map.free(np.publisher_limit.counter_id);
+                    self.sender.onRemovePublication(removed.session_id, removed.stream_id);
+                    if (np.flow_control_strategy == .min_multicast) {
+                        var mutable_np = np.*;
+                        mutable_np.flow_control_strategy.min_multicast.deinit();
+                    }
+                    self.allocator.destroy(np);
+                }
+                if (removed.channel_status_indicator_counter_id != counters.NULL_COUNTER_ID) {
+                    self.counters_map.free(removed.channel_status_indicator_counter_id);
+                }
+                if (removed.log_buffer) |lb| {
+                    lb.deinit();
+                    self.allocator.destroy(lb);
+                }
+                self.allocator.free(removed.channel);
+                self.allocator.free(removed.log_file_name);
             }
-            if (removed.channel_status_indicator_counter_id != counters.NULL_COUNTER_ID) {
-                self.counters_map.free(removed.channel_status_indicator_counter_id);
-            }
-            if (removed.log_buffer) |lb| {
-                lb.deinit();
-                self.allocator.destroy(lb);
-            }
-            self.allocator.free(removed.channel);
-            self.allocator.free(removed.log_file_name);
             self.sendOperationSuccess(correlation_id);
         }
     }
@@ -620,7 +742,7 @@ pub const DriverConductor = struct {
         const stream_id = std.mem.readInt(i32, data[SUBSCRIPTION_COMMAND_STREAM_ID_OFFSET .. SUBSCRIPTION_COMMAND_STREAM_ID_OFFSET + 4], .little);
         const channel_len = std.mem.readInt(i32, data[SUBSCRIPTION_COMMAND_CHANNEL_LENGTH_OFFSET .. SUBSCRIPTION_COMMAND_CHANNEL_LENGTH_OFFSET + 4], .little);
 
-        std.debug.print("[CONDUCTOR] ADD_SUBSCRIPTION: correlation={d} registration={d} stream={d} channel_len={d}\n", .{ correlation_id, registration_id, stream_id, channel_len });
+        if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] ADD_SUBSCRIPTION: correlation={d} registration={d} stream={d} channel_len={d}\n", .{ correlation_id, registration_id, stream_id, channel_len });
 
         if (channel_len < 0 or data.len < SUBSCRIPTION_COMMAND_CHANNEL_OFFSET + @as(usize, @intCast(channel_len))) {
             self.sendError(correlation_id, 1, "Invalid ADD_SUBSCRIPTION message");
@@ -711,7 +833,11 @@ pub const DriverConductor = struct {
                     // Notify clients that the image has closed
                     self.sendImageClose(image.session_id, image.stream_id, registration_id);
                     self.receiver.mutex.lock();
+                    // Free image counters to prevent leaks
+                    self.counters_map.free(image.receiver_hwm.counter_id);
+                    self.counters_map.free(image.subscriber_position.counter_id);
                     // Free the image resources; log_buffer was allocated by conductor on SETUP
+                    image.deinit();
                     image.log_buffer.deinit();
                     self.allocator.destroy(image.log_buffer);
                     self.allocator.destroy(image);
@@ -778,17 +904,18 @@ pub const DriverConductor = struct {
         const counter_id = std.mem.readInt(i32, data[8..12], .little);
 
         self.counters_map.free(counter_id);
-        _ = correlation_id;
+        self.sendOperationSuccess(correlation_id);
     }
 
     pub fn handleTerminateDriver(self: *DriverConductor) void {
         signal.running.store(false, .release);
-        std.debug.print("[CONDUCTOR] TERMINATE_DRIVER received — initiating graceful shutdown\n", .{});
+        if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] TERMINATE_DRIVER received — initiating graceful shutdown\n", .{});
         _ = self;
     }
 
     fn sendPublicationReady(
         self: *DriverConductor,
+        response_type: i32,
         correlation_id: i64,
         registration_id: i64,
         session_id: i32,
@@ -810,7 +937,7 @@ pub const DriverConductor = struct {
         std.mem.writeInt(i32, payload[28..32], channel_status_indicator_id, .little);
         std.mem.writeInt(i32, payload[32..36], @as(i32, @intCast(log_file_name.len)), .little);
         @memcpy(payload[36..], log_file_name);
-        self.broadcaster.transmit(RESPONSE_ON_PUBLICATION_READY, payload) catch return;
+        self.broadcaster.transmit(response_type, payload) catch return;
     }
 
     fn sendSubscriptionReady(self: *DriverConductor, correlation_id: i64, channel_status_indicator_id: i32) void {
@@ -821,25 +948,16 @@ pub const DriverConductor = struct {
     }
 
     fn sendError(self: *DriverConductor, correlation_id: i64, error_code: i32, msg: []const u8) void {
-        // Allocate buffer for response: correlation_id (8) + error_code (4) + msg_len (4) + message
-        var buf: [16]u8 = undefined;
+        const total_len = 16 + msg.len;
+        const buf = self.allocator.alloc(u8, total_len) catch return;
+        defer self.allocator.free(buf);
         std.mem.writeInt(i64, buf[0..8], correlation_id, .little);
         std.mem.writeInt(i32, buf[8..12], error_code, .little);
         std.mem.writeInt(i32, buf[12..16], @as(i32, @intCast(msg.len)), .little);
-
-        // Transmit header
-        self.broadcaster.transmit(RESPONSE_ON_ERROR, buf[0..16]) catch return;
-
-        // If there's a message, we need to transmit it separately
-        // For now, just transmit empty message if msg is too long
         if (msg.len > 0) {
-            // Create another transmission with just the message data
-            // This is simplified; a real impl might batch this differently
-            const msg_buf = self.allocator.alloc(u8, msg.len) catch return;
-            defer self.allocator.free(msg_buf);
-            @memcpy(msg_buf, msg);
-            // Note: this transmits as separate record; real impl would include in response
+            @memcpy(buf[16..], msg);
         }
+        self.broadcaster.transmit(RESPONSE_ON_ERROR, buf) catch return;
     }
 
     fn sendCounterReady(self: *DriverConductor, correlation_id: i64, counter_id: i32) void {
@@ -861,6 +979,7 @@ fn handleMessage(msg_type_id: i32, data: []const u8, ctx: *anyopaque) void {
     switch (msg_type_id) {
         CMD_ADD_PUBLICATION => self.handleAddPublication(data),
         CMD_REMOVE_PUBLICATION => self.handleRemovePublication(data),
+        CMD_ADD_EXCLUSIVE_PUBLICATION => self.handleAddExclusivePublication(data),
         CMD_ADD_SUBSCRIPTION => self.handleAddSubscription(data),
         CMD_REMOVE_SUBSCRIPTION => self.handleRemoveSubscription(data),
         CMD_CLIENT_KEEPALIVE => self.handleClientKeepalive(data),
@@ -903,7 +1022,7 @@ test "DriverConductor init and deinit" {
     var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
     defer sender.deinit();
 
-    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp");
+    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp", 5_000_000_000, 5_000_000_000, 5_000_000_000);
     defer conductor.deinit();
 
     try testing.expectEqual(@as(i32, 1), conductor.next_session_id);
@@ -941,7 +1060,7 @@ test "DriverConductor ADD_PUBLICATION creates entry and sends ready response" {
     var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
     defer sender.deinit();
 
-    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp");
+    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp", 5_000_000_000, 5_000_000_000, 5_000_000_000);
     defer conductor.deinit();
 
     // Simulate ADD_PUBLICATION command
@@ -1008,7 +1127,7 @@ test "DriverConductor ADD_SUBSCRIPTION creates entry and sends ready response" {
     var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
     defer sender.deinit();
 
-    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp");
+    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp", 5_000_000_000, 5_000_000_000, 5_000_000_000);
     defer conductor.deinit();
 
     // Skip socket binding for dummy socket in tests
@@ -1075,7 +1194,7 @@ test "DriverConductor REMOVE_PUBLICATION cleans up entry" {
     var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
     defer sender.deinit();
 
-    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp");
+    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp", 5_000_000_000, 5_000_000_000, 5_000_000_000);
     defer conductor.deinit();
 
     // Add a publication first
@@ -1111,7 +1230,7 @@ fn makeTestConductor(
     sender: *sender_mod.Sender,
     recv_ep: *endpoint_mod.ReceiveChannelEndpoint,
 ) !DriverConductor {
-    const conductor = try DriverConductor.init(allocator, rb, bcast, cm, receiver, sender, recv_ep, true, "/tmp");
+    const conductor = try DriverConductor.init(allocator, rb, bcast, cm, receiver, sender, recv_ep, true, "/tmp", 5_000_000_000, 5_000_000_000, 5_000_000_000);
     return conductor;
 }
 
@@ -1320,6 +1439,7 @@ test "DriverConductor REMOVE_SUBSCRIPTION sends ON_OPERATION_SUCCESS" {
 test "DriverConductor IPC event IDs match upstream control protocol" {
     try testing.expectEqual(@as(i32, 0x01), CMD_ADD_PUBLICATION);
     try testing.expectEqual(@as(i32, 0x02), CMD_REMOVE_PUBLICATION);
+    try testing.expectEqual(@as(i32, 0x03), CMD_ADD_EXCLUSIVE_PUBLICATION);
     try testing.expectEqual(@as(i32, 0x04), CMD_ADD_SUBSCRIPTION);
     try testing.expectEqual(@as(i32, 0x05), CMD_REMOVE_SUBSCRIPTION);
     try testing.expectEqual(@as(i32, 0x06), CMD_CLIENT_KEEPALIVE);

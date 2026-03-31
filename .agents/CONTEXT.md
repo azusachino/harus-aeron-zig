@@ -1,6 +1,12 @@
-# Agent Context — harus-aeron-zig
+## Task & State Management
 
-Internal living doc. Always read at session start. Update when architecture or conventions change.
+Machine-queryable state lives in `.agents/` subdirectories to prevent clutter:
+
+- `.agents/tasks/` — Active phase tasks (JSONL)
+- `.agents/history/` — Completed phase tasks (JSONL)
+- `.agents/registry/` — Long-lived state (e.g., `chapter_status.jsonl`, `parity_status.jsonl`)
+
+Use `make status` to query the current state across these registries.
 
 ## Agent Rules
 
@@ -93,15 +99,12 @@ Two parallel code trees — agents must maintain both:
 
 ## Current Parity State
 
-- **Phase 8+9 complete (2026-03-25)** — all tasks done; `make check` is green; tutorial 31/31 chapters.
-- Wire protocol gaps closed: remaining frame variants, strict URI parsing, malformed-input rejection.
-- Driver liveness and cleanup hardened: image/publication lifecycle, flow-control under reorder/gap, conductor/sender/receiver resource teardown.
+- **Phase 10 complete (2026-03-31)** — all Phase 10 tasks and upstream parity gates done; `make check` and `make interop-smoke` are green.
+- Wire protocol gaps closed: `receiver_id` propagation from STATUS frames through the driver to flow-control strategies.
+- Driver liveness and cleanup hardened: `DriverConductor` correctly notifies clients of image removal using the actual `registration_id` from counter metadata; `MinMulticastFlowControl` tracks multiple receivers by `receiver_id` and implements stale receiver timeouts (H2/H4/H5 investigation follow-ups).
 - Archive operational: segment rotation across multiple persisted segments, catalog descriptor fidelity, restart reconstruction.
 - Cluster consensus fidelity: follower catch-up/rejoin, restart/election/commit continuity, session redirect and failover.
-- CnC tooling real: `stat`, `errors`, `loss`, `streams`, `events`, `cluster-tool` backed by actual mmap reads and counters.
-- Interop automated: local Zig↔Java smoke/full runs use `deploy/docker-compose.ci.yml` with `make interop` / `make interop-smoke`; prefer Colima + Docker client on macOS and Podman on Linux.
-- `make interop-smoke` uses the finite Java helper in `deploy/InteropSmoke.java` so the smoke target exits on a successful Java `addSubscription` / close cycle against the Zig driver instead of hanging on an endless sample.
-- Current counters/interop contract: `deploy/InteropSmoke.java` validates the core data path (pub/sub, 10 messages) and holds the Aeron connection via marker-file coordination while `deploy/CountersChecker.java` independently maps cnc.dat via `CncFileDescriptor`, iterates all counter slots via `CountersReader.forEach`, and validates type id / registration id / channel key / counter value for all 6 required counter types (PUBLISHER_LIMIT, SENDER_POSITION, RECEIVER_HWM, SUBSCRIBER_POSITION, SEND_CHANNEL_STATUS, RECEIVE_CHANNEL_STATUS). Both run concurrently in the java-client container, coordinated by `/tmp/smoke-ready` and `/tmp/checker-done` marker files.
-- **Known parity gaps**: IPC 95% (multi-destination, advanced keepalive), Cluster 90% (snapshot coordination, member discovery), URI 95% (media type extensions). See `.agents/PARITY_AUDIT.md`.
+- Publication path parity: aligned `ADD_PUBLICATION` and `ON_PUBLICATION_READY` with upstream field layouts; Java client validates real `countersReader()` semantics for all 6 required counter types.
+- Interop automated: local Zig↔Java smoke/full runs are fully green; publisher-limit visibility and client-owned subscriber-position semantics are aligned with upstream.
+- **Known parity gaps**: Cluster 90% (snapshot coordination, member discovery), URI 95% (media type extensions). See `docs/plan.md`.
 - Performance baseline established: `src/bench/` (throughput/latency/fanout) + `test/stress/` soak scenarios for reconnect, archive replay, cluster failover.
-- Roadmap for next work lives in `docs/plan.md`; no active stale investigations.

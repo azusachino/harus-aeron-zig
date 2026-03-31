@@ -13,14 +13,14 @@ pub const AppendResult = union(enum) {
 pub const TermAppender = struct {
     term_buffer: []u8,
     term_length: i32,
-    raw_tail: i64, // packed: high 32 = term_id, low 32 = offset
+    raw_tail: *i64, // pointer to packed tail in shared mmap metadata
 
-    /// Initialize a TermAppender with a buffer and initial term_id.
-    pub fn init(term_buffer: []u8, term_id: i32) TermAppender {
+    /// Initialize a TermAppender with a buffer and pointer to raw_tail in metadata.
+    pub fn init(term_buffer: []u8, raw_tail_ptr: *i64) TermAppender {
         return .{
             .term_buffer = term_buffer,
             .term_length = @as(i32, @intCast(term_buffer.len)),
-            .raw_tail = packTail(term_id, 0),
+            .raw_tail = raw_tail_ptr,
         };
     }
 
@@ -35,8 +35,7 @@ pub const TermAppender = struct {
     pub fn rawTailVolatile(self: *const TermAppender) i64 {
         // LESSON(term-appender): @atomicLoad with .acquire ensures we see all writes by the appender thread
         // before the load returns. This pairs with .acq_rel on the CAS to enforce happens-before. See docs/tutorial/02-data-path/01-term-appender.md
-        const ptr: *const i64 = @ptrCast(&self.raw_tail);
-        return @atomicLoad(i64, ptr, .acquire);
+        return @atomicLoad(i64, self.raw_tail, .acquire);
     }
 
     /// Append a data frame (header + payload) to the current term.
@@ -52,8 +51,7 @@ pub const TermAppender = struct {
         const aligned_len_i32 = @as(i32, @intCast(aligned_len));
 
         // 2. Load raw_tail atomically
-        const ptr: *i64 = @ptrCast(&self.raw_tail);
-        const current_raw_tail = @atomicLoad(i64, ptr, .acquire);
+        const current_raw_tail = @atomicLoad(i64, self.raw_tail, .acquire);
 
         // 3. Extract current term_offset from low 32 bits
         const current_offset = @as(i32, @intCast(current_raw_tail & 0xFFFF_FFFF));
@@ -68,7 +66,7 @@ pub const TermAppender = struct {
         // LESSON(term-appender): Atomic CAS atomically reserves a byte range and publishes the term_id+offset pair.
         // Multiple publishers race here; losers return .admin_action so the caller retries from the new tail. See docs/tutorial/02-data-path/01-term-appender.md
         const new_raw_tail = packTail(current_term_id, current_offset +% aligned_len_i32);
-        const cas_result = @cmpxchgStrong(i64, ptr, current_raw_tail, new_raw_tail, .acq_rel, .acquire);
+        const cas_result = @cmpxchgStrong(i64, self.raw_tail, current_raw_tail, new_raw_tail, .acq_rel, .acquire);
 
         if (cas_result != null) {
             return .admin_action;
@@ -79,9 +77,8 @@ pub const TermAppender = struct {
         // Conversion from slice index to pointer uses @ptrCast + @alignCast; the slice points to aligned buffer. See docs/tutorial/02-data-path/01-term-appender.md
         const frame_offset = @as(usize, @intCast(current_offset));
 
-        // Write header fields
+        // Write header fields (except frame_length, which is the commit signal)
         const header_ptr: *frame.DataHeader = @ptrCast(@alignCast(&self.term_buffer[frame_offset]));
-        header_ptr.frame_length = @as(i32, @intCast(aligned_len));
         header_ptr.version = header.version;
         header_ptr.flags = header.flags;
         header_ptr.type = header.type;
@@ -100,7 +97,12 @@ pub const TermAppender = struct {
             );
         }
 
-        // 8. Return the term_offset where this frame was written
+        // 8. COMMIT: atomic store-release of frame_length (unaligned total_len, not aligned_len).
+        // This is the commit signal to readers; store-release ensures payload writes are visible first.
+        const frame_len_ptr: *i32 = @ptrCast(@alignCast(&self.term_buffer[frame_offset]));
+        @atomicStore(i32, frame_len_ptr, @as(i32, @intCast(total_len)), .release);
+
+        // 9. Return the term_offset where this frame was written
         return .{ .ok = current_offset };
     }
 
@@ -110,8 +112,7 @@ pub const TermAppender = struct {
         _ = _length;
 
         // Load current raw_tail
-        const ptr: *i64 = @ptrCast(&self.raw_tail);
-        const current_raw_tail = @atomicLoad(i64, ptr, .acquire);
+        const current_raw_tail = @atomicLoad(i64, self.raw_tail, .acquire);
 
         // Extract current offset and term_id
         const current_offset = @as(i32, @intCast(current_raw_tail & 0xFFFF_FFFF));
@@ -129,17 +130,16 @@ pub const TermAppender = struct {
         // LESSON(term-appender): Padding frame marks end of term and triggers rotation. See docs/tutorial/02-data-path/01-term-appender.md
         // Publisher writes padding when next append would exceed term_length, signaling subscribers to rotate to next partition. See docs/tutorial/02-data-path/01-term-appender.md
         const new_raw_tail = packTail(current_term_id, self.term_length);
-        const cas_result = @cmpxchgStrong(i64, ptr, current_raw_tail, new_raw_tail, .acq_rel, .acquire);
+        const cas_result = @cmpxchgStrong(i64, self.raw_tail, current_raw_tail, new_raw_tail, .acq_rel, .acquire);
 
         if (cas_result != null) {
             return .admin_action;
         }
 
-        // Write padding header at current_offset
+        // Write padding header at current_offset (except frame_length, which is the commit signal)
         const frame_offset = @as(usize, @intCast(current_offset));
         const padding_header: *frame.DataHeader = @ptrCast(@alignCast(&self.term_buffer[frame_offset]));
 
-        padding_header.frame_length = padding_len;
         padding_header.version = frame.VERSION;
         padding_header.flags = frame.DataHeader.PADDING_FLAG;
         padding_header.type = @intFromEnum(frame.FrameType.padding);
@@ -148,6 +148,11 @@ pub const TermAppender = struct {
         padding_header.stream_id = 0;
         padding_header.term_id = current_term_id;
         padding_header.reserved_value = 0;
+
+        // COMMIT: atomic store-release of frame_length (padding_len).
+        // This is the commit signal to readers; store-release ensures header writes are visible first.
+        const frame_len_ptr: *i32 = @ptrCast(@alignCast(&self.term_buffer[frame_offset]));
+        @atomicStore(i32, frame_len_ptr, padding_len, .release);
 
         return .padding_applied;
     }
@@ -159,7 +164,8 @@ test "TermAppender single append returns ok at offset 0" {
     defer allocator.free(term_buffer);
     @memset(term_buffer, 0);
 
-    var appender = TermAppender.init(term_buffer, 5);
+    var raw_tail: i64 = TermAppender.packTail(5, 0);
+    var appender = TermAppender.init(term_buffer, &raw_tail);
 
     var header: frame.DataHeader = undefined;
     header.frame_length = 0; // Will be set by append
@@ -184,7 +190,8 @@ test "TermAppender multiple appends advance offset correctly" {
     defer allocator.free(term_buffer);
     @memset(term_buffer, 0);
 
-    var appender = TermAppender.init(term_buffer, 7);
+    var raw_tail: i64 = TermAppender.packTail(7, 0);
+    var appender = TermAppender.init(term_buffer, &raw_tail);
 
     var header: frame.DataHeader = undefined;
     header.version = frame.VERSION;
@@ -212,7 +219,8 @@ test "TermAppender append that would exceed term_length returns tripped" {
     defer allocator.free(small_term);
     @memset(small_term, 0);
 
-    var appender = TermAppender.init(small_term, 1);
+    var raw_tail: i64 = TermAppender.packTail(1, 0);
+    var appender = TermAppender.init(small_term, &raw_tail);
 
     var header: frame.DataHeader = undefined;
     header.version = frame.VERSION;
@@ -251,7 +259,8 @@ test "TermAppender appendPadding fills to end of term" {
     defer allocator.free(term_buffer);
     @memset(term_buffer, 0);
 
-    var appender = TermAppender.init(term_buffer, 10);
+    var raw_tail: i64 = TermAppender.packTail(10, 0);
+    var appender = TermAppender.init(term_buffer, &raw_tail);
 
     var header: frame.DataHeader = undefined;
     header.version = frame.VERSION;

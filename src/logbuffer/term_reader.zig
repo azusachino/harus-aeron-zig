@@ -42,9 +42,10 @@ pub const TermReader = struct {
 
             // LESSON(term-reader): frame_length is the commit signal. Appender writes it last with store-release semantics.
             // Reader sees either zero (not yet committed) or positive (complete frame). See docs/tutorial/02-data-path/02-term-reader.md
-            // Read frame_length (i32, little-endian) at current_offset
-            const frame_length_bytes = term[offset_usize .. offset_usize + 4];
-            const frame_length = std.mem.readInt(i32, frame_length_bytes[0..4], .little);
+            // Read frame_length (i32, little-endian) at current_offset with acquire ordering
+            // to pair with appender's store-release and ensure we see the complete frame payload
+            const frame_length_ptr: *const i32 = @ptrCast(@alignCast(&term[offset_usize]));
+            const frame_length = @atomicLoad(i32, frame_length_ptr, .acquire);
 
             // If frame_length <= 0, we've reached the end of committed data
             if (frame_length <= 0) {

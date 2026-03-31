@@ -10,12 +10,13 @@ pub const PADDING_MSG_TYPE_ID: i32 = -1;
 pub const CLIENT_KEEPALIVE_MSG_TYPE: i32 = 0x06;
 pub const TERMINATE_DRIVER_MSG_TYPE: i32 = 0x0E;
 
-// Metadata positions (last 128 bytes of buffer)
+// Metadata positions (last 768 bytes of buffer — 6 cache lines of 128 bytes)
 pub const TAIL_POSITION_OFFSET: usize = 0;
-pub const HEAD_CACHE_POSITION_OFFSET: usize = 8;
-pub const HEAD_POSITION_OFFSET: usize = 16;
-pub const CORRELATION_COUNTER_OFFSET: usize = 24;
-pub const METADATA_LENGTH: usize = 128;
+pub const HEAD_CACHE_POSITION_OFFSET: usize = 128;
+pub const HEAD_POSITION_OFFSET: usize = 256;
+pub const CORRELATION_COUNTER_OFFSET: usize = 384;
+pub const CONSUMER_HEARTBEAT_OFFSET: usize = 640;
+pub const METADATA_LENGTH: usize = 768;
 
 // LESSON(ring-buffer): Records are padded to cache-line boundaries so wraparound works without straddling. See docs/tutorial/01-foundations/02-ring-buffer.md
 pub const RecordDescriptor = struct {
@@ -101,26 +102,37 @@ pub const ManyToOneRingBuffer = struct {
             }
         }
 
-        var record_index = @as(usize, @intCast(tail)) % self.capacity;
-
-        // Check if record would wrap around buffer end
-        if (record_index + aligned_length > self.capacity) {
-            // Insert padding record — Agrona layout: length@0, type@4
-            const padding_length = @as(i32, @intCast(self.capacity - record_index));
-            const padding_addr = self.buffer.ptr + record_index;
-            const pad_len_ptr: *i32 = @ptrCast(@alignCast(padding_addr));
-            pad_len_ptr.* = padding_length; // length at offset 0
-            const pad_type_ptr: *i32 = @ptrCast(@alignCast(padding_addr + 4));
-            pad_type_ptr.* = PADDING_MSG_TYPE_ID; // type at offset 4
-
-            tail += padding_length;
-            record_index = 0;
-        }
-
+        // CAS loop: compute padding before attempting CAS
         // LESSON(ring-buffer): CAS loop retries on contention until one writer claims the tail range. No spinlock. See docs/tutorial/01-foundations/02-ring-buffer.md
         // LESSON(ring-buffer): Only the tail cursor is claimed atomically; data copy happens after, so writers don't block each other. See docs/tutorial/01-foundations/02-ring-buffer.md
-        while (!self.casTail(tail, tail + @as(i64, @intCast(aligned_length)))) {
+        var record_index = @as(usize, @intCast(tail)) % self.capacity;
+        var padding: usize = 0;
+
+        // Compute padding if record would wrap
+        if (record_index + aligned_length > self.capacity) {
+            padding = self.capacity - record_index;
+        }
+
+        // CAS to claim tail + aligned_length + padding atomically
+        const total_claim = @as(i64, @intCast(aligned_length + padding));
+        while (!self.casTail(tail, tail + total_claim)) {
+            // CAS failed; reload tail and recompute record_index and padding
             tail = self.loadTail();
+            record_index = @as(usize, @intCast(tail)) % self.capacity;
+            padding = 0;
+            if (record_index + aligned_length > self.capacity) {
+                padding = self.capacity - record_index;
+            }
+        }
+
+        // AFTER CAS succeeds: write padding record if needed
+        if (padding > 0) {
+            const padding_addr = self.buffer.ptr + record_index;
+            const pad_len_ptr: *i32 = @ptrCast(@alignCast(padding_addr));
+            pad_len_ptr.* = @as(i32, @intCast(padding)); // length at offset 0
+            const pad_type_ptr: *i32 = @ptrCast(@alignCast(padding_addr + 4));
+            pad_type_ptr.* = PADDING_MSG_TYPE_ID; // type at offset 4
+            record_index = 0; // actual record goes at buffer start
         }
 
         // Write header — Agrona layout: length@0 (negative sentinel), type@4
@@ -203,20 +215,20 @@ test "record alignment" {
 test "ring buffer constants match agrona protocol values" {
     try std.testing.expectEqual(@as(i32, 0x06), CLIENT_KEEPALIVE_MSG_TYPE);
     try std.testing.expectEqual(@as(i32, 0x0E), TERMINATE_DRIVER_MSG_TYPE);
-    try std.testing.expectEqual(@as(usize, 128), METADATA_LENGTH);
+    try std.testing.expectEqual(@as(usize, 768), METADATA_LENGTH);
     try std.testing.expectEqual(@as(usize, 8), RecordDescriptor.HEADER_LENGTH);
     try std.testing.expectEqual(@as(usize, 8), RecordDescriptor.ALIGNMENT);
     try std.testing.expectEqual(@as(usize, 0), TAIL_POSITION_OFFSET);
-    try std.testing.expectEqual(@as(usize, 8), HEAD_CACHE_POSITION_OFFSET);
-    try std.testing.expectEqual(@as(usize, 16), HEAD_POSITION_OFFSET);
-    try std.testing.expectEqual(@as(usize, 24), CORRELATION_COUNTER_OFFSET);
+    try std.testing.expectEqual(@as(usize, 128), HEAD_CACHE_POSITION_OFFSET);
+    try std.testing.expectEqual(@as(usize, 256), HEAD_POSITION_OFFSET);
+    try std.testing.expectEqual(@as(usize, 384), CORRELATION_COUNTER_OFFSET);
 }
 
 test "single write and read roundtrip" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 256);
+    const buf = try arena.allocator().alloc(u8, 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -242,7 +254,7 @@ test "write stores agrona record header as length then type" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 256);
+    const buf = try arena.allocator().alloc(u8, 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -259,7 +271,7 @@ test "write until full returns false" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 512);
+    const buf = try arena.allocator().alloc(u8, 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -280,7 +292,7 @@ test "nextCorrelationId monotonically increases" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 256);
+    const buf = try arena.allocator().alloc(u8, 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -298,7 +310,7 @@ test "wrap-around with padding" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 512);
+    const buf = try arena.allocator().alloc(u8, 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -336,14 +348,14 @@ test "wrap-around encodes padding record with length then padding type" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 256);
+    const buf = try arena.allocator().alloc(u8, 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
-    try std.testing.expectEqual(@as(usize, 128), rb.capacity);
+    try std.testing.expectEqual(@as(usize, 256), rb.capacity);
 
-    // 7 x 16-byte aligned records => head/tail at 112, leaving 16 bytes at the end.
-    for (0..7) |_| {
+    // 15 x 16-byte aligned records => head/tail at 240, leaving 16 bytes at the end.
+    for (0..15) |_| {
         try std.testing.expect(rb.write(1, "abc"));
     }
 
@@ -354,12 +366,12 @@ test "wrap-around encodes padding record with length then padding type" {
             count.* += 1;
         }
     }.handle;
-    _ = rb.read(handler, @ptrCast(&read_count), 6);
-    try std.testing.expectEqual(@as(i32, 6), read_count);
+    _ = rb.read(handler, @ptrCast(&read_count), 14);
+    try std.testing.expectEqual(@as(i32, 14), read_count);
 
     try std.testing.expect(rb.write(2, "012345678"));
 
-    const padding_index: usize = 112;
+    const padding_index: usize = 240;
     try std.testing.expectEqual(@as(i32, 16), std.mem.readInt(i32, buf[padding_index..][0..4], .little));
     try std.testing.expectEqual(@as(i32, PADDING_MSG_TYPE_ID), std.mem.readInt(i32, buf[padding_index + 4 ..][0..4], .little));
     try std.testing.expectEqual(@as(i32, 17), std.mem.readInt(i32, buf[0..4], .little));

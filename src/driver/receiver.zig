@@ -1,6 +1,7 @@
 // Receiver duty agent — polls incoming UDP frames and dispatches by type
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-driver/src/main/c/aeron_receiver.c
 const std = @import("std");
+const builtin = @import("builtin");
 const logbuffer = @import("../logbuffer/log_buffer.zig");
 const metadata = @import("../logbuffer/metadata.zig");
 const counters = @import("../ipc/counters.zig");
@@ -21,6 +22,7 @@ pub const Image = struct {
     rebuild_position: i64, // tracks gap filling progress
     source_address: std.net.Address,
     nak_state: NakState,
+    last_activity_ns: i64,
 
     pub fn init(
         session_id: i32,
@@ -38,7 +40,9 @@ pub const Image = struct {
         // doesn't stall waiting for data in an earlier (empty) partition.
         const term_count = @as(i64, active_term_id - initial_term_id);
         const initial_rebuild_position = term_count * @as(i64, term_length);
-        std.debug.print("[IMAGE] init: session={d} stream={d} initial_term_id={d} active_term_id={d} rebuild_start={d}\n", .{ session_id, stream_id, initial_term_id, active_term_id, initial_rebuild_position });
+        if (builtin.mode == .Debug) {
+            std.debug.print("[IMAGE] init: session={d} stream={d} initial_term_id={d} active_term_id={d} rebuild_start={d}\n", .{ session_id, stream_id, initial_term_id, active_term_id, initial_rebuild_position });
+        }
         return .{
             .session_id = session_id,
             .stream_id = stream_id,
@@ -50,11 +54,13 @@ pub const Image = struct {
             .subscriber_position = subscriber_position,
             .rebuild_position = initial_rebuild_position,
             .source_address = source_address,
-            .nak_state = NakState.init(stream_id),
+            .nak_state = NakState.init(log_buffer.allocator, stream_id),
+            .last_activity_ns = @as(i64, @intCast(std.time.nanoTimestamp())),
         };
     }
 
-    pub fn deinit(_: *Image) void {
+    pub fn deinit(self: *Image) void {
+        self.nak_state.deinit();
         // log_buffer owned externally — no-op
     }
 
@@ -169,49 +175,52 @@ const NAK_DELAY_NS: i64 = 1_000_000; // 1ms
 pub const GapRange = struct { offset: i32, length: i32 };
 
 pub const NakState = struct {
+    allocator: std.mem.Allocator,
     stream_id: i32,
-    gap_list: [16]GapRange = undefined,
-    gap_list_len: usize = 0,
+    gap_list: std.ArrayListUnmanaged(GapRange) = .{},
     first_gap_ns: i64 = 0,
 
-    pub fn init(stream_id: i32) NakState {
-        return .{ .stream_id = stream_id, .gap_list_len = 0 };
+    pub fn init(allocator: std.mem.Allocator, stream_id: i32) NakState {
+        return .{ .allocator = allocator, .stream_id = stream_id };
     }
 
     /// For tests: inject a known first_gap_ns instead of using the real clock.
-    pub fn initWithTime(stream_id: i32, first_gap_ns: i64) NakState {
-        return .{ .stream_id = stream_id, .first_gap_ns = first_gap_ns, .gap_list_len = 0 };
+    pub fn initWithTime(allocator: std.mem.Allocator, stream_id: i32, first_gap_ns: i64) NakState {
+        return .{ .allocator = allocator, .stream_id = stream_id, .first_gap_ns = first_gap_ns };
     }
 
-    pub fn recordGap(self: *NakState, offset: i32, length: i32) void {
+    pub fn deinit(self: *NakState) void {
+        self.gap_list.deinit(self.allocator);
+        self.gap_list = .{};
+        self.first_gap_ns = 0;
+    }
+
+    pub fn recordGap(self: *NakState, offset: i32, length: i32) !void {
         const end = offset + length;
         // Try to merge with existing gap
         var i: usize = 0;
-        while (i < self.gap_list_len) : (i += 1) {
-            var g = &self.gap_list[i];
+        while (i < self.gap_list.items.len) : (i += 1) {
+            var g = &self.gap_list.items[i];
             if (offset <= g.offset + g.length and end >= g.offset) {
                 g.offset = @min(g.offset, offset);
                 g.length = @max(g.offset + g.length, end) - g.offset;
                 return;
             }
         }
-        if (self.gap_list_len == 0) self.first_gap_ns = @intCast(@as(i128, std.time.nanoTimestamp()));
-        if (self.gap_list_len < 16) {
-            self.gap_list[self.gap_list_len] = .{ .offset = offset, .length = length };
-            self.gap_list_len += 1;
-        }
+        if (self.gap_list.items.len == 0) self.first_gap_ns = @as(i64, @intCast(std.time.nanoTimestamp()));
+        try self.gap_list.append(self.allocator, .{ .offset = offset, .length = length });
     }
 
     pub fn shouldSend(self: *const NakState, now_ns: i64) bool {
-        return self.gap_list_len > 0 and (now_ns - self.first_gap_ns) >= NAK_DELAY_NS;
+        return self.gap_list.items.len > 0 and (now_ns - self.first_gap_ns) >= NAK_DELAY_NS;
     }
 
     pub fn gaps(self: *const NakState) []const GapRange {
-        return self.gap_list[0..self.gap_list_len];
+        return self.gap_list.items;
     }
 
     pub fn clear(self: *NakState) void {
-        self.gap_list_len = 0;
+        self.gap_list.clearRetainingCapacity();
         self.first_gap_ns = 0;
     }
 };
@@ -268,6 +277,7 @@ pub const Receiver = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         for (self.images.items) |image| {
+            image.deinit();
             image.log_buffer.deinit();
             self.allocator.destroy(image.log_buffer);
             self.allocator.destroy(image);
@@ -316,9 +326,11 @@ pub const Receiver = struct {
                 }
 
                 const total = self.data_frames_total.fetchAdd(1, .monotonic) + 1;
-                std.debug.print("[RECEIVER] DATA frame #{d}: pkt_len={d} term_id={d} term_offset={d} frame_len={d} session={d} stream={d}\n", .{
-                    total, data.len, header.term_id, header.term_offset, header.frame_length, header.session_id, header.stream_id,
-                });
+                if (builtin.mode == .Debug) {
+                    std.debug.print("[RECEIVER] DATA frame #{d}: pkt_len={d} term_id={d} term_offset={d} frame_len={d} session={d} stream={d}\n", .{
+                        total, data.len, header.term_id, header.term_offset, header.frame_length, header.session_id, header.stream_id,
+                    });
+                }
 
                 const payload_len_raw = @as(i32, header.frame_length) - @as(i32, @intCast(protocol.DataHeader.LENGTH));
                 const payload_len: usize = if (payload_len_raw > 0) @intCast(payload_len_raw) else 0;
@@ -331,18 +343,21 @@ pub const Receiver = struct {
                 for (self.images.items) |image| {
                     if (image.session_id == header.session_id and image.stream_id == header.stream_id) {
                         found_image = true;
+                        image.last_activity_ns = @as(i64, @intCast(std.time.nanoTimestamp()));
                         if (payload_offset + payload_len <= frame_data.len) {
                             const payload = frame_data[payload_offset .. payload_offset + payload_len];
 
                             const written = image.insertFrame(self.counters_map, header, payload);
                             if (!written) {
-                                std.debug.print("[RECEIVER] insertFrame FAILED: session={d} stream={d} term_id={d} term_offset={d}\n", .{
-                                    header.session_id, header.stream_id, header.term_id, header.term_offset,
-                                });
+                                if (builtin.mode == .Debug) {
+                                    std.debug.print("[RECEIVER] insertFrame FAILED: session={d} stream={d} term_id={d} term_offset={d}\n", .{
+                                        header.session_id, header.stream_id, header.term_id, header.term_offset,
+                                    });
+                                }
                             }
 
                             if (self.event_log) |el| {
-                                const evt_now: i64 = @intCast(@as(i128, std.time.nanoTimestamp()));
+                                const evt_now: i64 = @as(i64, @intCast(std.time.nanoTimestamp()));
                                 el.log(.frame_in, evt_now, image.session_id, image.stream_id, payload);
                             }
 
@@ -350,14 +365,16 @@ pub const Receiver = struct {
                                 const hwm = self.counters_map.get(image.receiver_hwm.counter_id);
                                 const gap_len = @as(i32, @intCast(hwm - image.rebuild_position));
                                 const gap_off = @as(i32, @intCast(@mod(image.rebuild_position, @as(i64, @intCast(image.term_length)))));
-                                image.nak_state.recordGap(gap_off, gap_len);
+                                image.nak_state.recordGap(gap_off, gap_len) catch |err| {
+                                    std.log.err("receiver failed to record NAK gap session_id={} stream_id={} err={}", .{ image.session_id, image.stream_id, err });
+                                };
                                 if (self.loss_report_instance) |lr| {
-                                    const lnow: i64 = @intCast(@as(i128, std.time.nanoTimestamp()));
+                                    const lnow: i64 = @as(i64, @intCast(std.time.nanoTimestamp()));
                                     lr.recordObservation(@as(i64, @intCast(payload.len)), lnow, image.session_id, image.stream_id, "aeron:udp");
                                 }
                             }
 
-                            const now = @as(i64, @intCast(@as(i128, std.time.nanoTimestamp())));
+                            const now = @as(i64, @intCast(std.time.nanoTimestamp()));
                             if (image.nak_state.shouldSend(now)) {
                                 self.sendNak(image) catch {};
                                 image.nak_state.clear();
@@ -371,16 +388,20 @@ pub const Receiver = struct {
 
                 if (!found_image) {
                     _ = self.data_frames_before_image.fetchAdd(1, .monotonic);
-                    std.debug.print("[RECEIVER] DATA for unknown session={d} stream={d} (images={d}) term_id={d} term_offset={d}\n", .{
-                        header.session_id, header.stream_id, self.images.items.len, header.term_id, header.term_offset,
-                    });
+                    if (builtin.mode == .Debug) {
+                        std.debug.print("[RECEIVER] DATA for unknown session={d} stream={d} (images={d}) term_id={d} term_offset={d}\n", .{
+                            header.session_id, header.stream_id, self.images.items.len, header.term_id, header.term_offset,
+                        });
+                    }
                 }
 
                 self.mutex.unlock();
 
                 // Send STATUS outside the lock; image pointer is stable while driver is running
                 if (image_for_status) |img| {
-                    std.debug.print("[RECEIVER] sending STATUS to {any}\n", .{img.source_address});
+                    if (builtin.mode == .Debug) {
+                        std.debug.print("[RECEIVER] sending STATUS to {any}\n", .{img.source_address});
+                    }
                     self.sendStatus(img) catch |err| switch (err) {
                         error.WouldBlock => {},
                         else => std.log.err("receiver STATUS send failed session_id={} stream_id={} err={}", .{ img.session_id, img.stream_id, err }),
@@ -394,9 +415,11 @@ pub const Receiver = struct {
                     continue;
                 }
                 const setup = @as(*const protocol.SetupHeader, @ptrCast(@alignCast(&frame_data[0])));
-                std.debug.print("[RECEIVER] SETUP: session={d} stream={d} initial_term_id={d} active_term_id={d} src={any}\n", .{
-                    setup.session_id, setup.stream_id, setup.initial_term_id, setup.active_term_id, src_addr,
-                });
+                if (builtin.mode == .Debug) {
+                    std.debug.print("[RECEIVER] SETUP: session={d} stream={d} initial_term_id={d} active_term_id={d} src={any}\n", .{
+                        setup.session_id, setup.stream_id, setup.initial_term_id, setup.active_term_id, src_addr,
+                    });
+                }
                 self.mutex.lock();
                 self.pending_setups.append(self.allocator, .{
                     .session_id = setup.session_id,
@@ -443,7 +466,9 @@ pub const Receiver = struct {
             if (err == error.WouldBlock) {
                 return 0;
             }
-            std.debug.print("[RECEIVER] recv error: {any}\n", .{err});
+            if (builtin.mode == .Debug) {
+                std.debug.print("[RECEIVER] recv error: {any}\n", .{err});
+            }
             return 0;
         };
 
@@ -475,7 +500,8 @@ pub const Receiver = struct {
         var i: usize = 0;
         while (i < self.images.items.len) {
             if (self.images.items[i].session_id == session_id and self.images.items[i].stream_id == stream_id) {
-                _ = self.images.swapRemove(i);
+                const image = self.images.swapRemove(i);
+                image.deinit();
                 return;
             }
             i += 1;
@@ -502,7 +528,7 @@ pub const Receiver = struct {
 
             // Log send_nak event
             if (self.event_log) |el| {
-                const nak_now: i64 = @intCast(@as(i128, std.time.nanoTimestamp()));
+                const nak_now: i64 = @as(i64, @intCast(std.time.nanoTimestamp()));
                 el.log(.send_nak, nak_now, image.session_id, image.stream_id, nak_bytes);
             }
         }
@@ -533,10 +559,12 @@ pub const Receiver = struct {
 
 // Unit tests
 test "NAK: adjacent gaps produce one coalesced NAK" {
+    const allocator = std.testing.allocator;
     // Create two adjacent gap records for the same Image
-    var nak_state = NakState.init(1001);
-    nak_state.recordGap(100, 64); // gap at offset 100, length 64
-    nak_state.recordGap(164, 128); // adjacent gap at 164, length 128
+    var nak_state = NakState.init(allocator, 1001);
+    defer nak_state.deinit();
+    try nak_state.recordGap(100, 64); // gap at offset 100, length 64
+    try nak_state.recordGap(164, 128); // adjacent gap at 164, length 128
 
     // Should coalesce into one gap: offset=100, length=192
     const gaps = nak_state.gaps();
@@ -546,16 +574,30 @@ test "NAK: adjacent gaps produce one coalesced NAK" {
 }
 
 test "NAK: no NAK sent within delay window" {
-    // Use an injectable base_time to avoid non-determinism from std.time.nanoTimestamp().
-    // NakState.initWithTime(stream_id, first_gap_ns) sets first_gap_ns directly.
-    var nak_state = NakState.initWithTime(1001, 0);
-    nak_state.gap_list[0] = .{ .offset = 100, .length = 64 };
-    nak_state.gap_list_len = 1;
+    const allocator = std.testing.allocator;
+    // Use an injectable base_time to avoid non-determinism from @as(i64, @intCast(std.time.nanoTimestamp())).
+    // NakState.initWithTime(allocator, stream_id, first_gap_ns) sets first_gap_ns directly.
+    var nak_state = NakState.initWithTime(allocator, 1001, 0);
+    defer nak_state.deinit();
+    try nak_state.gap_list.append(allocator, .{ .offset = 100, .length = 64 });
 
     // Before delay elapses: should not send
     try std.testing.expect(!nak_state.shouldSend(NAK_DELAY_NS - 1));
     // After delay: should send
     try std.testing.expect(nak_state.shouldSend(NAK_DELAY_NS));
+}
+
+test "NAK: gap list grows past sixteen entries" {
+    const allocator = std.testing.allocator;
+
+    var nak_state = NakState.init(allocator, 1001);
+    defer nak_state.deinit();
+
+    for (0..17) |i| {
+        try nak_state.recordGap(@as(i32, @intCast(i * 64)), 32);
+    }
+
+    try std.testing.expectEqual(@as(usize, 17), nak_state.gaps().len);
 }
 
 test "Receiver init and deinit" {

@@ -6,7 +6,10 @@ RUN apk add --no-cache curl && \
       -o /aeron-all.jar
 COPY InteropSmoke.java /src/InteropSmoke.java
 COPY CountersChecker.java /src/CountersChecker.java
-RUN mkdir -p /out && javac -cp /aeron-all.jar -d /out /src/InteropSmoke.java /src/CountersChecker.java
+COPY MultiStreamSmoke.java /src/MultiStreamSmoke.java
+COPY ExclusivePublicationSmoke.java /src/ExclusivePublicationSmoke.java
+COPY ReconnectSmoke.java /src/ReconnectSmoke.java
+RUN mkdir -p /out && javac -cp /aeron-all.jar -d /out /src/InteropSmoke.java /src/CountersChecker.java /src/MultiStreamSmoke.java /src/ExclusivePublicationSmoke.java /src/ReconnectSmoke.java
 
 FROM eclipse-temurin:21-jre-alpine
 COPY --from=builder /aeron-all.jar /aeron-all.jar

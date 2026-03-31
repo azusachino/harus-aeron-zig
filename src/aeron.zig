@@ -38,6 +38,7 @@ pub const Image = @import("image.zig").Image;
 
 pub const AeronContext = struct {
     aeron_dir: []const u8 = "/tmp/aeron",
+    idle_strategy: ?ipc.idle_strategy.IdleStrategy = null,
 };
 
 // LESSON(what-is-aeron): Aeron is a factory and lifecycle container for the client-side API. It holds the cnc.dat file handle, ring buffer and broadcast receiver for driver communication, and hash maps of owned Publication and Subscription instances. The embedded_driver field is optional—clients can spawn their own driver or connect to an existing one via cnc.dat. See docs/tutorial/00-orientation/01-what-is-aeron.md
@@ -48,13 +49,17 @@ pub const Aeron = struct {
     to_driver_ring_buffer: ipc.ring_buffer.ManyToOneRingBuffer,
     to_clients_broadcast_receiver: ipc.broadcast.BroadcastReceiver,
     counters_map: ipc.counters.CountersMap,
+    idle_strategy: ipc.idle_strategy.IdleStrategy,
     client_id: i64,
+    last_keepalive_ms: i64 = 0,
 
     // Tracking
     publications: std.AutoHashMapUnmanaged(i64, *ExclusivePublication),
     subscriptions: std.AutoHashMapUnmanaged(i64, *Subscription),
     pending_subscription_streams: std.AutoHashMapUnmanaged(i64, i32),
     embedded_driver: ?*driver.MediaDriver = null,
+
+    const KEEPALIVE_INTERVAL_MS: i64 = 1_000;
 
     const PublicationLogHandle = struct {
         buffer: *logbuffer.LogBuffer,
@@ -81,7 +86,9 @@ pub const Aeron = struct {
             .to_driver_ring_buffer = to_driver_ring_buffer,
             .to_clients_broadcast_receiver = ipc.broadcast.BroadcastReceiver.wrap(to_clients),
             .counters_map = ipc.counters.CountersMap.init(counters_meta, counters_values),
+            .idle_strategy = ctx.idle_strategy orelse ipc.idle_strategy.IdleStrategy.initDefaultBackoff(),
             .client_id = client_id,
+            .last_keepalive_ms = 0,
             .publications = .{},
             .subscriptions = .{},
             .pending_subscription_streams = .{},
@@ -133,8 +140,26 @@ pub const Aeron = struct {
         return .{ .buffer = mapped, .owns_buffer = true };
     }
 
+    // LESSON(what-is-aeron): sendKeepaliveIfDue maintains client liveness with the driver during idle periods by writing CMD_CLIENT_KEEPALIVE with the 8-byte little-endian client_id into the shared to-driver ring buffer. This is independent of publication/subscription commands so the conductor does not evict quiet clients after its 5-second timeout. See docs/tutorial/00-orientation/01-what-is-aeron.md
+    fn sendKeepaliveIfDue(self: *Aeron) i32 {
+        const now_ms = std.time.milliTimestamp();
+        if (self.last_keepalive_ms != 0 and (now_ms - self.last_keepalive_ms) < KEEPALIVE_INTERVAL_MS) {
+            return 0;
+        }
+
+        var buf: [8]u8 = undefined;
+        std.mem.writeInt(i64, buf[0..8], self.client_id, .little);
+        if (!self.to_driver_ring_buffer.write(driver.conductor.CMD_CLIENT_KEEPALIVE, buf[0..])) {
+            return 0;
+        }
+
+        self.last_keepalive_ms = now_ms;
+        return 1;
+    }
+
     // LESSON(what-is-zig): doWork is the client's polling loop. It drains all pending messages from the driver's broadcast buffer: RESPONSE_ON_PUBLICATION_READY (allocates ExclusivePublication with log buffer), RESPONSE_ON_SUBSCRIPTION_READY (allocates Subscription), RESPONSE_ON_IMAGE_READY (adds Image to subscription for a new publisher session). Call this in your application's main loop to discover new publications and subscriptions. See docs/tutorial/00-orientation/02-what-is-zig.md
     pub fn doWork(self: *Aeron) i32 {
+        const keepalive_work = self.sendKeepaliveIfDue();
         var work: i32 = 0;
         while (self.to_clients_broadcast_receiver.receiveNext()) {
             const msg_type_id = self.to_clients_broadcast_receiver.typeId();
@@ -225,7 +250,10 @@ pub const Aeron = struct {
                 work += 1;
             }
         }
-        return work;
+
+        const total_work = work + keepalive_work;
+        self.idle_strategy.idle(total_work);
+        return total_work;
     }
 
     pub fn getPublication(self: *Aeron, registration_id: i64) ?*ExclusivePublication {
@@ -287,6 +315,45 @@ pub const Aeron = struct {
 
         return correlation_id;
     }
+
+    pub fn removePublication(self: *Aeron, registration_id: i64) !void {
+        const correlation_id = self.to_driver_ring_buffer.nextCorrelationId();
+
+        var buf: [24]u8 = undefined;
+        std.mem.writeInt(i64, buf[0..8], self.client_id, .little);
+        std.mem.writeInt(i64, buf[8..16], correlation_id, .little);
+        std.mem.writeInt(i64, buf[16..24], registration_id, .little);
+
+        if (!self.to_driver_ring_buffer.write(driver.conductor.CMD_REMOVE_PUBLICATION, &buf)) {
+            return error.RingBufferFull;
+        }
+
+        if (self.publications.fetchRemove(registration_id)) |entry| {
+            entry.value.deinit(self.allocator);
+            self.allocator.destroy(entry.value);
+        }
+    }
+
+    pub fn removeSubscription(self: *Aeron, registration_id: i64) !void {
+        const correlation_id = self.to_driver_ring_buffer.nextCorrelationId();
+
+        var buf: [24]u8 = undefined;
+        std.mem.writeInt(i64, buf[0..8], self.client_id, .little);
+        std.mem.writeInt(i64, buf[8..16], correlation_id, .little);
+        std.mem.writeInt(i64, buf[16..24], registration_id, .little);
+
+        if (!self.to_driver_ring_buffer.write(driver.conductor.CMD_REMOVE_SUBSCRIPTION, &buf)) {
+            return error.RingBufferFull;
+        }
+
+        if (self.subscriptions.fetchRemove(registration_id)) |entry| {
+            for (entry.value.images()) |img| {
+                self.allocator.destroy(img);
+            }
+            entry.value.deinit();
+            self.allocator.destroy(entry.value);
+        }
+    }
 };
 
 test {
@@ -310,7 +377,7 @@ test "Aeron init and deinit" {
 test "Aeron addSubscription encodes upstream SubscriptionMessageFlyweight layout" {
     const allocator = std.testing.allocator;
 
-    var ring_storage align(8) = [_]u8{0} ** 512;
+    var ring_storage align(8) = [_]u8{0} ** 1024;
     @memset(&ring_storage, 0);
 
     var aeron = Aeron{
@@ -321,9 +388,11 @@ test "Aeron addSubscription encodes upstream SubscriptionMessageFlyweight layout
         .to_clients_broadcast_receiver = undefined,
         .counters_map = undefined,
         .client_id = 7,
+        .last_keepalive_ms = std.time.milliTimestamp(),
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},
+        .idle_strategy = ipc.idle_strategy.IdleStrategy.initBusySpin(),
         .embedded_driver = null,
     };
     defer aeron.publications.deinit(allocator);
@@ -359,7 +428,7 @@ test "Aeron addSubscription encodes upstream SubscriptionMessageFlyweight layout
 test "Aeron addPublication encodes upstream PublicationMessageFlyweight layout" {
     const allocator = std.testing.allocator;
 
-    var ring_storage align(8) = [_]u8{0} ** 512;
+    var ring_storage align(8) = [_]u8{0} ** 1024;
     @memset(&ring_storage, 0);
 
     var aeron = Aeron{
@@ -370,9 +439,11 @@ test "Aeron addPublication encodes upstream PublicationMessageFlyweight layout" 
         .to_clients_broadcast_receiver = undefined,
         .counters_map = undefined,
         .client_id = 9,
+        .last_keepalive_ms = std.time.milliTimestamp(),
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},
+        .idle_strategy = ipc.idle_strategy.IdleStrategy.initBusySpin(),
         .embedded_driver = null,
     };
     defer aeron.publications.deinit(allocator);
@@ -417,7 +488,7 @@ test "Aeron doWork parses full publication-ready payload and maps log buffer" {
     var created = try logbuffer.LogBuffer.initMapped(allocator, 64 * 1024, log_path);
     created.deinit();
 
-    var ring_storage align(8) = [_]u8{0} ** 512;
+    var ring_storage align(8) = [_]u8{0} ** 1024;
     @memset(&ring_storage, 0);
 
     var bcast = try ipc.broadcast.BroadcastTransmitter.init(allocator, 1024);
@@ -449,9 +520,11 @@ test "Aeron doWork parses full publication-ready payload and maps log buffer" {
         .to_clients_broadcast_receiver = ipc.broadcast.BroadcastReceiver.wrap(bcast.full_buffer),
         .counters_map = counters_map,
         .client_id = 12,
+        .last_keepalive_ms = std.time.milliTimestamp(),
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},
+        .idle_strategy = ipc.idle_strategy.IdleStrategy.initBusySpin(),
         .embedded_driver = null,
     };
     defer {
@@ -471,4 +544,146 @@ test "Aeron doWork parses full publication-ready payload and maps log buffer" {
     try std.testing.expectEqual(@as(i32, 1001), pub_instance.stream_id);
     try std.testing.expectEqual(@as(i32, 0), pub_instance.publisher_limit_counter_id);
     try std.testing.expect(pub_instance.owns_log_buffer);
+}
+
+test "Aeron sendKeepaliveIfDue writes client keepalive command" {
+    const allocator = std.testing.allocator;
+
+    var ring_storage align(8) = [_]u8{0} ** 1024;
+    @memset(&ring_storage, 0);
+
+    var aeron = Aeron{
+        .ctx = .{},
+        .allocator = allocator,
+        .cnc_file = undefined,
+        .to_driver_ring_buffer = ipc.ring_buffer.ManyToOneRingBuffer.init(&ring_storage),
+        .to_clients_broadcast_receiver = undefined,
+        .counters_map = undefined,
+        .client_id = 33,
+        .last_keepalive_ms = 0,
+        .publications = .{},
+        .subscriptions = .{},
+        .pending_subscription_streams = .{},
+        .idle_strategy = ipc.idle_strategy.IdleStrategy.initBusySpin(),
+        .embedded_driver = null,
+    };
+    defer aeron.publications.deinit(allocator);
+    defer aeron.subscriptions.deinit(allocator);
+    defer aeron.pending_subscription_streams.deinit(allocator);
+
+    try std.testing.expectEqual(@as(i32, 1), aeron.sendKeepaliveIfDue());
+    try std.testing.expect(aeron.last_keepalive_ms != 0);
+
+    const Capture = struct {
+        msg_type: i32 = 0,
+        payload: []const u8 = "",
+    };
+    const handler = struct {
+        fn handle(msg_type_id: i32, data: []const u8, ctx: *anyopaque) void {
+            const capture: *Capture = @ptrCast(@alignCast(ctx));
+            capture.msg_type = msg_type_id;
+            capture.payload = data;
+        }
+    }.handle;
+
+    var capture = Capture{};
+    try std.testing.expectEqual(@as(i32, 1), aeron.to_driver_ring_buffer.read(handler, @ptrCast(&capture), 1));
+    try std.testing.expectEqual(driver.conductor.CMD_CLIENT_KEEPALIVE, capture.msg_type);
+    try std.testing.expectEqual(@as(usize, 8), capture.payload.len);
+    try std.testing.expectEqual(@as(i64, 33), std.mem.readInt(i64, capture.payload[0..8], .little));
+    try std.testing.expectEqual(@as(i32, 0), aeron.sendKeepaliveIfDue());
+}
+
+test "Aeron removePublication encodes upstream RemoveMessageFlyweight layout" {
+    const allocator = std.testing.allocator;
+
+    var ring_storage align(8) = [_]u8{0} ** 1024;
+    @memset(&ring_storage, 0);
+
+    var aeron = Aeron{
+        .ctx = .{},
+        .allocator = allocator,
+        .cnc_file = undefined,
+        .to_driver_ring_buffer = ipc.ring_buffer.ManyToOneRingBuffer.init(&ring_storage),
+        .to_clients_broadcast_receiver = undefined,
+        .counters_map = undefined,
+        .client_id = 11,
+        .last_keepalive_ms = std.time.milliTimestamp(),
+        .publications = .{},
+        .subscriptions = .{},
+        .pending_subscription_streams = .{},
+        .idle_strategy = ipc.idle_strategy.IdleStrategy.initBusySpin(),
+        .embedded_driver = null,
+    };
+    defer aeron.publications.deinit(allocator);
+    defer aeron.subscriptions.deinit(allocator);
+    defer aeron.pending_subscription_streams.deinit(allocator);
+
+    try aeron.removePublication(777);
+
+    const Capture = struct {
+        msg_type: i32 = 0,
+        payload: []const u8 = "",
+    };
+    const handler = struct {
+        fn handle(msg_type_id: i32, data: []const u8, ctx: *anyopaque) void {
+            const capture: *Capture = @ptrCast(@alignCast(ctx));
+            capture.msg_type = msg_type_id;
+            capture.payload = data;
+        }
+    }.handle;
+
+    var capture = Capture{};
+    try std.testing.expectEqual(@as(i32, 1), aeron.to_driver_ring_buffer.read(handler, @ptrCast(&capture), 1));
+    try std.testing.expectEqual(driver.conductor.CMD_REMOVE_PUBLICATION, capture.msg_type);
+    try std.testing.expectEqual(@as(usize, 24), capture.payload.len);
+    try std.testing.expectEqual(@as(i64, 11), std.mem.readInt(i64, capture.payload[0..8], .little));
+    try std.testing.expectEqual(@as(i64, 777), std.mem.readInt(i64, capture.payload[16..24], .little));
+}
+
+test "Aeron removeSubscription encodes upstream RemoveMessageFlyweight layout" {
+    const allocator = std.testing.allocator;
+
+    var ring_storage align(8) = [_]u8{0} ** 1024;
+    @memset(&ring_storage, 0);
+
+    var aeron = Aeron{
+        .ctx = .{},
+        .allocator = allocator,
+        .cnc_file = undefined,
+        .to_driver_ring_buffer = ipc.ring_buffer.ManyToOneRingBuffer.init(&ring_storage),
+        .to_clients_broadcast_receiver = undefined,
+        .counters_map = undefined,
+        .client_id = 13,
+        .last_keepalive_ms = std.time.milliTimestamp(),
+        .publications = .{},
+        .subscriptions = .{},
+        .pending_subscription_streams = .{},
+        .idle_strategy = ipc.idle_strategy.IdleStrategy.initBusySpin(),
+        .embedded_driver = null,
+    };
+    defer aeron.publications.deinit(allocator);
+    defer aeron.subscriptions.deinit(allocator);
+    defer aeron.pending_subscription_streams.deinit(allocator);
+
+    try aeron.removeSubscription(888);
+
+    const Capture = struct {
+        msg_type: i32 = 0,
+        payload: []const u8 = "",
+    };
+    const handler = struct {
+        fn handle(msg_type_id: i32, data: []const u8, ctx: *anyopaque) void {
+            const capture: *Capture = @ptrCast(@alignCast(ctx));
+            capture.msg_type = msg_type_id;
+            capture.payload = data;
+        }
+    }.handle;
+
+    var capture = Capture{};
+    try std.testing.expectEqual(@as(i32, 1), aeron.to_driver_ring_buffer.read(handler, @ptrCast(&capture), 1));
+    try std.testing.expectEqual(driver.conductor.CMD_REMOVE_SUBSCRIPTION, capture.msg_type);
+    try std.testing.expectEqual(@as(usize, 24), capture.payload.len);
+    try std.testing.expectEqual(@as(i64, 13), std.mem.readInt(i64, capture.payload[0..8], .little));
+    try std.testing.expectEqual(@as(i64, 888), std.mem.readInt(i64, capture.payload[16..24], .little));
 }
