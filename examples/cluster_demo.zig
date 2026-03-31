@@ -52,48 +52,43 @@ pub fn main() !void {
 
     // AERON: If no leader is found within the timeout, a node becomes a candidate and starts a ballot.
     now_ns = election_mod.STARTUP_CANVASS_TIMEOUT_NS + 1;
-    for (&nodes) |*n| _ = try n.doWork(now_ns);
-    for (0..3) |i| {
-        std.debug.print("  Node {d}: state={s}\n", .{ i, @tagName(nodes[i].electionState()) });
+    const deadline = now_ns + 10 * std.time.ns_per_s;
+    while (now_ns < deadline) {
+        for (&nodes) |*n| _ = try n.doWork(now_ns);
+        var leader_found = false;
+        for (0..3) |i| {
+            if (nodes[i].electionState() == .leader_ready) {
+                leader_found = true;
+                break;
+            }
+        }
+        if (leader_found) break;
+
+        // ZIG: Direct function calls simulate network messages between nodes.
+        // Simplified election progression for demo
+        for (0..3) |i| {
+            if (nodes[i].electionState() == .candidate_ballot) {
+                const term = nodes[i].election.candidate_term_id;
+                const log_term = nodes[i].election.leader_ship_term_id;
+                const log_pos = nodes[i].election.log_position;
+
+                for (0..3) |j| {
+                    if (i == j) continue;
+                    if (nodes[j].election.onRequestVote(term, log_term, log_pos, @intCast(i))) {
+                        nodes[i].election.onVote(term, @intCast(i), @intCast(j), true);
+                    }
+                }
+            }
+        }
+        now_ns += 1 * std.time.ns_per_ms;
     }
 
-    // ZIG: Direct function calls simulate network messages between nodes.
-    // AERON: Raft requires a majority of votes to win an election.
-    _ = nodes[1].election.onRequestVote(
-        nodes[0].election.candidate_term_id,
-        nodes[0].election.leader_ship_term_id,
-        nodes[0].election.log_position,
-        0, // candidate is node 0
-    );
-    _ = nodes[2].election.onRequestVote(
-        nodes[0].election.candidate_term_id,
-        nodes[0].election.leader_ship_term_id,
-        nodes[0].election.log_position,
-        0,
-    );
+    if (nodes[0].electionState() != .leader_ready and nodes[1].electionState() != .leader_ready and nodes[2].electionState() != .leader_ready) {
+        std.debug.print("Election failed to converge within timeout.\n", .{});
+        return;
+    }
 
-    // Node 0 receives the votes
-    nodes[0].election.onVote(nodes[0].election.candidate_term_id, 0, 1, true);
-    nodes[0].election.onVote(nodes[0].election.candidate_term_id, 0, 2, true);
-
-    // Tick — node 0 should become leader
-    now_ns += 1000;
-    for (&nodes) |*n| _ = try n.doWork(now_ns);
-
-    // AERON: Leader notifies followers of the new leadership term to synchronize their logs.
-    nodes[1].election.onNewLeadershipTerm(
-        nodes[0].election.leaderShipTermId(),
-        nodes[0].election.log_position,
-        0,
-        now_ns,
-    );
-    nodes[2].election.onNewLeadershipTerm(
-        nodes[0].election.leaderShipTermId(),
-        nodes[0].election.log_position,
-        0,
-        now_ns,
-    );
-    now_ns += 1000;
+    // Tick — ensure all nodes see the result
     for (&nodes) |*n| _ = try n.doWork(now_ns);
 
     std.debug.print("\n  Election result:\n", .{});

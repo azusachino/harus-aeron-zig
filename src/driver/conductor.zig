@@ -210,7 +210,8 @@ pub const DriverConductor = struct {
                 self.receiver.mutex.unlock();
 
                 // Notify clients via ON_UNAVAILABLE_IMAGE
-                self.sendImageClose(image.session_id, image.stream_id, 0); // TODO: find subscription registration id?
+                const registration_id = self.counters_map.getCounterRegistrationId(image.subscriber_position.counter_id);
+                self.sendImageClose(image.session_id, image.stream_id, registration_id);
 
                 // Cleanup image resources
                 var mutable_image = image;
@@ -348,6 +349,7 @@ pub const DriverConductor = struct {
                         sig.initial_term_id,
                         0,
                         @as(i32, @divTrunc(sig.term_length, 4)),
+                        0, // receiver_id = 0 for initial internal status
                     );
                     self.receiver.sendStatus(image) catch {};
 
@@ -378,6 +380,7 @@ pub const DriverConductor = struct {
                 status.consumption_term_id,
                 status.consumption_term_offset,
                 status.receiver_window,
+                status.receiver_id,
             );
             work += 1;
         }

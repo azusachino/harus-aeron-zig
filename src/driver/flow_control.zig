@@ -14,11 +14,12 @@ pub const FlowControl = union(enum) {
         receiver_window: i32,
         initial_term_id: i32,
         term_length: i32,
+        receiver_id: i64,
         now_ns: i64,
     ) i64 {
         return switch (self.*) {
             .unicast => |*fc| fc.onStatusMessage(consumption_term_id, consumption_term_offset, receiver_window, initial_term_id, term_length),
-            .min_multicast => |*fc| fc.onStatusMessage(session_id, stream_id, consumption_term_id, consumption_term_offset, receiver_window, initial_term_id, term_length, now_ns),
+            .min_multicast => |*fc| fc.onStatusMessage(session_id, stream_id, consumption_term_id, consumption_term_offset, receiver_window, initial_term_id, term_length, receiver_id, now_ns),
         };
     }
 
@@ -49,6 +50,7 @@ pub const MinMulticastFlowControl = struct {
     const ReceiverRecord = struct {
         receiver_id: i64,
         position: i64,
+        window: i32,
         last_activity_ns: i64,
     };
 
@@ -77,31 +79,76 @@ pub const MinMulticastFlowControl = struct {
         receiver_window: i32,
         initial_term_id: i32,
         term_length: i32,
+        receiver_id: i64,
         now_ns: i64,
     ) i64 {
-        _ = self;
         _ = session_id;
         _ = stream_id;
-        const receiver_id: i64 = 0; // TODO: handle receiver_id from STATUS message
         const receiver_position = @as(i64, consumption_term_id - initial_term_id) * term_length + consumption_term_offset;
-        const limit = receiver_position + receiver_window;
 
-        // For now, MinMulticast is just a placeholder that behaves like Unicast
-        // but tracks multiple receivers if we had receiver_id.
-        // Since we don't have receiver_id in our STATUS frame yet (it's in the spec but maybe not in our struct),
-        // we'll just treat it as single receiver for now.
-        _ = receiver_id;
-        _ = now_ns;
+        // Update or add receiver record
+        var found = false;
+        for (self.receivers.items) |*rec| {
+            if (rec.receiver_id == receiver_id) {
+                rec.position = receiver_position;
+                rec.window = receiver_window;
+                rec.last_activity_ns = now_ns;
+                found = true;
+                break;
+            }
+        }
 
-        return limit;
+        if (!found) {
+            self.receivers.append(self.allocator, .{
+                .receiver_id = receiver_id,
+                .position = receiver_position,
+                .window = receiver_window,
+                .last_activity_ns = now_ns,
+            }) catch {};
+        }
+
+        // MinMulticast limit is the minimum of all (position + window)
+        var min_limit: i64 = std.math.maxInt(i64);
+
+        for (self.receivers.items) |rec| {
+            const rec_limit = rec.position + rec.window;
+            if (rec_limit < min_limit) {
+                min_limit = rec_limit;
+            }
+        }
+
+        return if (self.receivers.items.len > 0) min_limit else receiver_position + receiver_window;
     }
 
     pub fn onIdle(self: *MinMulticastFlowControl, now_ns: i64, sender_limit: i64, sender_position: i64) i64 {
-        _ = self;
-        _ = now_ns;
-
-        _ = now_ns;
         _ = sender_position;
-        return sender_limit;
+        const deadline = now_ns - self.timeout_ns;
+        var i: usize = 0;
+        var changed = false;
+        while (i < self.receivers.items.len) {
+            if (self.receivers.items[i].last_activity_ns < deadline) {
+                _ = self.receivers.swapRemove(i);
+                changed = true;
+            } else {
+                i += 1;
+            }
+        }
+
+        if (self.receivers.items.len == 0) {
+            return sender_limit;
+        }
+
+        if (!changed) {
+            return sender_limit;
+        }
+
+        var min_limit: i64 = std.math.maxInt(i64);
+        for (self.receivers.items) |rec| {
+            const rec_limit = rec.position + rec.window;
+            if (rec_limit < min_limit) {
+                min_limit = rec_limit;
+            }
+        }
+        return min_limit;
     }
 };

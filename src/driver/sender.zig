@@ -394,6 +394,7 @@ pub const Sender = struct {
         consumption_term_id: i32,
         consumption_term_offset: i32,
         receiver_window: i32,
+        receiver_id: i64,
     ) void {
         // LESSON(sender): STATUS is the receiver-driven flow-control signal. The sender
         // translates the receiver's consumption position plus advertised window into a
@@ -408,6 +409,7 @@ pub const Sender = struct {
                     receiver_window,
                     publication.initial_term_id,
                     publication.log_buffer.term_length,
+                    receiver_id,
                     self.current_time_ms * std.time.ns_per_ms,
                 );
                 self.counters_map.set(publication.publisher_limit.counter_id, new_limit);
@@ -677,7 +679,7 @@ test "Sender: STATUS updates publisher limit" {
     };
     try sender.onAddPublication(&publication);
 
-    sender.onStatusMessage(7, 1001, 3, 1024, 4096);
+    sender.onStatusMessage(7, 1001, 3, 1024, 4096, 77);
     try std.testing.expectEqual(@as(i64, 5120), counters_map.get(pub_limit.counter_id));
     try std.testing.expect(log_buf.metaData().isConnected());
     try std.testing.expectEqual(@as(i32, 1), log_buf.metaData().activeTransportCount());

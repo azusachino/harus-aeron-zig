@@ -298,6 +298,7 @@ pub const MediaDriver = struct {
         work_count += self.conductor_agent.doWork();
         work_count += self.sender_agent.doWork();
         work_count += self.receiver_agent.doWork();
+
         if (self.cnc) |*c| {
             c.setDriverHeartbeat(std.time.milliTimestamp());
         }

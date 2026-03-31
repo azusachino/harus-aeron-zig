@@ -170,8 +170,8 @@ pub fn build(b: *std.Build) void {
             }),
         });
         exe.root_module.link_libc = true;
-        b.installArtifact(exe);
-        examples_step.dependOn(&exe.step);
+        const install_exe = b.addInstallArtifact(exe, .{});
+        examples_step.dependOn(&install_exe.step);
     }
     const demo_step = b.step("demo", "Run cluster demo");
     demo_step.dependOn(examples_step);

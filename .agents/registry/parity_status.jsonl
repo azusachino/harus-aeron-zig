@@ -1,0 +1,7 @@
+{"layer":"protocol","completeness_pct":98,"gaps":["EXT frame variant"],"reference":"vendor/aeron/aeron-client/src/main/c/protocol/aeron_udp_protocol.h","updated":"2026-03-31"}
+{"layer":"ipc","completeness_pct":92,"gaps":["multi-destination","advanced-keepalive"],"reference":"vendor/aeron/aeron-client/src/main/c/concurrent/","updated":"2026-03-31"}
+{"layer":"archive","completeness_pct":100,"gaps":[],"reference":"aeron-archive/","updated":"2026-03-31"}
+{"layer":"cluster","completeness_pct":90,"gaps":["snapshot-coordination","member-discovery"],"reference":"aeron-cluster/codecs/","updated":"2026-03-31"}
+{"layer":"uri","completeness_pct":98,"gaps":["wildcard endpoint substitution","full builder-format round-trip edge cases"],"reference":"vendor/aeron/aeron-client/src/main/java/io/aeron/ChannelUri.java","updated":"2026-03-31"}
+{"layer":"interop-smoke","completeness_pct":100,"gaps":[],"reference":"deploy/InteropSmoke.java + vendor/aeron/aeron-client/src/main/java/io/aeron/command/SubscriptionMessageFlyweight.java + vendor/aeron/aeron-client/src/main/java/io/aeron/command/SubscriptionReadyFlyweight.java","updated":"2026-03-31"}
+{"layer":"ci-readiness","completeness_pct":100,"gaps":[],"reference":"test/integration_test.zig + test/protocol/frame_codec_test.zig","updated":"2026-03-31"}

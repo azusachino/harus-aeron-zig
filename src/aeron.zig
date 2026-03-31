@@ -377,7 +377,7 @@ test "Aeron init and deinit" {
 test "Aeron addSubscription encodes upstream SubscriptionMessageFlyweight layout" {
     const allocator = std.testing.allocator;
 
-    var ring_storage align(8) = [_]u8{0} ** 512;
+    var ring_storage align(8) = [_]u8{0} ** 1024;
     @memset(&ring_storage, 0);
 
     var aeron = Aeron{
@@ -428,7 +428,7 @@ test "Aeron addSubscription encodes upstream SubscriptionMessageFlyweight layout
 test "Aeron addPublication encodes upstream PublicationMessageFlyweight layout" {
     const allocator = std.testing.allocator;
 
-    var ring_storage align(8) = [_]u8{0} ** 512;
+    var ring_storage align(8) = [_]u8{0} ** 1024;
     @memset(&ring_storage, 0);
 
     var aeron = Aeron{
@@ -488,7 +488,7 @@ test "Aeron doWork parses full publication-ready payload and maps log buffer" {
     var created = try logbuffer.LogBuffer.initMapped(allocator, 64 * 1024, log_path);
     created.deinit();
 
-    var ring_storage align(8) = [_]u8{0} ** 512;
+    var ring_storage align(8) = [_]u8{0} ** 1024;
     @memset(&ring_storage, 0);
 
     var bcast = try ipc.broadcast.BroadcastTransmitter.init(allocator, 1024);
@@ -549,7 +549,7 @@ test "Aeron doWork parses full publication-ready payload and maps log buffer" {
 test "Aeron sendKeepaliveIfDue writes client keepalive command" {
     const allocator = std.testing.allocator;
 
-    var ring_storage align(8) = [_]u8{0} ** 512;
+    var ring_storage align(8) = [_]u8{0} ** 1024;
     @memset(&ring_storage, 0);
 
     var aeron = Aeron{
@@ -597,7 +597,7 @@ test "Aeron sendKeepaliveIfDue writes client keepalive command" {
 test "Aeron removePublication encodes upstream RemoveMessageFlyweight layout" {
     const allocator = std.testing.allocator;
 
-    var ring_storage align(8) = [_]u8{0} ** 512;
+    var ring_storage align(8) = [_]u8{0} ** 1024;
     @memset(&ring_storage, 0);
 
     var aeron = Aeron{
@@ -644,7 +644,7 @@ test "Aeron removePublication encodes upstream RemoveMessageFlyweight layout" {
 test "Aeron removeSubscription encodes upstream RemoveMessageFlyweight layout" {
     const allocator = std.testing.allocator;
 
-    var ring_storage align(8) = [_]u8{0} ** 512;
+    var ring_storage align(8) = [_]u8{0} ** 1024;
     @memset(&ring_storage, 0);
 
     var aeron = Aeron{

@@ -31,12 +31,17 @@ pub fn main() !void {
 
     // ZIG: Embedded driver instance starts on this process.
     // AERON: The conductor agent will run on a separate thread by default.
-    const driver = try MediaDriver.create(allocator, .{ .aeron_dir = "/tmp/aeron-basic-example" });
-    defer driver.destroy();
-    std.debug.print("MediaDriver created at /tmp/aeron-basic-example\n", .{});
+    const aeron_dir = "/tmp/aeron-subscriber";
+    const driver = try MediaDriver.create(allocator, .{ .aeron_dir = aeron_dir });
+    try driver.start();
+    defer {
+        driver.close();
+        driver.destroy();
+    }
+    std.debug.print("MediaDriver started in background threads at {s}\n", .{aeron_dir});
 
     // ZIG: Aeron.init performs mmap and establishes shared memory IPC.
-    var client = try Aeron.init(allocator, .{ .aeron_dir = "/tmp/aeron-basic-example" });
+    var client = try Aeron.init(allocator, .{ .aeron_dir = aeron_dir });
     defer client.deinit();
     client.embedded_driver = driver;
 
@@ -47,10 +52,16 @@ pub fn main() !void {
 
     // ZIG: Wait for the Conductor to confirm subscription readiness.
     var subscription: ?*aeron.Subscription = null;
-    while (subscription == null) {
+    var timer_ready = try std.time.Timer.start();
+    while (subscription == null and timer_ready.read() < 10 * std.time.ns_per_s) {
         _ = client.doWork();
         subscription = client.getSubscription(registration_id);
         std.Thread.sleep(1 * std.time.ns_per_ms);
+    }
+
+    if (subscription == null) {
+        std.debug.print("Timed out waiting for subscription to be ready.\n", .{});
+        return;
     }
     std.debug.print("Subscription ready! Waiting for messages...\n\n", .{});
 
