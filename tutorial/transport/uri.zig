@@ -25,6 +25,7 @@ pub const AeronUri = struct {
     pub const ParseError = error{
         InvalidUri,
         InvalidMediaType,
+        InvalidParam,
     };
 
     pub fn parse(allocator: std.mem.Allocator, uri_str: []const u8) (ParseError || std.mem.Allocator.Error)!AeronUri {
@@ -172,10 +173,10 @@ test "AeronUri.parse: ipc channel has no endpoint" {
 }
 
 test "ControlMode.fromString: known values" {
-    try std.testing.expectEqual(ControlMode.dynamic, ControlMode.fromString("dynamic"));
-    try std.testing.expectEqual(ControlMode.manual, ControlMode.fromString("manual"));
+    try std.testing.expectEqual(AeronUri.ControlMode.dynamic, AeronUri.ControlMode.fromString("dynamic"));
+    try std.testing.expectEqual(AeronUri.ControlMode.manual, AeronUri.ControlMode.fromString("manual"));
 }
 
 test "ControlMode.fromString: unknown value returns null" {
-    try std.testing.expect(ControlMode.fromString("bogus") == null);
+    try std.testing.expect(AeronUri.ControlMode.fromString("bogus") == null);
 }

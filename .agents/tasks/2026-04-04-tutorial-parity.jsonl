@@ -1,0 +1,13 @@
+{"id":"T-01","description":"Create tutorial/logbuffer/log_buffer.zig stub","status":"done"}
+{"id":"T-02","description":"Create tutorial/logbuffer/metadata.zig stub","status":"done"}
+{"id":"T-03","description":"Create tutorial/logbuffer/term_appender.zig stub","status":"done"}
+{"id":"T-04","description":"Create tutorial/logbuffer/term_reader.zig stub","status":"done"}
+{"id":"T-05","description":"Create tutorial/ipc/ring_buffer.zig stub","status":"done"}
+{"id":"T-06","description":"Create tutorial/ipc/broadcast.zig stub","status":"done"}
+{"id":"T-07","description":"Create tutorial/ipc/counters.zig stub","status":"done"}
+{"id":"T-08","description":"Verify tutorial stubs compile via make tutorial-check","status":"done"}
+{"id":"T-09","description":"Enhance scripts/lesson-lint.sh to check for stub existence","status":"done"}
+{"id":"T-10","description":"Create missing stubs for Driver (Part 3)","status":"todo"}
+{"id":"T-11","description":"Create missing stubs for Client (Part 4)","status":"todo"}
+{"id":"T-12","description":"Create missing stubs for Archive (Part 5)","status":"todo"}
+{"id":"T-13","description":"Create missing stubs for Cluster (Part 6)","status":"todo"}
