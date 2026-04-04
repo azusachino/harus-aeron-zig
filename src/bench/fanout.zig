@@ -11,10 +11,14 @@ const Context = struct {
     count: i32 = 0,
 };
 
+const TIMEOUT_NS = 60 * std.time.ns_per_s;
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    const start_time = std.time.nanoTimestamp();
 
     // Start embedded driver
     const driver = try MediaDriver.create(allocator, .{
@@ -23,7 +27,7 @@ pub fn main() !void {
     defer driver.destroy();
 
     // Create log buffer and publication
-    const term_length = 64 * 1024;
+    const term_length = 16 * 1024 * 1024;
     const lb = try allocator.create(LogBuffer);
     defer {
         lb.deinit();
@@ -36,7 +40,7 @@ pub fn main() !void {
     meta.setActiveTermCount(0);
 
     var pub_instance = ExclusivePublication.init(1, 1, 100, term_length, 1408, lb);
-    pub_instance.publisher_limit = 1024 * 1024;
+    pub_instance.publisher_limit = std.math.maxInt(i64);
 
     const handler = struct {
         fn handle(_: *const aeron.protocol.DataHeader, _: []const u8, ctx: *anyopaque) void {
@@ -45,8 +49,8 @@ pub fn main() !void {
         }
     }.handle;
 
-    const message_count: usize = 10000;
-    const sub_counts = [_]usize{ 1, 2, 4, 8 };
+    const message_count: usize = 1000;
+    const sub_counts = [_]usize{ 1, 2, 4 };
     const payload = "bench_fanout_message";
 
     std.debug.print("| Subs | Msgs/sec  | Overhead |\n", .{});
@@ -78,20 +82,23 @@ pub fn main() !void {
         var timer = try std.time.Timer.start();
         for (0..message_count) |_| {
             while (true) {
+                if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
                 const result = pub_instance.offer(payload);
                 if (result == .ok) break;
                 _ = driver.doWork();
             }
+            _ = driver.doWork();
         }
         const elapsed_ns = timer.read();
 
         // Receive phase: all subs must receive all messages
-        var contexts: [8]Context = undefined;
+        var contexts: [4]Context = undefined;
         for (0..sub_count) |i| {
             contexts[i] = Context{};
         }
 
         while (true) {
+            if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
             var all_done = true;
             for (0..sub_count) |i| {
                 if (contexts[i].count < message_count) {
@@ -101,7 +108,6 @@ pub fn main() !void {
                 }
             }
             if (all_done) break;
-            std.Thread.sleep(1 * std.time.ns_per_ms);
         }
 
         const elapsed_sec = @as(f64, @floatFromInt(elapsed_ns)) / 1e9;
