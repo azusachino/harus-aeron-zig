@@ -12,6 +12,7 @@ pub const Image = struct {
     log_buffer: *logbuffer.LogBuffer,
     subscriber_position: i64,
     is_eos: bool,
+    owns_log_buffer: bool = false,
 
     pub fn init(session_id: i32, stream_id: i32, initial_term_id: i32, log_buffer: *logbuffer.LogBuffer) Image {
         return .{
@@ -22,7 +23,15 @@ pub const Image = struct {
             .log_buffer = log_buffer,
             .subscriber_position = 0,
             .is_eos = false,
+            .owns_log_buffer = false,
         };
+    }
+
+    pub fn deinit(self: *Image, allocator: std.mem.Allocator) void {
+        if (self.owns_log_buffer) {
+            self.log_buffer.deinit();
+            allocator.destroy(self.log_buffer);
+        }
     }
 
     pub fn poll(self: *Image, handler: term_reader.FragmentHandler, ctx: *anyopaque, fragment_limit: i32) i32 {
@@ -37,9 +46,6 @@ pub const Image = struct {
         const result = term_reader.TermReader.read(term_buffer, term_offset, handler, ctx, fragment_limit);
 
         const read_bytes = result.offset - term_offset;
-        if (result.fragments_read > 0) {
-            std.debug.print("[IMAGE] poll: partition={d} term_offset={d} fragments={d} read_bytes={d} new_pos={d}\n", .{ partition, term_offset, result.fragments_read, read_bytes, self.subscriber_position + read_bytes });
-        }
         self.subscriber_position += read_bytes;
 
         return result.fragments_read;

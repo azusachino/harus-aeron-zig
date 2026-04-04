@@ -1,0 +1,5 @@
+{"id":"T-15","description":"Implement EXT (Extended) Frame Variant","status":"done"}
+{"id":"T-16","description":"Implement IPC Multi-destination Support","status":"done"}
+{"id":"T-17","description":"Complete Snapshot Coordination state machine","status":"done"}
+{"id":"T-18","description":"Implement Dynamic Member Discovery","status":"done"}
+{"id":"T-19","description":"Automate Performance Benchmarking in CI","status":"todo"}

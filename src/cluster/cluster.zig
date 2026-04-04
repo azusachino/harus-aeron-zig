@@ -165,6 +165,11 @@ pub const ConsensusModule = struct {
         return self.conductor.pollResponses(handler);
     }
 
+    /// Add a discovered cluster member.
+    pub fn onDiscoveryMessage(self: *ConsensusModule, member_id: i32) !void {
+        try self.election.onDiscoveryMessage(member_id);
+    }
+
     /// Refresh follower state from the current leader without changing local member identity.
     pub fn catchUpFromLeader(self: *ConsensusModule, leader: *const ConsensusModule, now_ns: i64) !void {
         self.election.onLeaderHeartbeat(
@@ -178,7 +183,7 @@ pub const ConsensusModule = struct {
 
     /// Capture restart state for the consensus module.
     pub fn captureState(self: *const ConsensusModule, allocator: std.mem.Allocator) !ConsensusModuleState {
-        const members = try allocator.dupe(election_mod.MemberState, self.election.cluster_members);
+        const members = try allocator.dupe(election_mod.MemberState, self.election.cluster_members.items);
         errdefer allocator.free(members);
 
         return .{
@@ -199,7 +204,7 @@ pub const ConsensusModule = struct {
 
     /// Restore a previously captured restart state.
     pub fn restoreState(self: *ConsensusModule, state: *const ConsensusModuleState) !void {
-        if (state.election.cluster_members.len != self.election.cluster_members.len) {
+        if (state.election.cluster_members.len != self.election.cluster_members.items.len) {
             return error.ClusterMembershipMismatch;
         }
 
@@ -211,7 +216,8 @@ pub const ConsensusModule = struct {
         self.election.log_position = state.election.log_position;
         self.election.election_deadline_ns = state.election.election_deadline_ns;
         self.election.votes_received = state.election.votes_received;
-        @memcpy(self.election.cluster_members, state.election.cluster_members);
+        @memcpy(self.election.cluster_members.items, state.election.cluster_members);
+
         try self.conductor.restoreState(&state.conductor);
     }
 
@@ -619,6 +625,26 @@ test "ConsensusModule follower catch up preserves progress through failover" {
 
     try std.testing.expectEqualSlices(u8, "failover", follower.conductor.log.entryAt(0).?.data);
     try std.testing.expectEqualSlices(u8, "resume", follower.conductor.log.entryAt(8).?.data);
+}
+
+test "ConsensusModule dynamic member discovery" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Start with 1 node
+    var module = try ConsensusModule.init(allocator, .{ .member_id = 0 });
+    defer module.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), module.election.cluster_members.items.len);
+
+    // Discover two more nodes
+    try module.onDiscoveryMessage(1);
+    try module.onDiscoveryMessage(2);
+
+    try std.testing.expectEqual(@as(usize, 3), module.election.cluster_members.items.len);
+    try std.testing.expectEqual(@as(i32, 1), module.election.cluster_members.items[1].member_id);
+    try std.testing.expectEqual(@as(i32, 2), module.election.cluster_members.items[2].member_id);
 }
 
 test "ConsensusModule state round trip survives restart" {

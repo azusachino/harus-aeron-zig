@@ -163,6 +163,27 @@ pub const ResolutionEntry = extern struct {
     pub const HEADER_LENGTH = 16;
 };
 
+/// Extension frame header — 12 bytes total
+pub const ExtensionHeader = extern struct {
+    frame_length: i32,
+    version: u8,
+    flags: u8,
+    type: u16,
+    header_length: u16,
+    extension_type: u16,
+
+    pub const LENGTH = @sizeOf(ExtensionHeader);
+    pub const IGNORE_FLAG: u16 = 0x8000;
+
+    pub fn length(self: *const ExtensionHeader) u16 {
+        return self.header_length & ~IGNORE_FLAG;
+    }
+
+    pub fn isIgnorable(self: *const ExtensionHeader) bool {
+        return (self.header_length & IGNORE_FLAG) != 0;
+    }
+};
+
 /// Returns (data_length + DataHeader.LENGTH) rounded up to FRAME_ALIGNMENT (32).
 pub fn alignedLength(data_length: usize) usize {
     return (data_length + DataHeader.LENGTH + (FRAME_ALIGNMENT - 1)) & ~(FRAME_ALIGNMENT - 1);
@@ -218,7 +239,10 @@ pub const DecodedFrame = union(FrameType) {
     ats_setup: *const SetupHeader,
     ats_status: *const StatusMessage,
     response_setup: *const ResponseSetupHeader,
-    ext: void,
+    ext: struct {
+        header: *const ExtensionHeader,
+        payload: []const u8,
+    },
 };
 
 /// Decode the first Aeron frame from `buf`.
@@ -302,7 +326,12 @@ pub fn decode(buf: []const u8) DecodeError!DecodedFrame {
             if (@as(usize, @intCast(frame_len)) < ResponseSetupHeader.LENGTH) return DecodeError.BufferTooShort;
             return .{ .response_setup = @as(*const ResponseSetupHeader, @ptrCast(@alignCast(buf.ptr))) };
         },
-        .ext => return DecodeError.UnknownFrameType,
+        .ext => {
+            if (@as(usize, @intCast(frame_len)) < ExtensionHeader.LENGTH) return DecodeError.BufferTooShort;
+            const ext_hdr = @as(*const ExtensionHeader, @ptrCast(@alignCast(buf.ptr)));
+            const payload = buf[ExtensionHeader.LENGTH..@as(usize, @intCast(frame_len))];
+            return .{ .ext = .{ .header = ext_hdr, .payload = payload } };
+        },
     }
 }
 
@@ -468,6 +497,25 @@ test "decode: decodes DATA frame" {
     try std.testing.expectEqual(FrameType.data, std.meta.activeTag(frame));
     try std.testing.expectEqual(@as(i32, 42), frame.data.header.session_id);
     try std.testing.expectEqualSlices(u8, payload_str, frame.data.payload);
+}
+
+test "decode: decodes EXT frame with payload" {
+    var buf align(8) = [_]u8{0} ** 64;
+    const payload_str = "secret";
+    const total_len = ExtensionHeader.LENGTH + payload_str.len;
+    std.mem.writeInt(i32, buf[0..4], @as(i32, @intCast(total_len)), .little);
+    buf[4] = VERSION;
+    std.mem.writeInt(u16, buf[6..8], @intFromEnum(FrameType.ext), .little);
+    std.mem.writeInt(u16, buf[8..10], @as(u16, @intCast(payload_str.len)) | ExtensionHeader.IGNORE_FLAG, .little);
+    std.mem.writeInt(u16, buf[10..12], 0x1234, .little); // extension_type
+    @memcpy(buf[ExtensionHeader.LENGTH..][0..payload_str.len], payload_str);
+
+    const frame = try decode(&buf);
+    try std.testing.expectEqual(FrameType.ext, std.meta.activeTag(frame));
+    try std.testing.expectEqual(@as(u16, 0x1234), frame.ext.header.extension_type);
+    try std.testing.expectEqual(@as(u16, payload_str.len), frame.ext.header.length());
+    try std.testing.expect(frame.ext.header.isIgnorable());
+    try std.testing.expectEqualSlices(u8, payload_str, frame.ext.payload);
 }
 
 test "decode: decodes ATS_DATA frame using data layout" {
