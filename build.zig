@@ -137,11 +137,9 @@ pub fn build(b: *std.Build) void {
     test_scenarios_step.dependOn(test_cluster_step);
 
     // Tutorial compile-check
-    const chapter = b.option(u32, "chapter", "Active tutorial chapter (default: 0 = compile check only)") orelse 0;
-    _ = chapter;
     const tutorial_check = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("tutorial/protocol/frame.zig"),
+            .root_source_file = b.path("tutorial/test_all.zig"),
             .target = target,
             .optimize = optimize,
         }),

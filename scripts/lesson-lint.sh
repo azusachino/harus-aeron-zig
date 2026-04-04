@@ -46,10 +46,30 @@ while IFS= read -r slug; do
     fi
 done <<< "$SLUGS"
 
+# Phase 2: Verify that for every file in src/ with a LESSON, a corresponding file exists in tutorial/
+while read -r line; do
+    [ -z "$line" ] && continue
+
+    file=$(echo "$line" | cut -d: -f1)
+    # Get relative path from src/
+    rel_path=${file#$PROJECT_ROOT/src/}
+    
+    # Special case: src/aeron.zig doesn't have a tutorial stub yet (Part 4)
+    if [[ "$rel_path" == "aeron.zig" ]]; then continue; fi
+    # Special case: src/tools/* are utilities, not core course material
+    if [[ "$rel_path" == tools/* ]]; then continue; fi
+
+    tutorial_file="$PROJECT_ROOT/tutorial/$rel_path"
+    if [ ! -f "$tutorial_file" ]; then
+        echo "MISSING STUB: src/$rel_path has LESSON but tutorial/$rel_path is missing"
+        ERRORS=$((ERRORS + 1))
+    fi
+done <<< "$(grep -rl "// LESSON(" "$PROJECT_ROOT/src/" 2>/dev/null)"
+
 if [ "$ERRORS" -gt 0 ]; then
     echo ""
-    echo "ERROR: $ERRORS LESSON slug(s) have no matching tutorial doc" >&2
+    echo "ERROR: Found $ERRORS structural inconsistency(ies)" >&2
     exit 1
 fi
 
-echo "lesson-lint: all $SLUG_COUNT LESSON slug(s) verified OK"
+echo "lesson-lint: all $SLUG_COUNT LESSON slug(s) and tutorial stubs verified OK"
