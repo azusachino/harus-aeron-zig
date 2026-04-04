@@ -14,6 +14,19 @@ comptime {
     _ = @import("transport/udp_channel.zig");
     _ = @import("transport/endpoint.zig");
     _ = @import("transport/poller.zig");
+    _ = @import("driver/media_driver.zig");
+    _ = @import("driver/sender.zig");
+    _ = @import("driver/receiver.zig");
     _ = @import("driver/conductor.zig");
     _ = @import("driver/cnc.zig");
+    _ = @import("publication.zig");
+    _ = @import("subscription.zig");
+    _ = @import("archive/protocol.zig");
+    _ = @import("archive/catalog.zig");
+    _ = @import("archive/recorder.zig");
+    _ = @import("archive/replayer.zig");
+    _ = @import("archive/conductor.zig");
+    _ = @import("cluster/protocol.zig");
+    _ = @import("cluster/election.zig");
+    _ = @import("cluster/log.zig");
 }
