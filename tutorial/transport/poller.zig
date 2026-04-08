@@ -1,3 +1,9 @@
+// EXERCISE: Chapter 2.5 — UDP Poller
+// Reference: docs/tutorial/02-data-path/05-poller.md
+//
+// Your task: implement `Poller.add` and `Poller.poll` logic.
+// Run `make tutorial-check` to verify your solution.
+
 const std = @import("std");
 const ReceiveChannelEndpoint = @import("endpoint.zig").ReceiveChannelEndpoint;
 
@@ -8,46 +14,27 @@ pub const Poller = struct {
 
     pub fn init(allocator: std.mem.Allocator) Poller {
         return .{
-            .fds = .{
-                .items = &.{},
-                .capacity = 0,
-            },
-            .endpoints = .{
-                .items = &.{},
-                .capacity = 0,
-            },
+            .fds = std.ArrayList(std.posix.pollfd).init(allocator),
+            .endpoints = std.ArrayList(*ReceiveChannelEndpoint).init(allocator),
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *Poller) void {
-        self.fds.deinit(self.allocator);
-        self.endpoints.deinit(self.allocator);
+        self.fds.deinit();
+        self.endpoints.deinit();
     }
 
     pub fn add(self: *Poller, fd: std.posix.fd_t, endpoint: *ReceiveChannelEndpoint) !void {
-        try self.fds.append(self.allocator, .{
-            .fd = fd,
-            .events = std.posix.POLL.IN,
-            .revents = 0,
-        });
-        try self.endpoints.append(self.allocator, endpoint);
-    }
-
-    pub fn remove(self: *Poller, fd: std.posix.fd_t) void {
-        for (self.fds.items, 0..) |pfd, i| {
-            if (pfd.fd == fd) {
-                _ = self.fds.swapRemove(i);
-                _ = self.endpoints.swapRemove(i);
-                return;
-            }
-        }
+        _ = fd;
+        _ = endpoint;
+        @panic("TODO: implement Poller.add");
     }
 
     pub fn poll(self: *Poller, timeout_ms: i32) i32 {
-        if (self.fds.items.len == 0) return 0;
-        const ready_count = std.posix.poll(self.fds.items, timeout_ms) catch return 0;
-        return @intCast(ready_count);
+        _ = self;
+        _ = timeout_ms;
+        @panic("TODO: implement Poller.poll");
     }
 
     pub fn readyFds(self: *const Poller) []const std.posix.pollfd {
@@ -55,7 +42,7 @@ pub const Poller = struct {
     }
 };
 
-test "Poller.init: starts with no ready fds" {
+test "Poller.init" {
     var p = Poller.init(std.testing.allocator);
     defer p.deinit();
     try std.testing.expectEqual(@as(usize, 0), p.readyFds().len);

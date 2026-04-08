@@ -2,4 +2,7 @@
 {"id":"T-16","description":"Implement IPC Multi-destination Support","status":"done"}
 {"id":"T-17","description":"Complete Snapshot Coordination state machine","status":"done"}
 {"id":"T-18","description":"Implement Dynamic Member Discovery","status":"done"}
-{"id":"T-19","description":"Automate Performance Benchmarking in CI","status":"todo"}
+{"id":"T-19","description":"Automate Performance Benchmarking in CI","status":"done"}
+{"id":"T-20","description":"Implement URI Wildcard Substitution (endpoint=*:*)","status":"done"}
+{"id":"T-21","description":"Upgrade lesson-lint.sh for stub quality (EXERCISE markers)","status":"done"}
+{"id":"T-22","description":"Add Cluster Snapshot Stress Integration Tests","status":"done"}

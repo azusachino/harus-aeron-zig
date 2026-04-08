@@ -86,7 +86,15 @@ pub const UdpChannel = struct {
             var port = default_port;
             if (close + 1 < address_str.len) {
                 if (address_str[close + 1] != ':') return error.InvalidAddress;
-                port = try std.fmt.parseInt(u16, address_str[close + 2 ..], 10);
+                const port_str = address_str[close + 2 ..];
+                if (std.mem.eql(u8, port_str, "*")) {
+                    port = 0;
+                } else {
+                    port = try std.fmt.parseInt(u16, port_str, 10);
+                }
+            }
+            if (std.mem.eql(u8, host, "*")) {
+                return std.net.Address.initIp6(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, port, 0, 0);
             }
             return resolveHost(host, port);
         }
@@ -97,7 +105,13 @@ pub const UdpChannel = struct {
             }
 
             const host = address_str[0..colon];
-            const port = try std.fmt.parseInt(u16, address_str[colon + 1 ..], 10);
+            const port_str = address_str[colon + 1 ..];
+            var port: u16 = 0;
+            if (std.mem.eql(u8, port_str, "*")) {
+                port = 0;
+            } else {
+                port = try std.fmt.parseInt(u16, port_str, 10);
+            }
             return resolveHost(host, port);
         }
 
@@ -112,6 +126,9 @@ pub const UdpChannel = struct {
     }
 
     fn resolveHost(host: []const u8, port: u16) !std.net.Address {
+        if (std.mem.eql(u8, host, "*")) {
+            return std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
+        }
         if (std.mem.eql(u8, host, "localhost")) {
             return std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
         }
@@ -211,4 +228,36 @@ test "UdpChannel: parse IPv6 endpoint and subnet-qualified interface" {
     try std.testing.expectEqual(std.posix.AF.INET6, channel.local_address.?.any.family);
     try std.testing.expectEqual(@as(u16, 40456), channel.endpoint.?.getPort());
     try std.testing.expectEqual(@as(u8, 16), channel.ttl.?);
+}
+
+test "UdpChannel: parse wildcard endpoint" {
+    const allocator = std.testing.allocator;
+    var channel = try UdpChannel.parse(allocator, "aeron:udp?endpoint=*:*");
+    defer channel.deinit(allocator);
+
+    try std.testing.expect(channel.endpoint != null);
+    try std.testing.expectEqual(@as(u16, 0), channel.endpoint.?.getPort());
+    const addr = channel.endpoint.?.in.sa.addr;
+    try std.testing.expectEqual(@as(u32, 0), std.mem.bigToNative(u32, addr));
+}
+
+test "UdpChannel: parse wildcard port" {
+    const allocator = std.testing.allocator;
+    var channel = try UdpChannel.parse(allocator, "aeron:udp?endpoint=127.0.0.1:*");
+    defer channel.deinit(allocator);
+
+    try std.testing.expect(channel.endpoint != null);
+    try std.testing.expectEqual(@as(u16, 0), channel.endpoint.?.getPort());
+    const addr = channel.endpoint.?.in.sa.addr;
+    try std.testing.expectEqual(@as(u32, 0x7f000001), std.mem.bigToNative(u32, addr));
+}
+
+test "UdpChannel: parse IPv6 wildcard" {
+    const allocator = std.testing.allocator;
+    var channel = try UdpChannel.parse(allocator, "aeron:udp?endpoint=[*]:*");
+    defer channel.deinit(allocator);
+
+    try std.testing.expect(channel.endpoint != null);
+    try std.testing.expectEqual(std.posix.AF.INET6, channel.endpoint.?.any.family);
+    try std.testing.expectEqual(@as(u16, 0), channel.endpoint.?.getPort());
 }

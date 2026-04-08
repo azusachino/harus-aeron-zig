@@ -358,7 +358,7 @@ pub const ClusterConductor = struct {
 
     /// Handle snapshot_begin command.
     /// Mark snapshot in progress — services must take snapshot before cluster proceeds.
-    fn handleSnapshotBegin(self: *ClusterConductor, cmd: SnapshotBeginCmd) !void {
+    pub fn handleSnapshotBegin(self: *ClusterConductor, cmd: SnapshotBeginCmd) !void {
         _ = cmd;
         self.snapshot_state = .taking;
         // In a full implementation, this would trigger the serialization of
@@ -367,7 +367,7 @@ pub const ClusterConductor = struct {
 
     /// Handle snapshot_end command.
     /// Snapshot complete — cluster may resume normal operation.
-    fn handleSnapshotEnd(self: *ClusterConductor, cmd: SnapshotEndCmd) !void {
+    pub fn handleSnapshotEnd(self: *ClusterConductor, cmd: SnapshotEndCmd) !void {
         _ = cmd;
         self.snapshot_state = .completed;
     }
