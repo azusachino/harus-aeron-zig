@@ -10,13 +10,16 @@ const FragmentHandler = aeron.logbuffer.term_reader.FragmentHandler;
 const Context = struct {
     count: usize = 0,
     latencies: []u64 = undefined,
-    allocator: std.mem.Allocator = undefined,
 };
+
+const TIMEOUT_NS = 60 * std.time.ns_per_s;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    const start_time = std.time.nanoTimestamp();
 
     // Start embedded driver
     const driver = try MediaDriver.create(allocator, .{
@@ -25,7 +28,7 @@ pub fn main() !void {
     defer driver.destroy();
 
     // Create log buffer and publication
-    const term_length = 64 * 1024;
+    const term_length = 16 * 1024 * 1024;
     const lb = try allocator.create(LogBuffer);
     defer {
         lb.deinit();
@@ -38,7 +41,7 @@ pub fn main() !void {
     meta.setActiveTermCount(0);
 
     var pub_instance = ExclusivePublication.init(1, 1, 100, term_length, 1408, lb);
-    pub_instance.publisher_limit = 1024 * 1024;
+    pub_instance.publisher_limit = std.math.maxInt(i64);
 
     // Create subscription and image
     var sub = try Subscription.init(allocator, 1, "aeron:ipc");
@@ -49,20 +52,19 @@ pub fn main() !void {
     img.* = Image.init(1, 1, 100, lb);
     try sub.addImage(img);
 
-    const message_count: usize = 10000;
+    const message_count: usize = 1000;
     const latencies = try allocator.alloc(u64, message_count);
     defer allocator.free(latencies);
 
     var context = Context{
         .latencies = latencies,
-        .allocator = allocator,
     };
 
     const handler = struct {
         fn handle(_: *const aeron.protocol.DataHeader, data: []const u8, ctx: *anyopaque) void {
             if (data.len < 8) return;
             const c = @as(*Context, @ptrCast(@alignCast(ctx)));
-            const sent_ts = std.mem.bytesAsValue(i64, data[0..8]).*;
+            const sent_ts = std.mem.readInt(i64, data[0..8], .little);
             const now = @as(i64, @intCast(std.time.nanoTimestamp()));
             const latency = @as(u64, @intCast(now - sent_ts));
             if (c.count < c.latencies.len) {
@@ -72,30 +74,31 @@ pub fn main() !void {
         }
     }.handle;
 
-    // Send timestamps in payload
     std.debug.print("Measuring round-trip latency for {d} messages...\n", .{message_count});
 
-    for (0..message_count) |_| {
+    for (0..message_count) |i| {
+        if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
         const now = @as(i64, @intCast(std.time.nanoTimestamp()));
         var payload: [16]u8 = undefined;
         std.mem.writeInt(i64, payload[0..8], now, .little);
-        std.mem.writeInt(i64, payload[8..16], 0, .little);
+        std.mem.writeInt(i64, payload[8..16], @as(i64, @intCast(i)), .little);
 
         while (true) {
+            if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
             const result = pub_instance.offer(&payload);
             if (result == .ok) break;
             _ = driver.doWork();
+            _ = sub.poll(handler, &context, 10);
         }
+        _ = driver.doWork();
+        _ = sub.poll(handler, &context, 10);
     }
 
-    // Collect latencies
-    context.count = 0;
+    // Collect remaining latencies
     while (context.count < message_count) {
+        if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
         _ = driver.doWork();
         _ = sub.poll(handler, &context, 100);
-        if (context.count < message_count) {
-            std.Thread.sleep(1 * std.time.ns_per_ms);
-        }
     }
 
     // Sort latencies

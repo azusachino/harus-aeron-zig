@@ -79,11 +79,9 @@ pub const Election = struct {
     /// Deadline (in nanoseconds) for current election phase
     election_deadline_ns: i64,
     /// All cluster members with their state
-    cluster_members: []MemberState,
+    cluster_members: std.ArrayListUnmanaged(MemberState),
     /// Count of votes received in current ballot
     votes_received: u32,
-    /// Total cluster size
-    cluster_size: u32,
     /// Memory allocator for heap allocations
     allocator: std.mem.Allocator,
 
@@ -92,14 +90,18 @@ pub const Election = struct {
     // =========================================================================
 
     /// Initialize a new Election state machine.
-    /// Allocates cluster_members array and sets initial state to init.
-    pub fn init(allocator: std.mem.Allocator, member_id: i32, cluster_size: u32) !Election {
-        const members = try allocator.alloc(MemberState, cluster_size);
-        for (members, 0..) |*member, idx| {
-            member.member_id = @intCast(idx);
-            member.log_position = 0;
-            member.leader_ship_term_id = 0;
-            member.is_vote_granted = false;
+    pub fn init(allocator: std.mem.Allocator, member_id: i32, initial_cluster_size: u32) !Election {
+        var members = std.ArrayListUnmanaged(MemberState){};
+        errdefer members.deinit(allocator);
+
+        var i: u32 = 0;
+        while (i < initial_cluster_size) : (i += 1) {
+            try members.append(allocator, .{
+                .member_id = @intCast(i),
+                .log_position = 0,
+                .leader_ship_term_id = 0,
+                .is_vote_granted = false,
+            });
         }
 
         return Election{
@@ -112,14 +114,13 @@ pub const Election = struct {
             .election_deadline_ns = 0,
             .cluster_members = members,
             .votes_received = 0,
-            .cluster_size = cluster_size,
             .allocator = allocator,
         };
     }
 
     /// Free allocated resources.
     pub fn deinit(self: *Election) void {
-        self.allocator.free(self.cluster_members);
+        self.cluster_members.deinit(self.allocator);
     }
 
     // =========================================================================
@@ -312,13 +313,23 @@ pub const Election = struct {
         log_position: i64,
         follower_member_id: i32,
     ) void {
-        if (follower_member_id >= 0 and follower_member_id < @as(i32, @intCast(self.cluster_size))) {
-            const idx = @as(usize, @intCast(follower_member_id));
-            if (idx < self.cluster_members.len) {
-                self.cluster_members[idx].leader_ship_term_id = log_leader_ship_term_id;
-                self.cluster_members[idx].log_position = log_position;
+        for (self.cluster_members.items) |*member| {
+            if (member.member_id == follower_member_id) {
+                member.leader_ship_term_id = log_leader_ship_term_id;
+                member.log_position = log_position;
+                return;
             }
         }
+    }
+
+    /// Add a new member to the cluster if not already present.
+    pub fn onDiscoveryMessage(self: *Election, member_id: i32) !void {
+        for (self.cluster_members.items) |member| {
+            if (member.member_id == member_id) return;
+        }
+        try self.cluster_members.append(self.allocator, .{
+            .member_id = member_id,
+        });
     }
 
     // =========================================================================
@@ -327,11 +338,19 @@ pub const Election = struct {
 
     /// Check if we have reached quorum threshold.
     fn hasQuorum(self: *const Election) bool {
-        return self.votes_received > (self.cluster_size / 2);
+        return self.votes_received >= self.quorumThreshold();
     }
 
-    /// Calculate quorum threshold for given cluster size.
-    fn quorumThreshold(cluster_size: u32) u32 {
+    /// Calculate quorum threshold for current cluster size.
+    fn quorumThreshold(self: *const Election) u32 {
+        const size = self.cluster_members.items.len;
+        if (size == 0) return 1;
+        return @as(u32, @intCast(@divTrunc(size, 2))) + 1;
+    }
+
+    /// Static version for given size.
+    fn calculateQuorumThreshold(cluster_size: u32) u32 {
+        if (cluster_size == 0) return 1;
         return (cluster_size / 2) + 1;
     }
 };
@@ -355,11 +374,11 @@ test "election init" {
 
 test "quorum threshold" {
     // 3-node cluster: threshold should be 2
-    const threshold_3 = Election.quorumThreshold(3);
+    const threshold_3 = Election.calculateQuorumThreshold(3);
     try std.testing.expectEqual(@as(u32, 2), threshold_3);
 
     // 5-node cluster: threshold should be 3
-    const threshold_5 = Election.quorumThreshold(5);
+    const threshold_5 = Election.calculateQuorumThreshold(5);
     try std.testing.expectEqual(@as(u32, 3), threshold_5);
 }
 

@@ -116,7 +116,7 @@ pub fn build(b: *std.Build) void {
     // Scenario tests — cluster layer
     const test_cluster = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("test/cluster/election_test.zig"),
+            .root_source_file = b.path("test/cluster/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{

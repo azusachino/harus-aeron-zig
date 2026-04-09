@@ -66,6 +66,18 @@ while read -r line; do
     fi
 done <<< "$(grep -rl "// LESSON(" "$PROJECT_ROOT/src/" 2>/dev/null)"
 
+# Phase 3: Verify that tutorial stubs contain EXERCISE: or @panic("TODO")
+while read -r tutorial_file; do
+    [ -z "$tutorial_file" ] && continue
+    # Skip test_all.zig as it's a runner
+    if [[ "$tutorial_file" == *"test_all.zig" ]]; then continue; fi
+
+    if ! grep -qE "EXERCISE:|@panic\(\"TODO\"\)" "$tutorial_file"; then
+        echo "NOT A STUB: $tutorial_file does not contain 'EXERCISE:' or '@panic(\"TODO\")'"
+        ERRORS=$((ERRORS + 1))
+    fi
+done <<< "$(find "$PROJECT_ROOT/tutorial" -type f -name "*.zig" 2>/dev/null)"
+
 if [ "$ERRORS" -gt 0 ]; then
     echo ""
     echo "ERROR: Found $ERRORS structural inconsistency(ies)" >&2

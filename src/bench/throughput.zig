@@ -11,6 +11,8 @@ const Context = struct {
     count: i32 = 0,
 };
 
+const TIMEOUT_NS = 60 * std.time.ns_per_s;
+
 fn resetLogBuffer(initial_term_id: i32, lb: *LogBuffer, publication: *ExclusivePublication, img: *Image) void {
     @memset(lb.termBuffer(0), 0);
 
@@ -28,14 +30,14 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
+    var start_time = std.time.nanoTimestamp();
+
     // Start embedded driver
     const driver = try MediaDriver.create(allocator, .{
         .ipc_term_buffer_length = 64 * 1024,
     });
     defer driver.destroy();
 
-    // Create log buffer and publication. This is a simplified benchmark that reuses a single term.
-    // To avoid stalling when the term fills, we reset the term once all sent messages are drained.
     const term_length = 16 * 1024 * 1024;
     const lb = try allocator.create(LogBuffer);
     defer {
@@ -52,7 +54,6 @@ pub fn main() !void {
     var pub_instance = ExclusivePublication.init(1, 1, initial_term_id, term_length, 1408, lb);
     pub_instance.publisher_limit = std.math.maxInt(i64);
 
-    // Create subscription and image
     var sub = try Subscription.init(allocator, 1, "aeron:ipc");
     defer sub.deinit();
 
@@ -74,32 +75,34 @@ pub fn main() !void {
     var warmup_sent: usize = 0;
     context.count = 0;
     while (warmup_sent < 1000) {
+        if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
         switch (pub_instance.offer(warmup_msg)) {
             .ok => |_| warmup_sent += 1,
             .admin_action => {},
             .back_pressure => {
                 while (context.count < @as(i32, @intCast(warmup_sent))) {
+                    if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
                     _ = driver.doWork();
-                    _ = sub.poll(handler, &context, 100);
-                    std.Thread.sleep(1 * std.time.ns_per_ms);
+                    _ = sub.poll(handler, &context, 1000);
                 }
                 resetLogBuffer(initial_term_id, lb, &pub_instance, img);
+                context.count = 0;
+                warmup_sent = 0;
             },
             else => {},
         }
         _ = driver.doWork();
-        _ = sub.poll(handler, &context, 100);
+        _ = sub.poll(handler, &context, 1000);
     }
 
     while (context.count < 1000) {
+        if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
         _ = driver.doWork();
-        _ = sub.poll(handler, &context, 100);
-        std.Thread.sleep(1 * std.time.ns_per_ms);
+        _ = sub.poll(handler, &context, 1000);
     }
 
-    // Test at different message sizes
-    const sizes = [_]usize{ 64, 1024, 65536 };
-    const message_count: usize = 100000;
+    const sizes = [_]usize{ 64, 1024, 8192 };
+    const message_count: usize = 1000;
     const message_count_i32: i32 = @intCast(message_count);
 
     std.debug.print("| Size   | Msgs/sec  | MB/sec     |\n", .{});
@@ -112,38 +115,48 @@ pub fn main() !void {
 
         resetLogBuffer(initial_term_id, lb, &pub_instance, img);
         context.count = 0;
+        start_time = std.time.nanoTimestamp(); // Reset global timeout for each size
 
-        // Send phase
         var sent: usize = 0;
         var timer = try std.time.Timer.start();
         while (sent < message_count) {
+            if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) {
+                std.debug.print("\nTimeout at size {d}: sent={d}, count={d}\n", .{ size, sent, context.count });
+                return error.Timeout;
+            }
             switch (pub_instance.offer(payload)) {
                 .ok => |_| sent += 1,
                 .admin_action => {},
                 .back_pressure => {
                     while (context.count < @as(i32, @intCast(sent))) {
-                        _ = driver.doWork();
-                        _ = sub.poll(handler, &context, 100);
-                        if (context.count < @as(i32, @intCast(sent))) {
-                            std.Thread.sleep(1 * std.time.ns_per_ms);
+                        if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) {
+                            std.debug.print("\nTimeout during backpressure at size {d}: sent={d}, count={d}\n", .{ size, sent, context.count });
+                            return error.Timeout;
                         }
+                        _ = driver.doWork();
+                        _ = sub.poll(handler, &context, 1000);
                     }
                     resetLogBuffer(initial_term_id, lb, &pub_instance, img);
+                    context.count = 0;
+                    sent = 0;
+                    timer = try std.time.Timer.start();
+                    continue;
                 },
                 else => {},
             }
             _ = driver.doWork();
+            _ = sub.poll(handler, &context, 1000);
         }
         const elapsed_ns = timer.read();
         const elapsed_sec = @as(f64, @floatFromInt(elapsed_ns)) / 1e9;
 
-        // Receive phase
         while (context.count < message_count_i32) {
-            _ = driver.doWork();
-            _ = sub.poll(handler, &context, 100);
-            if (context.count < message_count_i32) {
-                std.Thread.sleep(1 * std.time.ns_per_ms);
+            if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) {
+                std.debug.print("\nTimeout during draining at size {d}: sent={d}, count={d}\n", .{ size, sent, context.count });
+                return error.Timeout;
             }
+            _ = driver.doWork();
+            _ = sub.poll(handler, &context, 1000);
         }
 
         const msgs_per_sec = @as(f64, @floatFromInt(message_count)) / elapsed_sec;

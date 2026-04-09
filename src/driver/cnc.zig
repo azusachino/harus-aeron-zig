@@ -124,6 +124,12 @@ pub const CncFile = struct {
         std.mem.writeInt(i64, self.mapped[heartbeat_off..][0..8], epoch_ms, .little);
     }
 
+    pub fn getDriverHeartbeat(self: *const CncFile) i64 {
+        const data_capacity = @as(usize, @intCast(self.toDriverBufferLength())) - @as(usize, RING_BUFFER_TRAILER_LENGTH);
+        const heartbeat_off = CNC_HEADER_SIZE + data_capacity + CONSUMER_HEARTBEAT_OFFSET;
+        return std.mem.readInt(i64, self.mapped[heartbeat_off..][0..8], .little);
+    }
+
     pub fn version(self: *const CncFile) i32 {
         return std.mem.readInt(i32, self.mapped[VERSION_OFFSET..][0..4], .little);
     }

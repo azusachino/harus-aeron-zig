@@ -72,6 +72,21 @@ pub const Aeron = struct {
         defer allocator.free(cnc_path);
 
         var file = try cnc.CncFile.open(allocator, cnc_path);
+        errdefer file.deinit();
+
+        // Verify version (major match)
+        const file_version = file.version();
+        if ((file_version >> 16) != (cnc.CNC_VERSION >> 16)) {
+            return error.CncVersionMismatch;
+        }
+
+        // Verify driver heartbeat (must be recent)
+        const heartbeat = file.getDriverHeartbeat();
+        const now = std.time.milliTimestamp();
+        if (now - heartbeat > 10_000) { // 10s threshold
+            return error.DriverTimeout;
+        }
+
         const to_driver = file.toDriverBuffer();
         const to_clients = file.toClientsBuffer();
         const counters_meta = file.countersMetadataBuffer();
@@ -110,6 +125,7 @@ pub const Aeron = struct {
         while (sub_it.next()) |entry| {
             // Images are heap-allocated here (allocator.create in doWork); free before deinit.
             for (entry.value_ptr.*.images()) |img| {
+                img.deinit(self.allocator);
                 self.allocator.destroy(img);
             }
             entry.value_ptr.*.deinit();
@@ -169,17 +185,36 @@ pub const Aeron = struct {
                 const registration_id = std.mem.readInt(i64, buffer[0..8], .little);
                 const session_id = std.mem.readInt(i32, buffer[8..12], .little);
                 const stream_id = std.mem.readInt(i32, buffer[12..16], .little);
-                const initial_term_id = if (buffer.len >= 20) std.mem.readInt(i32, buffer[16..20], .little) else 0;
+                const subscription_registration_id = std.mem.readInt(i64, buffer[16..24], .little);
+                const subscriber_position_id = std.mem.readInt(i32, buffer[24..28], .little);
+                const log_file_name_len = std.mem.readInt(i32, buffer[28..32], .little);
 
-                if (self.subscriptions.get(registration_id)) |sub| {
-                    if (self.embedded_driver) |md| {
-                        if (md.getImageLogBuffer(session_id, stream_id)) |lb| {
-                            const img = self.allocator.create(Image) catch continue;
-                            img.* = Image.init(session_id, stream_id, initial_term_id, lb);
-                            sub.addImage(img) catch self.allocator.destroy(img);
+                if (log_file_name_len > 0 and buffer.len >= 32 + @as(usize, @intCast(log_file_name_len))) {
+                    const log_file_name = buffer[32 .. 32 + @as(usize, @intCast(log_file_name_len))];
+
+                    if (self.subscriptions.get(subscription_registration_id)) |sub| {
+                        if (self.openPublicationLogBuffer(log_file_name, session_id, stream_id)) |log_handle| {
+                            const img = self.allocator.create(Image) catch {
+                                if (log_handle.owns_buffer) {
+                                    log_handle.buffer.deinit();
+                                    self.allocator.destroy(log_handle.buffer);
+                                }
+                                continue;
+                            };
+                            img.* = Image.init(session_id, stream_id, 0, log_handle.buffer);
+                            img.owns_log_buffer = log_handle.owns_buffer;
+                            sub.addImage(img) catch {
+                                if (log_handle.owns_buffer) {
+                                    log_handle.buffer.deinit();
+                                    self.allocator.destroy(log_handle.buffer);
+                                }
+                                self.allocator.destroy(img);
+                            };
                         }
                     }
                 }
+                _ = registration_id;
+                _ = subscriber_position_id;
                 work += 1;
             } else if (msg_type_id == driver.conductor.RESPONSE_ON_SUBSCRIPTION_READY) {
                 const correlation_id = std.mem.readInt(i64, buffer[0..8], .little);
@@ -348,6 +383,7 @@ pub const Aeron = struct {
 
         if (self.subscriptions.fetchRemove(registration_id)) |entry| {
             for (entry.value.images()) |img| {
+                img.deinit(self.allocator);
                 self.allocator.destroy(img);
             }
             entry.value.deinit();

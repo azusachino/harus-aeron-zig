@@ -104,6 +104,13 @@ pub const SnapshotEndCmd = struct {
 // Command Union
 // =============================================================================
 
+/// SnapshotState — tracks the progress of a local snapshot operation.
+pub const SnapshotState = enum {
+    none,
+    taking,
+    completed,
+};
+
 /// Command — union of all possible cluster control commands.
 pub const Command = union(enum) {
     session_connect: SessionConnectCmd,
@@ -113,6 +120,9 @@ pub const Command = union(enum) {
     commit_position: CommitPositionCmd,
     snapshot_begin: SnapshotBeginCmd,
     snapshot_end: SnapshotEndCmd,
+    admin_catchup: struct {
+        leader_state: *const ClusterConductor,
+    },
 };
 
 // =============================================================================
@@ -176,7 +186,7 @@ pub const ClusterConductor = struct {
     sessions: std.ArrayList(SessionState),
     next_session_id: i64,
     commit_position: i64,
-    snapshot_in_progress: bool = false,
+    snapshot_state: SnapshotState = .none,
 
     /// Initialize a new ClusterConductor.
     pub fn init(allocator: std.mem.Allocator, member_id: i32) ClusterConductor {
@@ -192,6 +202,7 @@ pub const ClusterConductor = struct {
             .sessions = .{},
             .next_session_id = 1,
             .commit_position = 0,
+            .snapshot_state = .none,
         };
     }
 
@@ -242,6 +253,9 @@ pub const ClusterConductor = struct {
             },
             .snapshot_end => |snapshot_cmd| {
                 try self.handleSnapshotEnd(snapshot_cmd);
+            },
+            .admin_catchup => |catchup_cmd| {
+                try self.catchUpFromLeader(catchup_cmd.leader_state);
             },
         }
     }
@@ -344,16 +358,18 @@ pub const ClusterConductor = struct {
 
     /// Handle snapshot_begin command.
     /// Mark snapshot in progress — services must take snapshot before cluster proceeds.
-    fn handleSnapshotBegin(self: *ClusterConductor, cmd: SnapshotBeginCmd) !void {
-        self.snapshot_in_progress = true;
-        _ = cmd; // Note: In a full implementation, would trigger service snapshot handlers
+    pub fn handleSnapshotBegin(self: *ClusterConductor, cmd: SnapshotBeginCmd) !void {
+        _ = cmd;
+        self.snapshot_state = .taking;
+        // In a full implementation, this would trigger the serialization of
+        // current ClusterConductorState to an Aeron Archive recording.
     }
 
     /// Handle snapshot_end command.
     /// Snapshot complete — cluster may resume normal operation.
-    fn handleSnapshotEnd(self: *ClusterConductor, cmd: SnapshotEndCmd) !void {
-        self.snapshot_in_progress = false;
-        _ = cmd; // Note: In a full implementation, would trigger service resume handlers
+    pub fn handleSnapshotEnd(self: *ClusterConductor, cmd: SnapshotEndCmd) !void {
+        _ = cmd;
+        self.snapshot_state = .completed;
     }
 
     /// Drain and deliver all queued responses.
@@ -949,4 +965,43 @@ test "leader-to-follower transition emits redirect for open sessions" {
     }.handle);
     try std.testing.expectEqual(@as(i32, 2), CaptureLeaderChange.redirect_count);
     try std.testing.expect(CaptureLeaderChange.all_point_to_node2);
+}
+
+test "snapshot state machine transitions" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ClusterConductor.init(allocator, 0);
+    defer conductor.deinit();
+
+    try std.testing.expectEqual(SnapshotState.none, conductor.snapshot_state);
+
+    try conductor.enqueueCommand(.{ .snapshot_begin = .{ .leadership_term_id = 1, .log_position = 0, .timestamp = 0, .member_id = 0 } });
+    _ = try conductor.doWork();
+    try std.testing.expectEqual(SnapshotState.taking, conductor.snapshot_state);
+
+    try conductor.enqueueCommand(.{ .snapshot_end = .{ .leadership_term_id = 1, .log_position = 0, .member_id = 0 } });
+    _ = try conductor.doWork();
+    try std.testing.expectEqual(SnapshotState.completed, conductor.snapshot_state);
+}
+
+test "admin_catchup command restores state from leader" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var leader = ClusterConductor.init(allocator, 0);
+    defer leader.deinit();
+    leader.becomeLeader(5);
+    _ = try leader.log.append("leader entry", 1000);
+
+    var follower = ClusterConductor.init(allocator, 1);
+    defer follower.deinit();
+
+    try follower.enqueueCommand(.{ .admin_catchup = .{ .leader_state = &leader } });
+    _ = try follower.doWork();
+
+    try std.testing.expectEqual(leader.commit_position, follower.commit_position);
+    try std.testing.expectEqualSlices(u8, "leader entry", follower.log.entryAt(0).?.data);
 }
