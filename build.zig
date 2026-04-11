@@ -60,10 +60,44 @@ pub fn build(b: *std.Build) void {
     const integration_test_step = b.step("test-integration", "Run integration tests");
     integration_test_step.dependOn(&run_integration_tests.step);
 
-    // Default test step runs both
+    // Logbuffer tests
+    const test_logbuffer = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/logbuffer/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+            },
+        }),
+    });
+    test_logbuffer.root_module.link_libc = true;
+    const run_test_logbuffer = b.addRunArtifact(test_logbuffer);
+    const test_logbuffer_step = b.step("test-logbuffer", "Run logbuffer scenario tests");
+    test_logbuffer_step.dependOn(&run_test_logbuffer.step);
+
+    // Scenario tests — IPC layer
+    const test_ipc = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/ipc/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+            },
+        }),
+    });
+    test_ipc.root_module.link_libc = true;
+    const run_test_ipc = b.addRunArtifact(test_ipc);
+    const test_ipc_step = b.step("test-ipc", "Run IPC scenario tests");
+    test_ipc_step.dependOn(&run_test_ipc.step);
+
+    // Default test step runs all
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(unit_test_step);
     test_step.dependOn(integration_test_step);
+    test_step.dependOn(test_logbuffer_step);
+    test_step.dependOn(test_ipc_step);
 
     // Scenario tests — protocol layer
     const test_protocol = b.addTest(.{
@@ -131,6 +165,7 @@ pub fn build(b: *std.Build) void {
 
     // Scenarios umbrella
     const test_scenarios_step = b.step("test-scenarios", "Run all scenario tests");
+    test_scenarios_step.dependOn(test_ipc_step);
     test_scenarios_step.dependOn(test_protocol_step);
     test_scenarios_step.dependOn(test_driver_step);
     test_scenarios_step.dependOn(test_archive_step);
@@ -198,6 +233,22 @@ pub fn build(b: *std.Build) void {
         fuzz_test.root_module.link_libc = true;
         fuzz_step.dependOn(&b.addRunArtifact(fuzz_test).step);
     }
+
+    // Stress tests
+    const stress_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/stress/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+            },
+        }),
+    });
+    stress_tests.root_module.link_libc = true;
+    const run_stress_tests = b.addRunArtifact(stress_tests);
+    const stress_step = b.step("stress", "Run stress tests");
+    stress_step.dependOn(&run_stress_tests.step);
 
     // Benchmarks
     const bench_files = [_]struct { name: []const u8, path: []const u8 }{

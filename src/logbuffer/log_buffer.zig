@@ -4,6 +4,9 @@ const std = @import("std");
 const metadata = @import("metadata.zig");
 
 pub const term_reader = @import("term_reader.zig");
+pub const term_appender = @import("term_appender.zig");
+pub const TermAppender = term_appender.TermAppender;
+pub const AppendResult = term_appender.AppendResult;
 
 pub const PARTITION_COUNT = 3;
 pub const LOG_META_DATA_SECTION_INDEX = PARTITION_COUNT;

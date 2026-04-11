@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-04-11 — Test completeness and release gate
+
+### Added
+- **269 tests** across protocol, IPC, log buffer, driver, archive, cluster, integration, and soak suites
+- **IPC test suite** (`test/ipc/`): 59 new tests covering ManyToOneRingBuffer (wrap-around, padding, unblock, correlation ID), BroadcastTransmitter/Receiver (lapping, recovery, padding skip), and CountersMap (CRUD, atomics, slot reuse)
+- **Log buffer test suite** (`test/logbuffer/`): 33 new tests for TermAppender (fill, rotation, padding frame, flag preservation) and TermReader (fragment limit, padding skip, uncommitted stop, offset math)
+- **Protocol expansion**: 46 frame codec tests (all 7 frame types, all flag combos, boundary values), 35 URI tests (all Aeron URI forms, multicast detection, error rejection), 26 flow control tests
+- **Driver integration tests**: SETUP handshake, publication reference counting, client keepalive/eviction, retransmit queue drain, session establishment via injected SETUP frames
+- **Archive edge cases**: 100-recording catalog lookup, stop-position accuracy, multi-chunk replay, segment rotation consistency, findLastMatchingRecording, null-ID safety
+- **Cluster chaos tests**: full canvass→candidate→leader lifecycle, stale-term vote rejection, failover detection, log commit independence, snapshot begin/end state machine, sequential snapshots
+- **Stress suite** (`test/stress/`): ring buffer N-message soak, term appender fill-under-load, conductor add/remove publication cycles; all parameterised via `SOAK_ITERS`
+- **Release audit**: `docs/audits/1.0.0-release-audit.md` with protocol parity matrix, per-suite test counts, performance baseline, and known-gaps register
+
+### Fixed
+- `test/harness.zig`: removed duplicate `createClusterNode`/`injectDelay` functions spliced into struct literal; fixed `!anytype` return type (invalid in Zig) to concrete `ConsensusModule`
+- Formatting: applied `zig fmt` to `src/cluster/protocol.zig`, `src/archive/archive.zig`, `src/ipc/ring_buffer.zig`
+
 ## [0.2.0] - 2026-03-25 — Phase 10: Upstream Test Parity & CI
 
 ### Added

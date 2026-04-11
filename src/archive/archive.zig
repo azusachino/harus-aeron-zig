@@ -55,7 +55,6 @@ pub const ArchiveProxy = struct {
     }
 };
 
-
 /// Archive — top-level context owning the ArchiveConductor.
 /// Manages the lifecycle (start/stop) and runs duty cycles by delegating to the conductor
 /// and its recorder/replayer components. Clients interact with the Archive by:

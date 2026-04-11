@@ -239,7 +239,7 @@ test "unblock recovers from stalled writer" {
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
-    
+
     // Set head and tail to simulate a record at index 0
     rb.storeHead(0);
     rb.storeTail(32);

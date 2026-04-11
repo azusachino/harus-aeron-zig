@@ -206,11 +206,10 @@ pub const MemberList = extern struct {
     member_id: i32,
     cluster_size: i32,
     // Variable-length list of members follows
-    
+
     pub const HEADER_LENGTH = @sizeOf(MemberList);
     pub const MSG_TYPE_ID: i32 = 234;
 };
-
 
 /// Encode a length-prefixed channel string into buffer.
 /// Returns number of bytes written (length prefix + string data).
