@@ -29,9 +29,32 @@ pub const ArchiveContext = struct {
     segment_file_length: i64 = 128 * 1024 * 1024,
 };
 
-// =============================================================================
-// Archive — Main Context
-// =============================================================================
+/// ArchiveProxy — proxy to send control commands to the Archive.
+pub const ArchiveProxy = struct {
+    archive: *Archive,
+
+    pub fn init(archive: *Archive) ArchiveProxy {
+        return .{ .archive = archive };
+    }
+
+    pub fn startRecording(self: *ArchiveProxy, correlation_id: i64, session_id: i32, stream_id: i32, channel: []const u8, source_identity: []const u8) !void {
+        try self.archive.enqueueCommand(.{
+            .start_recording = .{
+                .correlation_id = correlation_id,
+                .session_id = session_id,
+                .stream_id = stream_id,
+                .channel = try self.archive.allocator.dupe(u8, channel),
+                .source_identity = try self.archive.allocator.dupe(u8, source_identity),
+                .initial_term_id = 0,
+                .term_buffer_length = 0,
+                .mtu_length = 0,
+                .start_position = 0,
+                .start_timestamp = 0,
+            },
+        });
+    }
+};
+
 
 /// Archive — top-level context owning the ArchiveConductor.
 /// Manages the lifecycle (start/stop) and runs duty cycles by delegating to the conductor

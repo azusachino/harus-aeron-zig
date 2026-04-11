@@ -1,5 +1,7 @@
 // Aeron Cluster Conductor — session management and log replication
 // Routes cluster commands from clients to distributed log and session state.
+const protocol_mod = @import("protocol.zig");
+const QueryMemberList = protocol_mod.QueryMemberList;
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-cluster/src/main/java/io/aeron/cluster/ClusterConductor.java
 
 const std = @import("std");
@@ -370,6 +372,18 @@ pub const ClusterConductor = struct {
     pub fn handleSnapshotEnd(self: *ClusterConductor, cmd: SnapshotEndCmd) !void {
         _ = cmd;
         self.snapshot_state = .completed;
+    }
+
+    /// Handle query_member_list command.
+    pub fn handleQueryMemberList(self: *ClusterConductor, cmd: QueryMemberList) !void {
+        const response = Response{
+            .session_event = SessionEventResponse{
+                .cluster_session_id = 0,
+                .correlation_id = cmd.correlation_id,
+                .event_code = 0,
+            },
+        };
+        try self.response_queue.append(self.allocator, response);
     }
 
     /// Drain and deliver all queued responses.
