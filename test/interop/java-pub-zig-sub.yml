@@ -1,0 +1,26 @@
+services:
+  java-publisher:
+    image: eclipse-temurin:21-jdk
+    working_dir: /app
+    volumes:
+      - ./:/app
+    environment:
+      AERON_CHANNEL: "aeron:udp?endpoint=zig-subscriber:20121"
+      AERON_STREAM_ID: "1001"
+      AERON_MSG_COUNT: "10"
+      AERON_INTEROP_STUB: "${AERON_INTEROP_STUB:-0}"
+    command: >
+      sh -c "javac JavaPublisher.java && java JavaPublisher"
+    depends_on:
+      - zig-subscriber
+
+  zig-subscriber:
+    image: debian:bookworm-slim
+    volumes:
+      - ../../zig-out/bin:/usr/local/bin:ro
+    environment:
+      AERON_CHANNEL: "aeron:udp?endpoint=0.0.0.0:20121"
+      AERON_STREAM_ID: "1001"
+      AERON_MSG_COUNT: "10"
+      AERON_INTEROP_STUB: "${AERON_INTEROP_STUB:-0}"
+    command: zig-subscriber

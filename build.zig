@@ -31,6 +31,29 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the media driver");
     run_step.dependOn(&run_cmd.step);
 
+    // Interop smoke binaries
+    const zig_sub = b.addExecutable(.{
+        .name = "zig-subscriber",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/interop/zig_subscriber.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    zig_sub.root_module.link_libc = true;
+    b.installArtifact(zig_sub);
+
+    const zig_pub = b.addExecutable(.{
+        .name = "zig-publisher",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/interop/zig_publisher.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    zig_pub.root_module.link_libc = true;
+    b.installArtifact(zig_pub);
+
     // Unit tests
     const unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
