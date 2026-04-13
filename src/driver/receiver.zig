@@ -376,7 +376,7 @@ pub const Receiver = struct {
 
                             const now = @as(i64, @intCast(std.time.nanoTimestamp()));
                             if (image.nak_state.shouldSend(now)) {
-                                self.sendNak(image) catch {};
+                                self.sendNak(image) catch |err| std.log.warn("receiver NAK send failed session={d} stream={d} err={}", .{ image.session_id, image.stream_id, err });
                                 image.nak_state.clear();
                             }
 
@@ -429,7 +429,9 @@ pub const Receiver = struct {
                     .term_length = setup.term_length,
                     .mtu = setup.mtu,
                     .source_address = src_addr,
-                }) catch {};
+                }) catch |err| {
+                    std.log.err("receiver SETUP append OOM session={d} stream={d} err={}", .{ setup.session_id, setup.stream_id, err });
+                };
                 self.mutex.unlock();
                 work += 1;
             } else if (frame_type_raw == @intFromEnum(protocol.FrameType.status)) {
@@ -447,7 +449,9 @@ pub const Receiver = struct {
                     .consumption_term_offset = status.consumption_term_offset,
                     .receiver_window = status.receiver_window,
                     .receiver_id = status.receiver_id,
-                }) catch {};
+                }) catch |err| {
+                    std.log.err("receiver STATUS append OOM session={d} stream={d} err={}", .{ status.session_id, status.stream_id, err });
+                };
                 self.mutex.unlock();
                 work += 1;
             }

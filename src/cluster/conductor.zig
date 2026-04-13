@@ -414,7 +414,7 @@ pub const ClusterConductor = struct {
         self.leader_member_id = leader_id;
         self.leader_ship_term_id = term_id;
         if (was_leader) {
-            self.notifySessionsRedirect(leader_id) catch {};
+            self.notifySessionsRedirect(leader_id) catch |err| std.log.warn("conductor redirect notify failed leader={d} err={}", .{ leader_id, err });
         }
     }
 
