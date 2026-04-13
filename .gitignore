@@ -45,3 +45,4 @@ docs/*.tar
 node-compile-cache/
 result
 test_writer
+.worktrees/
