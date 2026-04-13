@@ -82,7 +82,7 @@ pub fn main() !void {
             .back_pressure => {
                 while (context.count < @as(i32, @intCast(warmup_sent))) {
                     if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
-                    _ = driver.doWork();
+                    _ = try driver.doWork();
                     _ = sub.poll(handler, &context, 1000);
                 }
                 resetLogBuffer(initial_term_id, lb, &pub_instance, img);
@@ -91,13 +91,13 @@ pub fn main() !void {
             },
             else => {},
         }
-        _ = driver.doWork();
+        _ = try driver.doWork();
         _ = sub.poll(handler, &context, 1000);
     }
 
     while (context.count < 1000) {
         if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
-        _ = driver.doWork();
+        _ = try driver.doWork();
         _ = sub.poll(handler, &context, 1000);
     }
 
@@ -133,7 +133,7 @@ pub fn main() !void {
                             std.debug.print("\nTimeout during backpressure at size {d}: sent={d}, count={d}\n", .{ size, sent, context.count });
                             return error.Timeout;
                         }
-                        _ = driver.doWork();
+                        _ = try driver.doWork();
                         _ = sub.poll(handler, &context, 1000);
                     }
                     resetLogBuffer(initial_term_id, lb, &pub_instance, img);
@@ -144,7 +144,7 @@ pub fn main() !void {
                 },
                 else => {},
             }
-            _ = driver.doWork();
+            _ = try driver.doWork();
             _ = sub.poll(handler, &context, 1000);
         }
         const elapsed_ns = timer.read();
@@ -155,7 +155,7 @@ pub fn main() !void {
                 std.debug.print("\nTimeout during draining at size {d}: sent={d}, count={d}\n", .{ size, sent, context.count });
                 return error.Timeout;
             }
-            _ = driver.doWork();
+            _ = try driver.doWork();
             _ = sub.poll(handler, &context, 1000);
         }
 

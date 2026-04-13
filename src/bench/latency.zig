@@ -87,17 +87,17 @@ pub fn main() !void {
             if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
             const result = pub_instance.offer(&payload);
             if (result == .ok) break;
-            _ = driver.doWork();
+            _ = try driver.doWork();
             _ = sub.poll(handler, &context, 10);
         }
-        _ = driver.doWork();
+        _ = try driver.doWork();
         _ = sub.poll(handler, &context, 10);
     }
 
     // Collect remaining latencies
     while (context.count < message_count) {
         if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
-        _ = driver.doWork();
+        _ = try driver.doWork();
         _ = sub.poll(handler, &context, 100);
     }
 

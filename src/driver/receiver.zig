@@ -301,7 +301,7 @@ pub const Receiver = struct {
         return slice;
     }
 
-    pub fn processDatagram(self: *Receiver, data: []const u8, src_addr: std.net.Address) i32 {
+    pub fn processDatagram(self: *Receiver, data: []const u8, src_addr: std.net.Address) !i32 {
         if (data.len < 8) return 0;
 
         // H2 fix: walk ALL Aeron frames packed into this UDP datagram.
@@ -431,6 +431,7 @@ pub const Receiver = struct {
                     .source_address = src_addr,
                 }) catch |err| {
                     std.log.err("receiver SETUP append OOM session={d} stream={d} err={}", .{ setup.session_id, setup.stream_id, err });
+                    return err;
                 };
                 self.mutex.unlock();
                 work += 1;
@@ -451,6 +452,7 @@ pub const Receiver = struct {
                     .receiver_id = status.receiver_id,
                 }) catch |err| {
                     std.log.err("receiver STATUS append OOM session={d} stream={d} err={}", .{ status.session_id, status.stream_id, err });
+                    return err;
                 };
                 self.mutex.unlock();
                 work += 1;
@@ -464,7 +466,7 @@ pub const Receiver = struct {
     }
 
     // Single duty cycle: recv one frame, dispatch, return work count (0 or 1)
-    pub fn doWork(self: *Receiver) i32 {
+    pub fn doWork(self: *Receiver) !i32 {
         var src_addr: std.net.Address = undefined;
         const bytes_read = self.recv_endpoint.recv(&self.recv_buf, &src_addr) catch |err| {
             if (err == error.WouldBlock) {
@@ -480,7 +482,7 @@ pub const Receiver = struct {
             return 0;
         }
 
-        return self.processDatagram(self.recv_buf[0..bytes_read], src_addr);
+        return try self.processDatagram(self.recv_buf[0..bytes_read], src_addr);
     }
 
     pub fn onAddSubscription(self: *Receiver, image: *Image) !void {
@@ -848,7 +850,7 @@ test "Receiver queues STATUS messages for sender flow control" {
     status.receiver_id = 77;
 
     const bytes = @as([*]const u8, @ptrCast(&status))[0..protocol.StatusMessage.LENGTH];
-    try std.testing.expectEqual(@as(i32, 1), receiver.processDatagram(bytes, std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123)));
+    try std.testing.expectEqual(@as(i32, 1), try receiver.processDatagram(bytes, std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123)));
 
     const pending = receiver.drainPendingStatusMessages();
     defer allocator.free(pending);
