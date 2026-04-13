@@ -205,7 +205,60 @@ pub const ManyToOneRingBuffer = struct {
         const current = @atomicRmw(i64, @as(*i64, @ptrCast(@alignCast(addr))), .Add, 1, .acq_rel);
         return current + 1;
     }
+
+    /// Scan for a blocked record at the head and unblock it by converting to padding.
+    /// Returns true if a record was unblocked.
+    pub fn unblock(self: *ManyToOneRingBuffer) bool {
+        const head = self.loadHead();
+        const tail = self.loadTail();
+
+        if (head == tail) return false;
+
+        const index = @as(usize, @intCast(head)) % self.capacity;
+        const length_ptr: *i32 = @ptrCast(@alignCast(&self.buffer[index]));
+        const record_length = @atomicLoad(i32, length_ptr, .acquire);
+
+        if (record_length < 0) {
+            // Found a blocked record at the head.
+            // Rewrite as a padding record so the reader can skip it.
+            const padding_length = -record_length;
+            const msg_type_ptr: *i32 = @ptrCast(@alignCast(&self.buffer[index + 4]));
+            msg_type_ptr.* = PADDING_MSG_TYPE_ID;
+            @atomicStore(i32, length_ptr, padding_length, .release);
+            return true;
+        }
+        return false;
+    }
 };
+
+test "unblock recovers from stalled writer" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const buf = try arena.allocator().alloc(u8, 1024);
+    @memset(buf, 0);
+
+    var rb = ManyToOneRingBuffer.init(buf);
+
+    // Set head and tail to simulate a record at index 0
+    rb.storeHead(0);
+    rb.storeTail(32);
+
+    // Simulate stalled writer: write negative length sentinel at index 0
+    const record_index: usize = 0;
+    const record_length: i32 = 32;
+    const length_ptr: *i32 = @ptrCast(@alignCast(&buf[record_index]));
+    @atomicStore(i32, length_ptr, -record_length, .release);
+
+    // Verify unblock() recovers it
+    try std.testing.expect(rb.unblock());
+
+    // Verify record is now padding
+    const new_record_length = @atomicLoad(i32, length_ptr, .acquire);
+    try std.testing.expectEqual(record_length, new_record_length);
+    const msg_type_ptr: *i32 = @ptrCast(@alignCast(&buf[record_index + 4]));
+    try std.testing.expectEqual(PADDING_MSG_TYPE_ID, msg_type_ptr.*);
+}
 
 test "record alignment" {
     try std.testing.expectEqual(16, RecordDescriptor.aligned(5));

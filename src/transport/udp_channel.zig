@@ -207,6 +207,17 @@ test "UdpChannel: parse endpoint shorthand" {
     try std.testing.expectEqual(@as(u16, 40123), channel.endpoint.?.getPort());
 }
 
+test "UdpChannel: parse wildcard interface" {
+    const allocator = std.testing.allocator;
+    var channel = try UdpChannel.parse(allocator, "aeron:udp?endpoint=127.0.0.1:40123|interface=*");
+    defer channel.deinit(allocator);
+
+    try std.testing.expect(channel.local_address != null);
+    try std.testing.expectEqual(@as(u16, 0), channel.local_address.?.getPort());
+    const addr = channel.local_address.?.in.sa.addr;
+    try std.testing.expectEqual(@as(u32, 0), std.mem.bigToNative(u32, addr));
+}
+
 test "UdpChannel: reject invalid interface address" {
     const allocator = std.testing.allocator;
     const result = UdpChannel.parse(allocator, "aeron:udp?endpoint=localhost:40123|interface=[]");

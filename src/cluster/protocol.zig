@@ -190,9 +190,26 @@ pub const SnapshotEnd = extern struct {
     pub const MSG_TYPE_ID: i32 = 232;
 };
 
-// ============================================================================
-// Helper Functions
-// ============================================================================
+/// QueryMemberList — candidate/follower queries the leader for the current member list.
+pub const QueryMemberList = extern struct {
+    correlation_id: i64,
+    member_id: i32,
+    _padding: i32 = 0,
+
+    pub const HEADER_LENGTH = @sizeOf(QueryMemberList);
+    pub const MSG_TYPE_ID: i32 = 233;
+};
+
+/// MemberList — leader responds with the current cluster member list.
+pub const MemberList = extern struct {
+    correlation_id: i64,
+    member_id: i32,
+    cluster_size: i32,
+    // Variable-length list of members follows
+
+    pub const HEADER_LENGTH = @sizeOf(MemberList);
+    pub const MSG_TYPE_ID: i32 = 234;
+};
 
 /// Encode a length-prefixed channel string into buffer.
 /// Returns number of bytes written (length prefix + string data).
@@ -236,10 +253,14 @@ comptime {
     std.debug.assert(NewLeadershipTermHeader.MSG_TYPE_ID != ServiceAck.MSG_TYPE_ID);
     std.debug.assert(ServiceAck.MSG_TYPE_ID != SnapshotBegin.MSG_TYPE_ID);
     std.debug.assert(SnapshotBegin.MSG_TYPE_ID != SnapshotEnd.MSG_TYPE_ID);
+    std.debug.assert(SnapshotEnd.MSG_TYPE_ID != QueryMemberList.MSG_TYPE_ID);
+    std.debug.assert(QueryMemberList.MSG_TYPE_ID != MemberList.MSG_TYPE_ID);
 
     // Verify frame sizes
     std.debug.assert(@sizeOf(SnapshotBegin) == SnapshotBegin.HEADER_LENGTH);
     std.debug.assert(@sizeOf(SnapshotEnd) == SnapshotEnd.HEADER_LENGTH);
+    std.debug.assert(@sizeOf(QueryMemberList) == QueryMemberList.HEADER_LENGTH);
+    std.debug.assert(@sizeOf(MemberList) == MemberList.HEADER_LENGTH);
 
     // Verify EventCode values
     std.debug.assert(@intFromEnum(EventCode.ok) == 0);
@@ -289,6 +310,8 @@ test "msg_type_ids are unique" {
     try std.testing.expectEqual(221, ServiceAck.MSG_TYPE_ID);
     try std.testing.expectEqual(231, SnapshotBegin.MSG_TYPE_ID);
     try std.testing.expectEqual(232, SnapshotEnd.MSG_TYPE_ID);
+    try std.testing.expectEqual(233, QueryMemberList.MSG_TYPE_ID);
+    try std.testing.expectEqual(234, MemberList.MSG_TYPE_ID);
 }
 
 test "event code enum values" {

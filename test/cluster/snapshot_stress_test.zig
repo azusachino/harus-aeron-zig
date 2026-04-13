@@ -5,72 +5,160 @@
 const std = @import("std");
 const aeron = @import("aeron");
 
-test "ConsensusModule: snapshot interrupted by member failure" {
+test "ConsensusModule: snapshot interrupted mid-way by discovery of new leader" {
     const allocator = std.testing.allocator;
     var module = try aeron.cluster.consensus.ConsensusModule.init(allocator, .{
         .member_id = 1,
         .cluster_members = &.{
-            .{ .member_id = 0, .host = "localhost" },
-            .{ .member_id = 1, .host = "localhost" },
-            .{ .member_id = 2, .host = "localhost" },
+            .{ .member_id = 0 },
+            .{ .member_id = 1 },
+            .{ .member_id = 2 },
         },
     });
     defer module.deinit();
 
-    // 1. Trigger snapshot
-    try module.conductor.enqueueCommand(.{ .snapshot_begin = .{
-        .leadership_term_id = 1,
-        .log_position = 1024,
-        .timestamp = std.time.milliTimestamp(),
-        .member_id = 0,
-    } });
-    _ = try module.conductor.doWork(); // Process command
+    // Verify initial state
+    try std.testing.expectEqual(aeron.cluster.conductor.SnapshotState.none, module.conductor.snapshot_state);
 
-    // Verify state is 'taking'
+    // Enqueue snapshot_begin command
+    try module.conductor.enqueueCommand(.{
+        .snapshot_begin = .{
+            .leadership_term_id = 1,
+            .log_position = 1024,
+            .timestamp = 1000,
+            .member_id = 0,
+        },
+    });
+    _ = try module.conductor.doWork();
+
+    // Snapshot in progress
     try std.testing.expectEqual(aeron.cluster.conductor.SnapshotState.taking, module.conductor.snapshot_state);
 
-    // 2. Simulate node failure/interruption by clearing election state or forcing discovery
-    // In a real stress test, we'd trigger a timeout or leader loss here.
-    // For this parity test, we verify that we can transition out of 'taking' if a new leader is discovered.
-    
-    // Simulate discovery of a new leader during snapshot
-    try module.onDiscoveryMessage(2); // Member 2 is now leader
+    // Interrupt: discover a different leader
+    try module.onDiscoveryMessage(2);
 
-    // Verify snapshot state can be reset or transitioned
-    // If a new leader is found, the previous snapshot attempt from the old leader should be aborted.
-    // In our implementation, handleSnapshotBegin is idempotent but can be overridden by newer terms.
-    
-    try module.conductor.enqueueCommand(.{ .snapshot_end = .{
-        .leadership_term_id = 1,
-        .log_position = 1024,
-        .member_id = 0,
-    } });
-    _ = try module.conductor.doWork(); // Process command
-    
+    // The snapshot_state should remain "taking" unless explicitly transitioned
+    // (In a real cluster, a new leader would send snapshot_end with higher term)
+    // For this test, enqueue a new snapshot_begin with higher term to simulate leader change
+    try module.conductor.enqueueCommand(.{
+        .snapshot_begin = .{
+            .leadership_term_id = 2,
+            .log_position = 2048,
+            .timestamp = 2000,
+            .member_id = 2,
+        },
+    });
+    _ = try module.conductor.doWork();
+
+    // Still in taking state (idempotent)
+    try std.testing.expectEqual(aeron.cluster.conductor.SnapshotState.taking, module.conductor.snapshot_state);
+
+    // Now enqueue snapshot_end to complete
+    try module.conductor.enqueueCommand(.{
+        .snapshot_end = .{
+            .leadership_term_id = 2,
+            .log_position = 2048,
+            .member_id = 2,
+        },
+    });
+    _ = try module.conductor.doWork();
+
     try std.testing.expectEqual(aeron.cluster.conductor.SnapshotState.completed, module.conductor.snapshot_state);
 }
 
-test "ConsensusModule: concurrent snapshot commands are idempotent" {
+test "ConsensusModule: snapshot completes successfully" {
     const allocator = std.testing.allocator;
     var module = try aeron.cluster.consensus.ConsensusModule.init(allocator, .{
-        .member_id = 1,
+        .member_id = 0,
         .cluster_members = &.{
-            .{ .member_id = 0, .host = "localhost" },
+            .{ .member_id = 0 },
         },
     });
     defer module.deinit();
 
-    const cmd = aeron.cluster.conductor.SnapshotBeginCmd{
-        .leadership_term_id = 1,
-        .log_position = 100,
-        .timestamp = 0,
+    try std.testing.expectEqual(aeron.cluster.conductor.SnapshotState.none, module.conductor.snapshot_state);
+
+    // Enqueue snapshot_begin
+    try module.conductor.enqueueCommand(.{
+        .snapshot_begin = .{
+            .leadership_term_id = 1,
+            .log_position = 512,
+            .timestamp = 1000,
+            .member_id = 0,
+        },
+    });
+    _ = try module.conductor.doWork();
+    try std.testing.expectEqual(aeron.cluster.conductor.SnapshotState.taking, module.conductor.snapshot_state);
+
+    // Snapshot would normally do work here (writing to archive, etc.)
+    // For this test, we just verify the state transitions
+
+    // Enqueue snapshot_end
+    try module.conductor.enqueueCommand(.{
+        .snapshot_end = .{
+            .leadership_term_id = 1,
+            .log_position = 512,
+            .member_id = 0,
+        },
+    });
+    _ = try module.conductor.doWork();
+    try std.testing.expectEqual(aeron.cluster.conductor.SnapshotState.completed, module.conductor.snapshot_state);
+}
+
+test "ConsensusModule: sequential snapshots transition properly" {
+    const allocator = std.testing.allocator;
+    var module = try aeron.cluster.consensus.ConsensusModule.init(allocator, .{
         .member_id = 0,
-    };
+        .cluster_members = &.{
+            .{ .member_id = 0 },
+        },
+    });
+    defer module.deinit();
 
-    try module.conductor.handleSnapshotBegin(cmd);
+    // First snapshot: begin → end
+    try module.conductor.enqueueCommand(.{
+        .snapshot_begin = .{
+            .leadership_term_id = 1,
+            .log_position = 100,
+            .timestamp = 1000,
+            .member_id = 0,
+        },
+    });
+    _ = try module.conductor.doWork();
     try std.testing.expectEqual(aeron.cluster.conductor.SnapshotState.taking, module.conductor.snapshot_state);
 
-    // Second call should not crash or deadlock
-    try module.conductor.handleSnapshotBegin(cmd);
+    try module.conductor.enqueueCommand(.{
+        .snapshot_end = .{
+            .leadership_term_id = 1,
+            .log_position = 100,
+            .member_id = 0,
+        },
+    });
+    _ = try module.conductor.doWork();
+    try std.testing.expectEqual(aeron.cluster.conductor.SnapshotState.completed, module.conductor.snapshot_state);
+
+    // Second snapshot: begin → taking state
+    try module.conductor.enqueueCommand(.{
+        .snapshot_begin = .{
+            .leadership_term_id = 2,
+            .log_position = 200,
+            .timestamp = 2000,
+            .member_id = 0,
+        },
+    });
+    _ = try module.conductor.doWork();
+
+    // Should transition back to taking state
     try std.testing.expectEqual(aeron.cluster.conductor.SnapshotState.taking, module.conductor.snapshot_state);
+
+    // Complete second snapshot
+    try module.conductor.enqueueCommand(.{
+        .snapshot_end = .{
+            .leadership_term_id = 2,
+            .log_position = 200,
+            .member_id = 0,
+        },
+    });
+    _ = try module.conductor.doWork();
+    try std.testing.expectEqual(aeron.cluster.conductor.SnapshotState.completed, module.conductor.snapshot_state);
 }

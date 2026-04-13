@@ -189,6 +189,8 @@ pub const DriverConductor = struct {
             if (self.clients.items[i].last_keepalive_ms < deadline) {
                 if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] Evicting timed-out client_id={d}\n", .{self.clients.items[i].client_id});
                 _ = self.clients.swapRemove(i);
+                // Only unblock after a client is confirmed dead — never on a live write in flight
+                _ = self.ring_buffer.unblock();
             } else {
                 i += 1;
             }

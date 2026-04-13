@@ -1115,3 +1115,114 @@ Dependencies:
 7. P8-7 performance and soak baseline.
 
 This order front-loads the compatibility surface that every other subsystem depends on, then hardens the stateful archive and cluster layers before finishing operational tooling, external validation, and performance sign-off.
+
+---
+
+## Phase 11 — Release 1.0.0 (The Final Step)
+
+Goal: Move from a high-parity implementation to a production-ready 1.0.0 release by closing the last operational gaps and completing the educational layer.
+
+Exit criteria for the phase:
+- `make check` passes 100%.
+- `make interop` passes all Java/Zig cross-language scenarios (Pub/Sub, Archive, Cluster).
+- All 24 tutorial chapters are functionally complete as stubs in `tutorial/`.
+- Throughput and latency baseline established and documented for 1.0.0.
+
+---
+
+### Task P11-1: ManyToOneRingBuffer.unblock()
+
+**File**: `src/ipc/ring_buffer.zig`
+
+Recover from writers that crash while holding a negative sentinel in the ring buffer.
+
+Implement:
+- `unblock()` — scans the buffer from the current head to the tail. If a negative length is found that hasn't changed for a certain period, and the corresponding client is dead (no heartbeat), zero out the record to allow the reader to progress.
+- Integration into `DriverConductor.doWork()` (call `rb.unblock()` at a regular interval).
+
+Reference: `agrona/src/main/java/org/agrona/concurrent/ringbuffer/ManyToOneRingBuffer.java` (unblock method)
+
+---
+
+### Task P11-2: Cluster Snapshot Coordination
+
+**File**: `src/cluster/conductor.zig`, `src/archive/archive.zig`
+
+Move beyond protocol stubs to actual state persistence for cluster recovery.
+
+Implement:
+- `ClusterConductor.serializeState(allocator: std.mem.Allocator) ![]const u8` — serializes sessions, term IDs, and log positions.
+- Wiring `handleSnapshotBegin` to `AeronArchive.startRecording()` and writing the serialized state.
+- Recovery logic in `init()` to load the last successful snapshot from the Archive.
+
+Reference: `aeron-cluster/src/main/java/io/aeron/cluster/ClusterConductor.java`
+
+---
+
+### Task P11-3: Dynamic Cluster Member Discovery
+
+**File**: `src/cluster/election.zig`, `src/cluster/protocol.zig`
+
+Support for nodes to join an existing cluster without pre-baked static config.
+
+Implement:
+- `MEMBER_LIST` and `QUERY_MEMBER_LIST` protocol messages.
+- `Election` state machine logic to request the member list from the current leader or other nodes on startup.
+- Updating the local `ClusterContext` with newly discovered members.
+
+Reference: `aeron-cluster/src/main/java/io/aeron/cluster/ClusterMember.java`
+
+---
+
+### Task P11-4: Advanced URI Wildcard Substitution
+
+**File**: `src/transport/udp_channel.zig`, `src/transport/endpoint.zig`
+
+Robust address resolution for ephemeral ports and wildcard interfaces.
+
+Implement:
+- Support for `endpoint=127.0.0.1:0` (ephemeral port) and propagating the bound port back to the client via `ON_PUBLICATION_READY`.
+- Support for `interface=0.0.0.0` or `interface=::` to bind to all available local interfaces as per Aeron semantics.
+- Resolution of `*` shorthands in both `endpoint` and `interface` fields.
+
+Reference: `aeron-client/src/main/java/io/aeron/ChannelUri.java`
+
+---
+
+### Task P11-5: Final Tutorial Stub Sync (Parts 5 & 6)
+
+**File**: `tutorial/archive/`, `tutorial/cluster/`
+
+Ensure the educational layer matches the reference implementation for the stateful subsystems.
+
+Implement:
+- Create all missing files in `tutorial/archive/` and `tutorial/cluster/` mirroring the `src/` structure.
+- Fill bodies with `@panic("TODO: implement - see docs/tutorial/...")`.
+- Ensure `make tutorial-check` compiles the entire tree.
+- Sync `LESSON` annotations and cross-reference doc links.
+
+---
+
+### Task P11-6: 1.0.0 Quality Gate & Release
+
+**File**: `build.zig.zon`, `CHANGELOG.md`, `Makefile`
+
+Final verification and release packaging.
+
+Tasks:
+- Run full `make interop` matrix.
+- Establish performance baseline: `make bench` (throughput, latency, fanout).
+- Fix any remaining high-priority bugs discovered during soak tests.
+- Bump version to `1.0.0` and update `CHANGELOG.md`.
+- Final audit: `docs/audits/1.0.0-release-audit.md`.
+
+---
+
+### Suggested Sequence
+
+1. **P11-1** (unblocks driver reliability).
+2. **P11-4** (unblocks complex networking).
+3. **P11-2** & **P11-3** (hardens cluster).
+4. **P11-5** (completes educational layer).
+5. **P11-6** (release sign-off).
+

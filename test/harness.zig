@@ -105,4 +105,13 @@ pub const TestHarness = struct {
             }
         }
     }
+    pub fn createClusterNode(self: *TestHarness, ctx: aeron.cluster.consensus.ClusterContext, archive: anytype) !aeron.cluster.consensus.ConsensusModule {
+        _ = archive;
+        return try aeron.cluster.consensus.ConsensusModule.init(self.allocator, ctx);
+    }
+
+    pub fn injectDelay(self: *TestHarness, ms: u64) void {
+        _ = self;
+        std.Thread.sleep(ms * std.time.ns_per_ms);
+    }
 };
