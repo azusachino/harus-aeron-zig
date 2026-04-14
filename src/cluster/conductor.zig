@@ -163,12 +163,43 @@ pub const RedirectResponse = struct {
 // Response Union
 // =============================================================================
 
-/// MemberListPayload — carries member IDs in response to a QueryMemberList command.
-pub const MemberListPayload = struct {
+/// ActiveMember — per-member data in a ClusterMembersExtendedResponse.
+/// Matches the SBE activeMembers group in aeron-cluster-codecs.xml (id=43).
+pub const ActiveMember = struct {
+    leadership_term_id: i64,
+    log_position: i64,
+    time_of_last_append_ns: i64,
+    member_id: i32,
+    ingress_endpoint: []const u8,
+    consensus_endpoint: []const u8,
+    log_endpoint: []const u8,
+    catchup_endpoint: []const u8,
+    archive_endpoint: []const u8,
+
+    pub fn deinit(self: *ActiveMember, allocator: std.mem.Allocator) void {
+        allocator.free(self.ingress_endpoint);
+        allocator.free(self.consensus_endpoint);
+        allocator.free(self.log_endpoint);
+        allocator.free(self.catchup_endpoint);
+        allocator.free(self.archive_endpoint);
+    }
+};
+
+/// ClusterMembersResponse — in-memory representation of ClusterMembersExtendedResponse.
+/// Matches SBE message id=43 in aeron-cluster-codecs.xml.
+/// active_members is caller-owned; call deinit to free.
+pub const ClusterMembersResponse = struct {
     correlation_id: i64,
+    current_time_ns: i64,
     leader_member_id: i32,
-    cluster_size: i32,
-    member_ids: [8]i32, // up to 8 members; 0 = unused slot
+    member_id: i32,
+    active_members: []ActiveMember,
+
+    pub fn deinit(self: *ClusterMembersResponse, allocator: std.mem.Allocator) void {
+        for (self.active_members) |*m| m.deinit(allocator);
+        allocator.free(self.active_members);
+        self.active_members = &.{};
+    }
 };
 
 /// Response — union of all possible cluster responses.
@@ -177,7 +208,7 @@ pub const Response = union(enum) {
     error_response: ErrorResponse,
     commit_position: CommitPositionResponse,
     redirect: RedirectResponse,
-    member_list: MemberListPayload,
+    member_list: ClusterMembersResponse,
 };
 
 // =============================================================================
@@ -392,16 +423,29 @@ pub const ClusterConductor = struct {
     }
 
     /// Handle query_member_list command.
-    /// Returns a MemberListPayload with the current known member IDs.
+    /// Returns a ClusterMembersResponse matching SBE ClusterMembersExtendedResponse (id=43).
+    /// Passive members are omitted — this implementation only tracks active members.
     pub fn handleQueryMemberList(self: *ClusterConductor, cmd: QueryMemberList) !void {
-        var ids: [8]i32 = [_]i32{0} ** 8;
-        ids[0] = self.member_id;
+        var active = try self.allocator.alloc(ActiveMember, 1);
+        errdefer self.allocator.free(active);
+        active[0] = ActiveMember{
+            .leadership_term_id = self.leader_ship_term_id,
+            .log_position = self.commit_position,
+            .time_of_last_append_ns = @truncate(std.time.nanoTimestamp()),
+            .member_id = self.member_id,
+            .ingress_endpoint = try self.allocator.dupe(u8, ""),
+            .consensus_endpoint = try self.allocator.dupe(u8, ""),
+            .log_endpoint = try self.allocator.dupe(u8, ""),
+            .catchup_endpoint = try self.allocator.dupe(u8, ""),
+            .archive_endpoint = try self.allocator.dupe(u8, ""),
+        };
         try self.response_queue.append(self.allocator, .{
-            .member_list = MemberListPayload{
+            .member_list = ClusterMembersResponse{
                 .correlation_id = cmd.correlation_id,
+                .current_time_ns = @truncate(std.time.nanoTimestamp()),
                 .leader_member_id = self.leader_member_id,
-                .cluster_size = 1,
-                .member_ids = ids,
+                .member_id = self.member_id,
+                .active_members = active,
             },
         });
     }
@@ -413,6 +457,7 @@ pub const ClusterConductor = struct {
         var count: i32 = 0;
         for (self.response_queue.items) |*response| {
             handler(response);
+            if (response.* == .member_list) response.member_list.deinit(self.allocator);
             count += 1;
         }
         self.response_queue.clearRetainingCapacity();
@@ -1053,19 +1098,23 @@ test "handleQueryMemberList returns real member IDs" {
 
     const Capture = struct {
         pub var seen: usize = 0;
-        pub var cluster_size: i32 = -1;
+        pub var active_count: usize = 0;
+        pub var member_id: i32 = -1;
     };
     Capture.seen = 0;
     _ = conductor.pollResponses(&struct {
         pub fn handle(resp: *const Response) void {
             if (resp.* == .member_list) {
                 Capture.seen += 1;
-                Capture.cluster_size = resp.member_list.cluster_size;
+                Capture.active_count = resp.member_list.active_members.len;
+                if (resp.member_list.active_members.len > 0)
+                    Capture.member_id = resp.member_list.active_members[0].member_id;
             }
         }
     }.handle);
     try std.testing.expectEqual(@as(usize, 1), Capture.seen);
-    try std.testing.expect(Capture.cluster_size >= 1);
+    try std.testing.expect(Capture.active_count >= 1);
+    try std.testing.expectEqual(@as(i32, 0), Capture.member_id); // conductor.member_id == 0
 }
 
 test "admin_catchup command restores state from leader" {
