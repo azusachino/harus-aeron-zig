@@ -74,6 +74,12 @@ pub const UdpChannel = struct {
         return self.is_multicast;
     }
 
+    /// Returns true when this channel is a Multi-Destination-Cast (MDC) channel.
+    /// MDC channels have a control endpoint and a control-mode parameter.
+    pub fn isMdc(self: *const UdpChannel) bool {
+        return self.control != null and self.control_mode != null;
+    }
+
     fn parseAddress(host_port: []const u8, default_port: u16) !std.net.Address {
         const address_str = stripSubnetMask(host_port);
         if (address_str.len == 0) {
@@ -271,4 +277,70 @@ test "UdpChannel: parse IPv6 wildcard" {
     try std.testing.expect(channel.endpoint != null);
     try std.testing.expectEqual(std.posix.AF.INET6, channel.endpoint.?.any.family);
     try std.testing.expectEqual(@as(u16, 0), channel.endpoint.?.getPort());
+}
+
+test "UdpChannel: MDC dynamic channel identifies as MDC" {
+    const allocator = std.testing.allocator;
+    var channel = try UdpChannel.parse(
+        allocator,
+        "aeron:udp?endpoint=localhost:40001|control=localhost:40000|control-mode=dynamic",
+    );
+    defer channel.deinit(allocator);
+    try std.testing.expect(channel.isMdc());
+    try std.testing.expect(!channel.isMulticast());
+}
+
+test "UdpChannel: MDC manual channel identifies as MDC" {
+    const allocator = std.testing.allocator;
+    var channel = try UdpChannel.parse(
+        allocator,
+        "aeron:udp?endpoint=localhost:40001|control=localhost:40000|control-mode=manual",
+    );
+    defer channel.deinit(allocator);
+    try std.testing.expect(channel.isMdc());
+}
+
+test "UdpChannel: MDC response channel identifies as MDC" {
+    const allocator = std.testing.allocator;
+    var channel = try UdpChannel.parse(
+        allocator,
+        "aeron:udp?endpoint=localhost:40001|control=localhost:40000|control-mode=response",
+    );
+    defer channel.deinit(allocator);
+    try std.testing.expect(channel.isMdc());
+}
+
+test "UdpChannel: plain unicast is not MDC" {
+    const allocator = std.testing.allocator;
+    var channel = try UdpChannel.parse(
+        allocator,
+        "aeron:udp?endpoint=127.0.0.1:40123",
+    );
+    defer channel.deinit(allocator);
+    try std.testing.expect(!channel.isMdc());
+}
+
+test "UdpChannel: interface=0.0.0.0 resolves to any-address" {
+    const allocator = std.testing.allocator;
+    var channel = try UdpChannel.parse(
+        allocator,
+        "aeron:udp?endpoint=127.0.0.1:40123|interface=0.0.0.0",
+    );
+    defer channel.deinit(allocator);
+    try std.testing.expect(channel.local_address != null);
+    const addr = channel.local_address.?.in.sa.addr;
+    try std.testing.expectEqual(@as(u32, 0), std.mem.bigToNative(u32, addr));
+}
+
+test "UdpChannel: interface=0.0.0.0:0 resolves to any-address any-port" {
+    const allocator = std.testing.allocator;
+    var channel = try UdpChannel.parse(
+        allocator,
+        "aeron:udp?endpoint=127.0.0.1:40123|interface=0.0.0.0:0",
+    );
+    defer channel.deinit(allocator);
+    try std.testing.expect(channel.local_address != null);
+    try std.testing.expectEqual(@as(u16, 0), channel.local_address.?.getPort());
+    const addr = channel.local_address.?.in.sa.addr;
+    try std.testing.expectEqual(@as(u32, 0), std.mem.bigToNative(u32, addr));
 }
