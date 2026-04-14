@@ -76,9 +76,66 @@ pub const ReplaySession = struct {
         };
     }
 
+    /// Initialize a ReplaySession by reading the recording data from a file on disk.
+    /// The file contents are read fully into memory and passed to `init`.
+    pub fn initFromFile(
+        allocator: std.mem.Allocator,
+        replay_session_id: i64,
+        recording_id: i64,
+        position: i64,
+        length: i64,
+        recording_start_position: i64,
+        file_path: []const u8,
+    ) !ReplaySession {
+        const file = try std.fs.cwd().openFile(file_path, .{});
+        defer file.close();
+        const content = try file.readToEndAlloc(allocator, 256 * 1024 * 1024);
+        defer allocator.free(content);
+        return ReplaySession.init(allocator, replay_session_id, recording_id, position, length, recording_start_position, content);
+    }
+
     /// Release owned replay data.
     pub fn deinit(self: *ReplaySession) void {
         self.allocator.free(self.source_data);
+    }
+
+    /// Copy up to `out.len` bytes from the current position into `out`.
+    /// Advances `current_position` by the number of bytes copied.
+    /// Sets `active = false` when `current_position >= replay_limit`.
+    /// Returns the number of bytes actually copied.
+    pub fn readInto(self: *ReplaySession, out: []u8) !usize {
+        if (!self.active or self.isComplete()) {
+            return 0;
+        }
+
+        const source_len = @as(i64, @intCast(self.source_data.len));
+        const source_end_position = self.recording_start_position + source_len;
+        const effective_limit = if (self.replay_limit > 0)
+            @min(self.replay_limit, source_end_position)
+        else
+            source_end_position;
+
+        const absolute_position = @max(self.current_position, self.recording_start_position);
+        if (absolute_position >= effective_limit) {
+            self.active = false;
+            return 0;
+        }
+
+        const bytes_available = effective_limit - absolute_position;
+        const copy_len = @min(@as(usize, @intCast(bytes_available)), out.len);
+        if (copy_len == 0) {
+            return 0;
+        }
+
+        const start = @as(usize, @intCast(absolute_position - self.recording_start_position));
+        @memcpy(out[0..copy_len], self.source_data[start .. start + copy_len]);
+        self.current_position += @as(i64, @intCast(copy_len));
+
+        if (self.current_position >= effective_limit) {
+            self.active = false;
+        }
+
+        return copy_len;
     }
 
     /// Read the next chunk of data from current position in the recording.
