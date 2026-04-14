@@ -87,6 +87,16 @@ pub const CommitPositionCmd = struct {
     log_position: i64,
 };
 
+/// AddPassiveMemberCmd — add a node to the passive (non-voting) member list.
+/// Matches the intent of SBE AddPassiveMember (id=70) from aeron-cluster-codecs.xml.
+/// member_endpoints is a borrowed slice in the format "ingress,consensus,log,catchup,archive".
+pub const AddPassiveMemberCmd = struct {
+    member_id: i32,
+    /// Five-endpoint comma-separated string: ingress,consensus,log,catchup,archive.
+    /// Not owned by this struct — caller must ensure it outlives the command.
+    member_endpoints: []const u8,
+};
+
 /// SnapshotBeginCmd — leader signals start of snapshot.
 pub const SnapshotBeginCmd = struct {
     leadership_term_id: i64,
@@ -122,6 +132,7 @@ pub const Command = union(enum) {
     commit_position: CommitPositionCmd,
     snapshot_begin: SnapshotBeginCmd,
     snapshot_end: SnapshotEndCmd,
+    add_passive_member: AddPassiveMemberCmd,
     admin_catchup: struct {
         leader_state: *const ClusterConductor,
     },
@@ -186,19 +197,23 @@ pub const ActiveMember = struct {
 };
 
 /// ClusterMembersResponse — in-memory representation of ClusterMembersExtendedResponse.
-/// Matches SBE message id=43 in aeron-cluster-codecs.xml.
-/// active_members is caller-owned; call deinit to free.
+/// Matches SBE message id=43 in aeron-cluster-codecs.xml (activeMembers + passiveMembers groups).
+/// active_members and passive_members are caller-owned; call deinit to free.
 pub const ClusterMembersResponse = struct {
     correlation_id: i64,
     current_time_ns: i64,
     leader_member_id: i32,
     member_id: i32,
     active_members: []ActiveMember,
+    passive_members: []ActiveMember,
 
     pub fn deinit(self: *ClusterMembersResponse, allocator: std.mem.Allocator) void {
         for (self.active_members) |*m| m.deinit(allocator);
         allocator.free(self.active_members);
         self.active_members = &.{};
+        for (self.passive_members) |*m| m.deinit(allocator);
+        allocator.free(self.passive_members);
+        self.passive_members = &.{};
     }
 };
 
@@ -231,8 +246,10 @@ pub const ClusterConductor = struct {
     snapshot_state: SnapshotState = .none,
     /// Captured conductor state at snapshot begin; null when no snapshot in progress.
     pending_snapshot: ?ClusterConductorState = null,
-    /// Known cluster peers (all members except self). Updated via addPeer/removePeer.
+    /// Known active peers (voting members except self). Populated from config at init or via addPeer.
     peers: std.ArrayList(ActiveMember) = .{},
+    /// Known passive peers (non-voting members). Populated via add_passive_member commands.
+    passive_peers: std.ArrayList(ActiveMember) = .{},
 
     /// Initialize a new ClusterConductor.
     pub fn init(allocator: std.mem.Allocator, member_id: i32) ClusterConductor {
@@ -264,6 +281,41 @@ pub const ClusterConductor = struct {
         try self.peers.append(self.allocator, peer);
     }
 
+    /// Add peers from a static clusterMemberEndpoints string.
+    /// Format: "0,ingress:port,consensus:port,log:port,catchup:port,archive:port|1,..."
+    /// Matches vendor/aeron io.aeron.cluster.ClusterMember.parse().
+    pub fn addPeersFromConfig(self: *ClusterConductor, endpoints_string: []const u8) !void {
+        var member_iter = std.mem.splitScalar(u8, endpoints_string, '|');
+        while (member_iter.next()) |member_str| {
+            if (member_str.len == 0) continue;
+
+            var field_iter = std.mem.splitScalar(u8, member_str, ',');
+            const id_str = field_iter.next() orelse return error.InvalidClusterMember;
+            const ingress = field_iter.next() orelse return error.InvalidClusterMember;
+            const consensus = field_iter.next() orelse return error.InvalidClusterMember;
+            const log_ep = field_iter.next() orelse return error.InvalidClusterMember;
+            const catchup = field_iter.next() orelse return error.InvalidClusterMember;
+            const archive = field_iter.next() orelse return error.InvalidClusterMember;
+
+            const parsed_member_id = try std.fmt.parseInt(i32, id_str, 10);
+
+            // Skip self — we don't add ourselves to the peer list
+            if (parsed_member_id == self.member_id) continue;
+
+            try self.addPeer(.{
+                .leadership_term_id = 0,
+                .log_position = 0,
+                .time_of_last_append_ns = 0,
+                .member_id = parsed_member_id,
+                .ingress_endpoint = try self.allocator.dupe(u8, ingress),
+                .consensus_endpoint = try self.allocator.dupe(u8, consensus),
+                .log_endpoint = try self.allocator.dupe(u8, log_ep),
+                .catchup_endpoint = try self.allocator.dupe(u8, catchup),
+                .archive_endpoint = try self.allocator.dupe(u8, archive),
+            });
+        }
+    }
+
     /// Free all conductor resources.
     pub fn deinit(self: *ClusterConductor) void {
         if (self.pending_snapshot) |*snap| snap.deinit(self.allocator);
@@ -271,6 +323,8 @@ pub const ClusterConductor = struct {
         self.clearSessions();
         for (self.peers.items) |*p| p.deinit(self.allocator);
         self.peers.deinit(self.allocator);
+        for (self.passive_peers.items) |*p| p.deinit(self.allocator);
+        self.passive_peers.deinit(self.allocator);
         self.command_queue.deinit(self.allocator);
         self.response_queue.deinit(self.allocator);
         self.sessions.deinit(self.allocator);
@@ -315,6 +369,9 @@ pub const ClusterConductor = struct {
             },
             .snapshot_end => |snapshot_cmd| {
                 try self.handleSnapshotEnd(snapshot_cmd);
+            },
+            .add_passive_member => |add_passive_cmd| {
+                try self.handleAddPassiveMember(add_passive_cmd);
             },
             .admin_catchup => |catchup_cmd| {
                 try self.catchUpFromLeader(catchup_cmd.leader_state);
@@ -438,9 +495,43 @@ pub const ClusterConductor = struct {
         }
     }
 
+    /// Handle add_passive_member command.
+    /// Parses the 5 comma-separated endpoints and adds the node to the passive_peers list.
+    pub fn handleAddPassiveMember(self: *ClusterConductor, cmd: AddPassiveMemberCmd) !void {
+        if (cmd.member_id == self.member_id) return; // Don't add self to passive list
+
+        var field_iter = std.mem.splitScalar(u8, cmd.member_endpoints, ',');
+        const ingress = field_iter.next() orelse return error.InvalidClusterMember;
+        const consensus = field_iter.next() orelse return error.InvalidClusterMember;
+        const log_ep = field_iter.next() orelse return error.InvalidClusterMember;
+        const catchup = field_iter.next() orelse return error.InvalidClusterMember;
+        const archive = field_iter.next() orelse return error.InvalidClusterMember;
+
+        const peer = ActiveMember{
+            .leadership_term_id = self.leader_ship_term_id,
+            .log_position = self.commit_position,
+            .time_of_last_append_ns = @truncate(std.time.nanoTimestamp()),
+            .member_id = cmd.member_id,
+            .ingress_endpoint = try self.allocator.dupe(u8, ingress),
+            .consensus_endpoint = try self.allocator.dupe(u8, consensus),
+            .log_endpoint = try self.allocator.dupe(u8, log_ep),
+            .catchup_endpoint = try self.allocator.dupe(u8, catchup),
+            .archive_endpoint = try self.allocator.dupe(u8, archive),
+        };
+
+        for (self.passive_peers.items) |*existing| {
+            if (existing.member_id == cmd.member_id) {
+                existing.deinit(self.allocator);
+                existing.* = peer;
+                return;
+            }
+        }
+        try self.passive_peers.append(self.allocator, peer);
+    }
+
     /// Handle query_member_list command.
     /// Returns a ClusterMembersResponse matching SBE ClusterMembersExtendedResponse (id=43).
-    /// Passive members are omitted — this implementation only tracks active members.
+    /// Passive members are included as per SBE spec.
     pub fn handleQueryMemberList(self: *ClusterConductor, cmd: QueryMemberList) !void {
         const now_ns: i64 = @truncate(std.time.nanoTimestamp());
         // self + all known peers
@@ -477,6 +568,30 @@ pub const ClusterConductor = struct {
             };
             built += 1;
         }
+
+        const passive_count = self.passive_peers.items.len;
+        var passive = try self.allocator.alloc(ActiveMember, passive_count);
+        var p_built: usize = 0;
+        errdefer {
+            for (passive[0..p_built]) |*m| m.deinit(self.allocator);
+            self.allocator.free(passive);
+        }
+
+        for (self.passive_peers.items) |*peer| {
+            passive[p_built] = ActiveMember{
+                .leadership_term_id = peer.leadership_term_id,
+                .log_position = peer.log_position,
+                .time_of_last_append_ns = peer.time_of_last_append_ns,
+                .member_id = peer.member_id,
+                .ingress_endpoint = try self.allocator.dupe(u8, peer.ingress_endpoint),
+                .consensus_endpoint = try self.allocator.dupe(u8, peer.consensus_endpoint),
+                .log_endpoint = try self.allocator.dupe(u8, peer.log_endpoint),
+                .catchup_endpoint = try self.allocator.dupe(u8, peer.catchup_endpoint),
+                .archive_endpoint = try self.allocator.dupe(u8, peer.archive_endpoint),
+            };
+            p_built += 1;
+        }
+
         try self.response_queue.append(self.allocator, .{
             .member_list = ClusterMembersResponse{
                 .correlation_id = cmd.correlation_id,
@@ -484,6 +599,7 @@ pub const ClusterConductor = struct {
                 .leader_member_id = self.leader_member_id,
                 .member_id = self.member_id,
                 .active_members = active,
+                .passive_members = passive,
             },
         });
     }
@@ -1215,4 +1331,85 @@ test "admin_catchup command restores state from leader" {
 
     try std.testing.expectEqual(leader.commit_position, follower.commit_position);
     try std.testing.expectEqualSlices(u8, "leader entry", follower.log.entryAt(0).?.data);
+}
+
+test "addPeersFromConfig parses endpoints string" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ClusterConductor.init(allocator, 0);
+    defer conductor.deinit();
+
+    const config = "0,ing0,con0,log0,catch0,arch0|1,ing1,con1,log1,catch1,arch1|2,ing2,con2,log2,catch2,arch2";
+    try conductor.addPeersFromConfig(config);
+
+    // Should skip self (0) and add 1 and 2
+    try std.testing.expectEqual(@as(usize, 2), conductor.peers.items.len);
+
+    const peer1 = conductor.peers.items[0];
+    try std.testing.expectEqual(@as(i32, 1), peer1.member_id);
+    try std.testing.expectEqualStrings("ing1", peer1.ingress_endpoint);
+    try std.testing.expectEqualStrings("con1", peer1.consensus_endpoint);
+    try std.testing.expectEqualStrings("log1", peer1.log_endpoint);
+    try std.testing.expectEqualStrings("catch1", peer1.catchup_endpoint);
+    try std.testing.expectEqualStrings("arch1", peer1.archive_endpoint);
+
+    const peer2 = conductor.peers.items[1];
+    try std.testing.expectEqual(@as(i32, 2), peer2.member_id);
+    try std.testing.expectEqualStrings("ing2", peer2.ingress_endpoint);
+    try std.testing.expectEqualStrings("con2", peer2.consensus_endpoint);
+}
+
+test "handleAddPassiveMember updates passive list" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer {
+        const check = gpa.deinit();
+        std.debug.assert(check == .ok);
+    }
+    const allocator = gpa.allocator();
+
+    var conductor = ClusterConductor.init(allocator, 0);
+    defer conductor.deinit();
+    conductor.becomeLeader(1);
+
+    try conductor.enqueueCommand(.{
+        .add_passive_member = .{
+            .member_id = 99,
+            .member_endpoints = "ing99,con99,log99,catch99,arch99",
+        },
+    });
+    _ = try conductor.doWork();
+
+    try std.testing.expectEqual(@as(usize, 1), conductor.passive_peers.items.len);
+    const peer = conductor.passive_peers.items[0];
+    try std.testing.expectEqual(@as(i32, 99), peer.member_id);
+    try std.testing.expectEqualStrings("ing99", peer.ingress_endpoint);
+    try std.testing.expectEqualStrings("con99", peer.consensus_endpoint);
+    try std.testing.expectEqualStrings("arch99", peer.archive_endpoint);
+
+    // Add another passive member
+    try conductor.enqueueCommand(.{
+        .add_passive_member = .{
+            .member_id = 100,
+            .member_endpoints = "ing100,con100,log100,catch100,arch100",
+        },
+    });
+    _ = try conductor.doWork();
+
+    try std.testing.expectEqual(@as(usize, 2), conductor.passive_peers.items.len);
+
+    // Test updating an existing passive member
+    try conductor.enqueueCommand(.{
+        .add_passive_member = .{
+            .member_id = 99,
+            .member_endpoints = "new_ing,new_con,new_log,new_catch,new_arch",
+        },
+    });
+    _ = try conductor.doWork();
+
+    try std.testing.expectEqual(@as(usize, 2), conductor.passive_peers.items.len);
+    const updated_peer = conductor.passive_peers.items[0];
+    try std.testing.expectEqual(@as(i32, 99), updated_peer.member_id);
+    try std.testing.expectEqualStrings("new_ing", updated_peer.ingress_endpoint);
 }
