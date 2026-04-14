@@ -293,11 +293,11 @@ pub const MediaDriver = struct {
 
     // Embedded mode: call this repeatedly to drive all agents one cycle
     // LESSON(media-driver): doWork is the driver's main I/O loop when running embedded (not threaded). One call cycles Conductor (process commands, manage publications/subscriptions), Sender (send buffered datagrams), and Receiver (receive datagrams, populate log buffers). Non-zero work_count signals progress. See docs/tutorial/03-driver/04-media-driver.md
-    pub fn doWork(self: *MediaDriver) i32 {
+    pub fn doWork(self: *MediaDriver) !i32 {
         var work_count: i32 = 0;
         work_count += self.conductor_agent.doWork();
         work_count += self.sender_agent.doWork();
-        work_count += self.receiver_agent.doWork();
+        work_count += try self.receiver_agent.doWork();
 
         if (self.cnc) |*c| {
             c.setDriverHeartbeat(std.time.milliTimestamp());
@@ -377,7 +377,10 @@ fn senderThreadFunc(md: *MediaDriver) void {
 // Thread function for receiver agent
 fn receiverThreadFunc(md: *MediaDriver) void {
     while (md.running.load(.acquire)) {
-        const work_count = md.receiver_agent.doWork();
+        const work_count = md.receiver_agent.doWork() catch |err| {
+            std.log.err("receiver thread error: {}", .{err});
+            return;
+        };
         md.receiver_idle_strategy.idle(work_count);
     }
 }
@@ -426,7 +429,7 @@ test "MediaDriver: doWork updates cnc heartbeat in embedded mode" {
 
     const before = std.mem.readInt(i64, md.cnc.?.mapped[heartbeat_off..][0..8], .little);
     std.Thread.sleep(2 * std.time.ns_per_ms);
-    _ = md.doWork();
+    _ = try md.doWork();
     const after = std.mem.readInt(i64, md.cnc.?.mapped[heartbeat_off..][0..8], .little);
 
     try testing.expect(after >= before);

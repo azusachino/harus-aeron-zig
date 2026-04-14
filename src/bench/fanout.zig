@@ -85,9 +85,9 @@ pub fn main() !void {
                 if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
                 const result = pub_instance.offer(payload);
                 if (result == .ok) break;
-                _ = driver.doWork();
+                _ = try driver.doWork();
             }
-            _ = driver.doWork();
+            _ = try driver.doWork();
         }
         const elapsed_ns = timer.read();
 
@@ -102,7 +102,7 @@ pub fn main() !void {
             var all_done = true;
             for (0..sub_count) |i| {
                 if (contexts[i].count < message_count) {
-                    _ = driver.doWork();
+                    _ = try driver.doWork();
                     _ = subs[i].poll(handler, &contexts[i], 100);
                     all_done = false;
                 }

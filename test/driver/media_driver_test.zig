@@ -70,5 +70,5 @@ test "MediaDriver: sender and receiver accessible" {
     // Run one duty cycle for each agent
     _ = md.conductor_agent.doWork();
     _ = md.sender_agent.doWork();
-    _ = md.receiver_agent.doWork();
+    _ = try md.receiver_agent.doWork();
 }

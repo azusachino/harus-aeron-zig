@@ -93,7 +93,10 @@ fn runDriver(allocator: std.mem.Allocator, ctx: media_driver.MediaDriverContext)
     is_ready.store(true, .release);
 
     while (signal.isRunning()) {
-        _ = md.doWork();
+        _ = md.doWork() catch |err| {
+            std.log.err("MediaDriver doWork error: {}", .{err});
+            break;
+        };
     }
     std.log.info("MediaDriver shutting down.", .{});
 }
