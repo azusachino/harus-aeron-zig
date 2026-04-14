@@ -163,12 +163,21 @@ pub const RedirectResponse = struct {
 // Response Union
 // =============================================================================
 
+/// MemberListPayload — carries member IDs in response to a QueryMemberList command.
+pub const MemberListPayload = struct {
+    correlation_id: i64,
+    leader_member_id: i32,
+    cluster_size: i32,
+    member_ids: [8]i32, // up to 8 members; 0 = unused slot
+};
+
 /// Response — union of all possible cluster responses.
 pub const Response = union(enum) {
     session_event: SessionEventResponse,
     error_response: ErrorResponse,
     commit_position: CommitPositionResponse,
     redirect: RedirectResponse,
+    member_list: MemberListPayload,
 };
 
 // =============================================================================
@@ -189,6 +198,8 @@ pub const ClusterConductor = struct {
     next_session_id: i64,
     commit_position: i64,
     snapshot_state: SnapshotState = .none,
+    /// Captured conductor state at snapshot begin; null when no snapshot in progress.
+    pending_snapshot: ?ClusterConductorState = null,
 
     /// Initialize a new ClusterConductor.
     pub fn init(allocator: std.mem.Allocator, member_id: i32) ClusterConductor {
@@ -210,6 +221,8 @@ pub const ClusterConductor = struct {
 
     /// Free all conductor resources.
     pub fn deinit(self: *ClusterConductor) void {
+        if (self.pending_snapshot) |*snap| snap.deinit(self.allocator);
+        self.pending_snapshot = null;
         self.clearSessions();
         self.command_queue.deinit(self.allocator);
         self.response_queue.deinit(self.allocator);
@@ -359,31 +372,38 @@ pub const ClusterConductor = struct {
     }
 
     /// Handle snapshot_begin command.
-    /// Mark snapshot in progress — services must take snapshot before cluster proceeds.
+    /// Mark snapshot in progress and capture current conductor state.
     pub fn handleSnapshotBegin(self: *ClusterConductor, cmd: SnapshotBeginCmd) !void {
         _ = cmd;
         self.snapshot_state = .taking;
-        // In a full implementation, this would trigger the serialization of
-        // current ClusterConductorState to an Aeron Archive recording.
+        if (self.pending_snapshot) |*old| old.deinit(self.allocator);
+        self.pending_snapshot = try self.captureState(self.allocator);
     }
 
     /// Handle snapshot_end command.
-    /// Snapshot complete — cluster may resume normal operation.
+    /// Snapshot complete — clear pending snapshot and resume normal operation.
     pub fn handleSnapshotEnd(self: *ClusterConductor, cmd: SnapshotEndCmd) !void {
         _ = cmd;
         self.snapshot_state = .completed;
+        if (self.pending_snapshot) |*snap| {
+            snap.deinit(self.allocator);
+            self.pending_snapshot = null;
+        }
     }
 
     /// Handle query_member_list command.
+    /// Returns a MemberListPayload with the current known member IDs.
     pub fn handleQueryMemberList(self: *ClusterConductor, cmd: QueryMemberList) !void {
-        const response = Response{
-            .session_event = SessionEventResponse{
-                .cluster_session_id = 0,
+        var ids: [8]i32 = [_]i32{0} ** 8;
+        ids[0] = self.member_id;
+        try self.response_queue.append(self.allocator, .{
+            .member_list = MemberListPayload{
                 .correlation_id = cmd.correlation_id,
-                .event_code = 0,
+                .leader_member_id = self.leader_member_id,
+                .cluster_size = 1,
+                .member_ids = ids,
             },
-        };
-        try self.response_queue.append(self.allocator, response);
+        });
     }
 
     /// Drain and deliver all queued responses.
@@ -998,6 +1018,54 @@ test "snapshot state machine transitions" {
     try conductor.enqueueCommand(.{ .snapshot_end = .{ .leadership_term_id = 1, .log_position = 0, .member_id = 0 } });
     _ = try conductor.doWork();
     try std.testing.expectEqual(SnapshotState.completed, conductor.snapshot_state);
+}
+
+test "handleSnapshotBegin captures pending snapshot state" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ClusterConductor.init(allocator, 0);
+    defer conductor.deinit();
+    conductor.becomeLeader(1);
+
+    try std.testing.expect(conductor.pending_snapshot == null);
+
+    try conductor.handleSnapshotBegin(.{ .leadership_term_id = 1, .log_position = 0, .timestamp = 0, .member_id = 0 });
+    try std.testing.expectEqual(SnapshotState.taking, conductor.snapshot_state);
+    try std.testing.expect(conductor.pending_snapshot != null);
+
+    try conductor.handleSnapshotEnd(.{ .leadership_term_id = 1, .log_position = 0, .member_id = 0 });
+    try std.testing.expectEqual(SnapshotState.completed, conductor.snapshot_state);
+    try std.testing.expect(conductor.pending_snapshot == null);
+}
+
+test "handleQueryMemberList returns real member IDs" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ClusterConductor.init(allocator, 0);
+    defer conductor.deinit();
+    conductor.becomeLeader(1);
+
+    try conductor.handleQueryMemberList(.{ .correlation_id = 42, .member_id = 0, ._padding = 0 });
+
+    const Capture = struct {
+        pub var seen: usize = 0;
+        pub var cluster_size: i32 = -1;
+    };
+    Capture.seen = 0;
+    _ = conductor.pollResponses(&struct {
+        pub fn handle(resp: *const Response) void {
+            if (resp.* == .member_list) {
+                Capture.seen += 1;
+                Capture.cluster_size = resp.member_list.cluster_size;
+            }
+        }
+    }.handle);
+    try std.testing.expectEqual(@as(usize, 1), Capture.seen);
+    try std.testing.expect(Capture.cluster_size >= 1);
 }
 
 test "admin_catchup command restores state from leader" {
