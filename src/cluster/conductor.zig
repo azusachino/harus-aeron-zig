@@ -163,12 +163,52 @@ pub const RedirectResponse = struct {
 // Response Union
 // =============================================================================
 
+/// ActiveMember — per-member data in a ClusterMembersExtendedResponse.
+/// Matches the SBE activeMembers group in aeron-cluster-codecs.xml (id=43).
+pub const ActiveMember = struct {
+    leadership_term_id: i64,
+    log_position: i64,
+    time_of_last_append_ns: i64,
+    member_id: i32,
+    ingress_endpoint: []const u8,
+    consensus_endpoint: []const u8,
+    log_endpoint: []const u8,
+    catchup_endpoint: []const u8,
+    archive_endpoint: []const u8,
+
+    pub fn deinit(self: *ActiveMember, allocator: std.mem.Allocator) void {
+        allocator.free(self.ingress_endpoint);
+        allocator.free(self.consensus_endpoint);
+        allocator.free(self.log_endpoint);
+        allocator.free(self.catchup_endpoint);
+        allocator.free(self.archive_endpoint);
+    }
+};
+
+/// ClusterMembersResponse — in-memory representation of ClusterMembersExtendedResponse.
+/// Matches SBE message id=43 in aeron-cluster-codecs.xml.
+/// active_members is caller-owned; call deinit to free.
+pub const ClusterMembersResponse = struct {
+    correlation_id: i64,
+    current_time_ns: i64,
+    leader_member_id: i32,
+    member_id: i32,
+    active_members: []ActiveMember,
+
+    pub fn deinit(self: *ClusterMembersResponse, allocator: std.mem.Allocator) void {
+        for (self.active_members) |*m| m.deinit(allocator);
+        allocator.free(self.active_members);
+        self.active_members = &.{};
+    }
+};
+
 /// Response — union of all possible cluster responses.
 pub const Response = union(enum) {
     session_event: SessionEventResponse,
     error_response: ErrorResponse,
     commit_position: CommitPositionResponse,
     redirect: RedirectResponse,
+    member_list: ClusterMembersResponse,
 };
 
 // =============================================================================
@@ -189,6 +229,10 @@ pub const ClusterConductor = struct {
     next_session_id: i64,
     commit_position: i64,
     snapshot_state: SnapshotState = .none,
+    /// Captured conductor state at snapshot begin; null when no snapshot in progress.
+    pending_snapshot: ?ClusterConductorState = null,
+    /// Known cluster peers (all members except self). Updated via addPeer/removePeer.
+    peers: std.ArrayList(ActiveMember) = .{},
 
     /// Initialize a new ClusterConductor.
     pub fn init(allocator: std.mem.Allocator, member_id: i32) ClusterConductor {
@@ -208,9 +252,25 @@ pub const ClusterConductor = struct {
         };
     }
 
+    /// Register a known peer member. Replaces any existing entry for the same member_id.
+    pub fn addPeer(self: *ClusterConductor, peer: ActiveMember) !void {
+        for (self.peers.items) |*existing| {
+            if (existing.member_id == peer.member_id) {
+                existing.deinit(self.allocator);
+                existing.* = peer;
+                return;
+            }
+        }
+        try self.peers.append(self.allocator, peer);
+    }
+
     /// Free all conductor resources.
     pub fn deinit(self: *ClusterConductor) void {
+        if (self.pending_snapshot) |*snap| snap.deinit(self.allocator);
+        self.pending_snapshot = null;
         self.clearSessions();
+        for (self.peers.items) |*p| p.deinit(self.allocator);
+        self.peers.deinit(self.allocator);
         self.command_queue.deinit(self.allocator);
         self.response_queue.deinit(self.allocator);
         self.sessions.deinit(self.allocator);
@@ -359,31 +419,73 @@ pub const ClusterConductor = struct {
     }
 
     /// Handle snapshot_begin command.
-    /// Mark snapshot in progress — services must take snapshot before cluster proceeds.
+    /// Mark snapshot in progress and capture current conductor state.
     pub fn handleSnapshotBegin(self: *ClusterConductor, cmd: SnapshotBeginCmd) !void {
         _ = cmd;
         self.snapshot_state = .taking;
-        // In a full implementation, this would trigger the serialization of
-        // current ClusterConductorState to an Aeron Archive recording.
+        if (self.pending_snapshot) |*old| old.deinit(self.allocator);
+        self.pending_snapshot = try self.captureState(self.allocator);
     }
 
     /// Handle snapshot_end command.
-    /// Snapshot complete — cluster may resume normal operation.
+    /// Snapshot complete — clear pending snapshot and resume normal operation.
     pub fn handleSnapshotEnd(self: *ClusterConductor, cmd: SnapshotEndCmd) !void {
         _ = cmd;
         self.snapshot_state = .completed;
+        if (self.pending_snapshot) |*snap| {
+            snap.deinit(self.allocator);
+            self.pending_snapshot = null;
+        }
     }
 
     /// Handle query_member_list command.
+    /// Returns a ClusterMembersResponse matching SBE ClusterMembersExtendedResponse (id=43).
+    /// Passive members are omitted — this implementation only tracks active members.
     pub fn handleQueryMemberList(self: *ClusterConductor, cmd: QueryMemberList) !void {
-        const response = Response{
-            .session_event = SessionEventResponse{
-                .cluster_session_id = 0,
-                .correlation_id = cmd.correlation_id,
-                .event_code = 0,
-            },
+        const now_ns: i64 = @truncate(std.time.nanoTimestamp());
+        // self + all known peers
+        const count = 1 + self.peers.items.len;
+        var active = try self.allocator.alloc(ActiveMember, count);
+        var built: usize = 0;
+        errdefer {
+            for (active[0..built]) |*m| m.deinit(self.allocator);
+            self.allocator.free(active);
+        }
+        active[0] = ActiveMember{
+            .leadership_term_id = self.leader_ship_term_id,
+            .log_position = self.commit_position,
+            .time_of_last_append_ns = now_ns,
+            .member_id = self.member_id,
+            .ingress_endpoint = try self.allocator.dupe(u8, ""),
+            .consensus_endpoint = try self.allocator.dupe(u8, ""),
+            .log_endpoint = try self.allocator.dupe(u8, ""),
+            .catchup_endpoint = try self.allocator.dupe(u8, ""),
+            .archive_endpoint = try self.allocator.dupe(u8, ""),
         };
-        try self.response_queue.append(self.allocator, response);
+        built = 1;
+        for (self.peers.items, 1..) |*peer, i| {
+            active[i] = ActiveMember{
+                .leadership_term_id = peer.leadership_term_id,
+                .log_position = peer.log_position,
+                .time_of_last_append_ns = peer.time_of_last_append_ns,
+                .member_id = peer.member_id,
+                .ingress_endpoint = try self.allocator.dupe(u8, peer.ingress_endpoint),
+                .consensus_endpoint = try self.allocator.dupe(u8, peer.consensus_endpoint),
+                .log_endpoint = try self.allocator.dupe(u8, peer.log_endpoint),
+                .catchup_endpoint = try self.allocator.dupe(u8, peer.catchup_endpoint),
+                .archive_endpoint = try self.allocator.dupe(u8, peer.archive_endpoint),
+            };
+            built += 1;
+        }
+        try self.response_queue.append(self.allocator, .{
+            .member_list = ClusterMembersResponse{
+                .correlation_id = cmd.correlation_id,
+                .current_time_ns = now_ns,
+                .leader_member_id = self.leader_member_id,
+                .member_id = self.member_id,
+                .active_members = active,
+            },
+        });
     }
 
     /// Drain and deliver all queued responses.
@@ -393,6 +495,7 @@ pub const ClusterConductor = struct {
         var count: i32 = 0;
         for (self.response_queue.items) |*response| {
             handler(response);
+            if (response.* == .member_list) response.member_list.deinit(self.allocator);
             count += 1;
         }
         self.response_queue.clearRetainingCapacity();
@@ -998,6 +1101,100 @@ test "snapshot state machine transitions" {
     try conductor.enqueueCommand(.{ .snapshot_end = .{ .leadership_term_id = 1, .log_position = 0, .member_id = 0 } });
     _ = try conductor.doWork();
     try std.testing.expectEqual(SnapshotState.completed, conductor.snapshot_state);
+}
+
+test "handleSnapshotBegin captures pending snapshot state" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ClusterConductor.init(allocator, 0);
+    defer conductor.deinit();
+    conductor.becomeLeader(1);
+
+    try std.testing.expect(conductor.pending_snapshot == null);
+
+    try conductor.handleSnapshotBegin(.{ .leadership_term_id = 1, .log_position = 0, .timestamp = 0, .member_id = 0 });
+    try std.testing.expectEqual(SnapshotState.taking, conductor.snapshot_state);
+    try std.testing.expect(conductor.pending_snapshot != null);
+
+    try conductor.handleSnapshotEnd(.{ .leadership_term_id = 1, .log_position = 0, .member_id = 0 });
+    try std.testing.expectEqual(SnapshotState.completed, conductor.snapshot_state);
+    try std.testing.expect(conductor.pending_snapshot == null);
+}
+
+test "handleQueryMemberList returns self in single-node cluster" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ClusterConductor.init(allocator, 0);
+    defer conductor.deinit();
+    conductor.becomeLeader(1);
+
+    try conductor.handleQueryMemberList(.{ .correlation_id = 42, .member_id = 0, ._padding = 0 });
+
+    const Capture = struct {
+        pub var active_count: usize = 0;
+        pub var first_member_id: i32 = -1;
+    };
+    _ = conductor.pollResponses(&struct {
+        pub fn handle(resp: *const Response) void {
+            if (resp.* == .member_list) {
+                Capture.active_count = resp.member_list.active_members.len;
+                if (resp.member_list.active_members.len > 0)
+                    Capture.first_member_id = resp.member_list.active_members[0].member_id;
+            }
+        }
+    }.handle);
+    try std.testing.expectEqual(@as(usize, 1), Capture.active_count);
+    try std.testing.expectEqual(@as(i32, 0), Capture.first_member_id);
+}
+
+test "handleQueryMemberList returns all members in 3-node cluster" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ClusterConductor.init(allocator, 0);
+    defer conductor.deinit();
+    conductor.becomeLeader(1);
+
+    try conductor.addPeer(.{
+        .leadership_term_id = 1,
+        .log_position = 0,
+        .time_of_last_append_ns = 0,
+        .member_id = 1,
+        .ingress_endpoint = try allocator.dupe(u8, "localhost:20111"),
+        .consensus_endpoint = try allocator.dupe(u8, "localhost:20112"),
+        .log_endpoint = try allocator.dupe(u8, "localhost:20113"),
+        .catchup_endpoint = try allocator.dupe(u8, "localhost:20114"),
+        .archive_endpoint = try allocator.dupe(u8, "localhost:20115"),
+    });
+    try conductor.addPeer(.{
+        .leadership_term_id = 1,
+        .log_position = 0,
+        .time_of_last_append_ns = 0,
+        .member_id = 2,
+        .ingress_endpoint = try allocator.dupe(u8, "localhost:20121"),
+        .consensus_endpoint = try allocator.dupe(u8, "localhost:20122"),
+        .log_endpoint = try allocator.dupe(u8, "localhost:20123"),
+        .catchup_endpoint = try allocator.dupe(u8, "localhost:20124"),
+        .archive_endpoint = try allocator.dupe(u8, "localhost:20125"),
+    });
+
+    try conductor.handleQueryMemberList(.{ .correlation_id = 99, .member_id = 0, ._padding = 0 });
+
+    const Capture = struct {
+        pub var active_count: usize = 0;
+    };
+    _ = conductor.pollResponses(&struct {
+        pub fn handle(resp: *const Response) void {
+            if (resp.* == .member_list)
+                Capture.active_count = resp.member_list.active_members.len;
+        }
+    }.handle);
+    try std.testing.expectEqual(@as(usize, 3), Capture.active_count);
 }
 
 test "admin_catchup command restores state from leader" {
