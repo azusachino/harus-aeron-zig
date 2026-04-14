@@ -8,6 +8,8 @@ const aeron = @import("aeron");
 comptime {
     _ = @import("record_replay_test.zig");
     _ = @import("segment_rotation_test.zig");
+    _ = @import("file_rotation_test.zig");
+    _ = @import("file_replay_test.zig");
 }
 
 test "Catalog: recording descriptor can be added and found" {
