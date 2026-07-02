@@ -13,7 +13,7 @@ pub fn fuzz(input: []const u8) void {
     if (input.len < min_size) return;
 
     // Create a buffer and fill with fuzzing input (cycling if necessary)
-    const buf = allocator.alloc(u8, input.len) catch return;
+    const buf = allocator.alignedAlloc(u8, .@"8", input.len) catch return;
     defer allocator.free(buf);
 
     for (0..buf.len) |i| {

@@ -1064,7 +1064,7 @@ test "DriverConductor init and deinit" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
 
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
@@ -1102,7 +1102,7 @@ test "DriverConductor ADD_PUBLICATION creates entry and sends ready response" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
 
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
@@ -1170,7 +1170,7 @@ test "DriverConductor ADD_SUBSCRIPTION creates entry and sends ready response" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
 
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
@@ -1237,7 +1237,7 @@ test "DriverConductor REMOVE_PUBLICATION cleans up entry" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
 
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
@@ -1306,7 +1306,7 @@ test "DriverConductor client keepalive registers and updates client" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
@@ -1349,7 +1349,7 @@ test "DriverConductor checkClientLiveness evicts stale clients" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
@@ -1396,7 +1396,7 @@ test "DriverConductor REMOVE_SUBSCRIPTION closes associated image" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
@@ -1454,7 +1454,7 @@ test "DriverConductor REMOVE_SUBSCRIPTION sends ON_OPERATION_SUCCESS" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
@@ -1528,7 +1528,7 @@ test "DriverConductor TERMINATE_DRIVER stops signal" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
@@ -1564,7 +1564,7 @@ test "DriverConductor IPC Multi-destination: subscription matches later publicat
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
@@ -1632,7 +1632,7 @@ test "DriverConductor IPC Multi-destination: multiple subscribers match single p
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);

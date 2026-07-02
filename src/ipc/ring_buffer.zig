@@ -31,10 +31,10 @@ pub const RecordDescriptor = struct {
 pub const MessageHandler = *const fn (msg_type_id: i32, data: []const u8, ctx: *anyopaque) void;
 
 pub const ManyToOneRingBuffer = struct {
-    buffer: []u8,
+    buffer: []align(8) u8,
     capacity: usize,
 
-    pub fn init(buf: []u8) ManyToOneRingBuffer {
+    pub fn init(buf: []align(8) u8) ManyToOneRingBuffer {
         return .{
             .buffer = buf,
             .capacity = buf.len - METADATA_LENGTH,
@@ -241,7 +241,7 @@ test "unblock recovers from stalled writer" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -287,7 +287,7 @@ test "single write and read roundtrip" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -313,7 +313,7 @@ test "write stores agrona record header as length then type" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -330,7 +330,7 @@ test "write until full returns false" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -351,7 +351,7 @@ test "nextCorrelationId monotonically increases" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -369,7 +369,7 @@ test "wrap-around with padding" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -407,7 +407,7 @@ test "wrap-around encodes padding record with length then padding type" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);

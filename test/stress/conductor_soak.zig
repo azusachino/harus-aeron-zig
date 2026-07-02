@@ -18,7 +18,7 @@ test "conductor_soak: add/remove publication cycles" {
     const iterations = getSoakIterations();
 
     // Setup ring buffer for commands
-    const ring_buf = try allocator.alloc(u8, 16384);
+    const ring_buf = try allocator.alignedAlloc(u8, .@"8", 16384);
     defer allocator.free(ring_buf);
     var rb = aeron.ipc.ring_buffer.ManyToOneRingBuffer.init(ring_buf);
 
@@ -106,7 +106,7 @@ test "conductor_soak: publication lifecycle stress" {
     const iterations = getSoakIterations() / 2;
 
     // Setup infrastructure
-    const ring_buf = try allocator.alloc(u8, 16384);
+    const ring_buf = try allocator.alignedAlloc(u8, .@"8", 16384);
     defer allocator.free(ring_buf);
     var rb = aeron.ipc.ring_buffer.ManyToOneRingBuffer.init(ring_buf);
 

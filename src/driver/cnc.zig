@@ -140,9 +140,9 @@ pub const CncFile = struct {
         return std.mem.readInt(i32, self.mapped[TO_DRIVER_BUF_LEN_OFFSET..][0..4], .little);
     }
 
-    pub fn toDriverBuffer(self: *CncFile) []u8 {
+    pub fn toDriverBuffer(self: *CncFile) []align(8) u8 {
         const len = @as(usize, @intCast(self.toDriverBufferLength()));
-        return self.mapped[CNC_HEADER_SIZE..][0..len];
+        return @alignCast(self.mapped[CNC_HEADER_SIZE..][0..len]);
     }
 
     pub fn totalLength(self: *const CncFile) usize {

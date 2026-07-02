@@ -9,7 +9,7 @@ const net = aeron.net;
 test "DriverConductor: handleAddPublication and handleRemovePublication" {
     const allocator = std.testing.allocator;
 
-    const ring_buf = try allocator.alloc(u8, 16384);
+    const ring_buf = try allocator.alignedAlloc(u8, .@"8", 16384);
     defer allocator.free(ring_buf);
     var rb = aeron.ipc.ring_buffer.ManyToOneRingBuffer.init(ring_buf);
 
@@ -77,7 +77,7 @@ test "DriverConductor: handleAddPublication and handleRemovePublication" {
 test "DriverConductor: handleAddSubscription and handleRemoveSubscription" {
     const allocator = std.testing.allocator;
 
-    const ring_buf = try allocator.alloc(u8, 16384);
+    const ring_buf = try allocator.alignedAlloc(u8, .@"8", 16384);
     defer allocator.free(ring_buf);
     var rb = aeron.ipc.ring_buffer.ManyToOneRingBuffer.init(ring_buf);
 
@@ -140,7 +140,7 @@ test "DriverConductor: handleAddSubscription and handleRemoveSubscription" {
 test "DriverConductor: multiple publications on same channel with reference counting" {
     const allocator = std.testing.allocator;
 
-    const ring_buf = try allocator.alloc(u8, 16384);
+    const ring_buf = try allocator.alignedAlloc(u8, .@"8", 16384);
     defer allocator.free(ring_buf);
     var rb = aeron.ipc.ring_buffer.ManyToOneRingBuffer.init(ring_buf);
 
@@ -219,7 +219,7 @@ test "DriverConductor: multiple publications on same channel with reference coun
 test "DriverConductor: ADD_SUBSCRIPTION with no matching publication" {
     const allocator = std.testing.allocator;
 
-    const ring_buf = try allocator.alloc(u8, 16384);
+    const ring_buf = try allocator.alignedAlloc(u8, .@"8", 16384);
     defer allocator.free(ring_buf);
     var rb = aeron.ipc.ring_buffer.ManyToOneRingBuffer.init(ring_buf);
 
@@ -275,7 +275,7 @@ test "DriverConductor: ADD_SUBSCRIPTION with no matching publication" {
 test "DriverConductor: CLIENT_KEEPALIVE message processed without error" {
     const allocator = std.testing.allocator;
 
-    const ring_buf = try allocator.alloc(u8, 16384);
+    const ring_buf = try allocator.alignedAlloc(u8, .@"8", 16384);
     defer allocator.free(ring_buf);
     var rb = aeron.ipc.ring_buffer.ManyToOneRingBuffer.init(ring_buf);
 
@@ -320,7 +320,7 @@ test "DriverConductor: CLIENT_KEEPALIVE message processed without error" {
 test "DriverConductor: client eviction on timeout" {
     const allocator = std.testing.allocator;
 
-    const ring_buf = try allocator.alloc(u8, 16384);
+    const ring_buf = try allocator.alignedAlloc(u8, .@"8", 16384);
     defer allocator.free(ring_buf);
     var rb = aeron.ipc.ring_buffer.ManyToOneRingBuffer.init(ring_buf);
 

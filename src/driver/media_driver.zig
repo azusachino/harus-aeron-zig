@@ -62,7 +62,7 @@ pub const MediaDriver = struct {
     receiver_thread: ?std.Thread = null,
 
     // Shared buffers
-    ring_buffer_buf: []u8,
+    ring_buffer_buf: []align(8) u8,
     counters_meta_buf: []u8,
     counters_values_buf: []u8,
     loss_report_buf: ?[]align(64) u8,
@@ -220,7 +220,7 @@ pub const MediaDriver = struct {
     /// WARNING: Do NOT use the returned value's agents — pointers will be dangling.
     pub fn init(allocator: std.mem.Allocator, ctx_: MediaDriverContext) !MediaDriver {
         // Allocate ring buffer
-        const ring_buffer_buf = try allocator.alloc(u8, 4096);
+        const ring_buffer_buf = try allocator.alignedAlloc(u8, .@"8", 4096);
         errdefer allocator.free(ring_buffer_buf);
         @memset(ring_buffer_buf, 0);
 

@@ -23,7 +23,7 @@ test "ring_buffer_soak: write/read N messages without loss" {
     const iterations = getSoakIterations();
 
     // 256 KB ring buffer
-    const buf = try allocator.alloc(u8, 256 * 1024);
+    const buf = try allocator.alignedAlloc(u8, .@"8", 256 * 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -85,7 +85,7 @@ test "ring_buffer_soak: capacity-aware write loop" {
     const allocator = arena.allocator();
     const iterations = getSoakIterations();
 
-    const buf = try allocator.alloc(u8, 256 * 1024);
+    const buf = try allocator.alignedAlloc(u8, .@"8", 256 * 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -136,7 +136,7 @@ test "ring_buffer_soak: wrap-around with high message velocity" {
     const allocator = arena.allocator();
     const iterations = getSoakIterations() / 10; // 10x smaller for wrap test
 
-    const buf = try allocator.alloc(u8, 64 * 1024);
+    const buf = try allocator.alignedAlloc(u8, .@"8", 64 * 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
