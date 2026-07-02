@@ -26,10 +26,9 @@ vendor/zig-std
 site/
 .venv/
 
-# Agent state (session-volatile)
-.agents/CURRENT_TASK.md
-.agents/MEMORY.md
-.agents/*.log
+# Agent state (session-volatile, machine-local)
+.asobi/
+asobi.toml
 .gemini/
 .cache/
 

@@ -89,16 +89,6 @@ docs-serve:  ## Preview tutorial/docs site locally
 docs-build:  ## Build tutorial/docs site
 	NO_MKDOCS_2_WARNING=1 DISABLE_MKDOCS_2_WARNING=true uv run mkdocs build --strict
 
-status:  ## Show parity and chapter status from JSONL sources
-	@echo "=== Parity Gaps ==="
-	@jq -r '"\(.layer): \(.completeness_pct)% — gaps: \(.gaps | join(", "))"' .agents/registry/parity_status.jsonl
-	@echo ""
-	@echo "=== Upstream Map — pending ==="
-	@jq -r 'select(.status == "pending") | "\(.layer)/\(.upstream_class)"' test/upstream_map.jsonl
-	@echo ""
-	@echo "=== Chapter Status — incomplete ==="
-	@jq -r 'select(.status != "done") | "\(.id) \(.slug): \(.status)"' .agents/registry/chapter_status.jsonl
-
 run:
 	$(NIX_RUN) zig build run
 

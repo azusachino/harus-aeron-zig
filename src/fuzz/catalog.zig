@@ -1,5 +1,5 @@
 const std = @import("std");
-const time = @import("../time.zig");
+const time = @import("aeron").time;
 const catalog = @import("aeron").archive.catalog;
 
 /// Fuzz parser for archive catalog operations.

@@ -45,7 +45,7 @@ pub const ManyToOneRingBuffer = struct {
         return self.capacity + offset;
     }
 
-    fn loadTail(self: *const ManyToOneRingBuffer) i64 {
+    pub fn loadTail(self: *const ManyToOneRingBuffer) i64 {
         const addr = self.buffer.ptr + self.metadataOffset(TAIL_POSITION_OFFSET);
         return @atomicLoad(i64, @as(*i64, @ptrCast(@alignCast(addr))), .acquire);
     }
@@ -63,7 +63,7 @@ pub const ManyToOneRingBuffer = struct {
         return result == null;
     }
 
-    fn loadHead(self: *const ManyToOneRingBuffer) i64 {
+    pub fn loadHead(self: *const ManyToOneRingBuffer) i64 {
         const addr = self.buffer.ptr + self.metadataOffset(HEAD_POSITION_OFFSET);
         return @atomicLoad(i64, @as(*i64, @ptrCast(@alignCast(addr))), .acquire);
     }
@@ -89,11 +89,17 @@ pub const ManyToOneRingBuffer = struct {
         var tail = self.loadTail();
         var head_cache = self.loadHeadCache();
 
+        // Positions are monotonic and non-negative by construction; a negative
+        // value means the backing metadata is corrupt or uninitialized (e.g. an
+        // untrusted mapped buffer). Refuse the write rather than @intCast-panic below.
+        if (tail < 0 or head_cache < 0) return false;
+
         // Check if we have capacity
         var available = @as(i64, @intCast(self.capacity)) - (tail - head_cache);
         if (available < @as(i64, @intCast(aligned_length))) {
             // Reload head and update cache
             const head = self.loadHead();
+            if (head < 0) return false;
             self.storeHeadCache(head);
             head_cache = head;
             available = @as(i64, @intCast(self.capacity)) - (tail - head_cache);

@@ -8,7 +8,7 @@ const FuzzContext = struct {
 };
 
 fn fuzzHandler(header: *const frame.DataHeader, buffer: []const u8, ctx: *anyopaque) void {
-    const fctx = @as(*FuzzContext, @ptrCast(ctx));
+    const fctx = @as(*FuzzContext, @ptrCast(@alignCast(ctx)));
     fctx.fragment_count += 1;
     _ = header;
     _ = buffer;
@@ -18,7 +18,7 @@ fn fuzzHandler(header: *const frame.DataHeader, buffer: []const u8, ctx: *anyopa
 /// Feeds corrupted term data to the term reader and attempts to read frames.
 pub fn fuzz(input: []const u8) void {
     // Create a term buffer from fuzzing input
-    var term_buf = input;
+    const term_buf = input;
     if (term_buf.len < 256) {
         // Pad if necessary for sensible testing
         return;

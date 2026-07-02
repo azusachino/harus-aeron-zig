@@ -190,7 +190,10 @@ pub fn alignedLength(data_length: usize) usize {
 }
 
 /// Returns the maximum payload bytes that fit in a single DATA frame given mtu.
+/// Saturates to 0 when mtu <= DataHeader.LENGTH: mtu may come from an untrusted
+/// wire SETUP frame, so a degenerate value must not underflow.
 pub fn computeMaxPayload(mtu: usize) usize {
+    if (mtu <= DataHeader.LENGTH) return 0;
     return mtu - DataHeader.LENGTH;
 }
 
