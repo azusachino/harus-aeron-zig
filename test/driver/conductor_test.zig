@@ -4,6 +4,7 @@
 
 const std = @import("std");
 const aeron = @import("aeron");
+const net = aeron.net;
 
 test "DriverConductor: handleAddPublication and handleRemovePublication" {
     const allocator = std.testing.allocator;
@@ -26,7 +27,7 @@ test "DriverConductor: handleAddPublication and handleRemovePublication" {
     const sock = std.math.maxInt(std.posix.socket_t);
     var recv_ep = aeron.transport.ReceiveChannelEndpoint{
         .socket = sock,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_endpoint = aeron.transport.SendChannelEndpoint{ .socket = sock };
     var sender = try aeron.driver.Sender.init(allocator, &send_endpoint, &cm);
@@ -91,12 +92,12 @@ test "DriverConductor: handleAddSubscription and handleRemoveSubscription" {
     @memset(values_buf, 0);
     var cm = aeron.ipc.counters.CountersMap.init(meta_buf, values_buf);
 
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    defer std.posix.close(sock);
+    const sock = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer net.closeSocket(sock);
 
     var recv_ep = aeron.transport.ReceiveChannelEndpoint{
         .socket = sock,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_endpoint = aeron.transport.SendChannelEndpoint{ .socket = sock };
     var sender = try aeron.driver.Sender.init(allocator, &send_endpoint, &cm);
@@ -157,7 +158,7 @@ test "DriverConductor: multiple publications on same channel with reference coun
     const sock = std.math.maxInt(std.posix.socket_t);
     var recv_ep = aeron.transport.ReceiveChannelEndpoint{
         .socket = sock,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_endpoint = aeron.transport.SendChannelEndpoint{ .socket = sock };
     var sender = try aeron.driver.Sender.init(allocator, &send_endpoint, &cm);
@@ -236,7 +237,7 @@ test "DriverConductor: ADD_SUBSCRIPTION with no matching publication" {
     const sock = std.math.maxInt(std.posix.socket_t);
     var recv_ep = aeron.transport.ReceiveChannelEndpoint{
         .socket = sock,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_endpoint = aeron.transport.SendChannelEndpoint{ .socket = sock };
     var sender = try aeron.driver.Sender.init(allocator, &send_endpoint, &cm);
@@ -292,7 +293,7 @@ test "DriverConductor: CLIENT_KEEPALIVE message processed without error" {
     const sock = std.math.maxInt(std.posix.socket_t);
     var recv_ep = aeron.transport.ReceiveChannelEndpoint{
         .socket = sock,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_endpoint = aeron.transport.SendChannelEndpoint{ .socket = sock };
     var sender = try aeron.driver.Sender.init(allocator, &send_endpoint, &cm);
@@ -337,7 +338,7 @@ test "DriverConductor: client eviction on timeout" {
     const sock = std.math.maxInt(std.posix.socket_t);
     var recv_ep = aeron.transport.ReceiveChannelEndpoint{
         .socket = sock,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_endpoint = aeron.transport.SendChannelEndpoint{ .socket = sock };
     var sender = try aeron.driver.Sender.init(allocator, &send_endpoint, &cm);

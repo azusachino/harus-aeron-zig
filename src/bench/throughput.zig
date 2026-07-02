@@ -1,5 +1,6 @@
 const std = @import("std");
 const aeron = @import("aeron");
+const time = aeron.time;
 const MediaDriver = aeron.driver.MediaDriver;
 const ExclusivePublication = aeron.ExclusivePublication;
 const Subscription = aeron.Subscription;
@@ -26,11 +27,11 @@ fn resetLogBuffer(initial_term_id: i32, lb: *LogBuffer, publication: *ExclusiveP
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var start_time = std.time.nanoTimestamp();
+    var start_time = time.nanoTimestamp();
 
     // Start embedded driver
     const driver = try MediaDriver.create(allocator, .{
@@ -75,13 +76,13 @@ pub fn main() !void {
     var warmup_sent: usize = 0;
     context.count = 0;
     while (warmup_sent < 1000) {
-        if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
+        if (time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
         switch (pub_instance.offer(warmup_msg)) {
-            .ok => |_| warmup_sent += 1,
+            .ok => warmup_sent += 1,
             .admin_action => {},
             .back_pressure => {
                 while (context.count < @as(i32, @intCast(warmup_sent))) {
-                    if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
+                    if (time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
                     _ = driver.doWork();
                     _ = sub.poll(handler, &context, 1000);
                 }
@@ -96,7 +97,7 @@ pub fn main() !void {
     }
 
     while (context.count < 1000) {
-        if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
+        if (time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
         _ = driver.doWork();
         _ = sub.poll(handler, &context, 1000);
     }
@@ -115,21 +116,21 @@ pub fn main() !void {
 
         resetLogBuffer(initial_term_id, lb, &pub_instance, img);
         context.count = 0;
-        start_time = std.time.nanoTimestamp(); // Reset global timeout for each size
+        start_time = time.nanoTimestamp(); // Reset global timeout for each size
 
         var sent: usize = 0;
-        var timer = try std.time.Timer.start();
+        var timer_start = time.nanoTimestamp();
         while (sent < message_count) {
-            if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) {
+            if (time.nanoTimestamp() - start_time > TIMEOUT_NS) {
                 std.debug.print("\nTimeout at size {d}: sent={d}, count={d}\n", .{ size, sent, context.count });
                 return error.Timeout;
             }
             switch (pub_instance.offer(payload)) {
-                .ok => |_| sent += 1,
+                .ok => sent += 1,
                 .admin_action => {},
                 .back_pressure => {
                     while (context.count < @as(i32, @intCast(sent))) {
-                        if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) {
+                        if (time.nanoTimestamp() - start_time > TIMEOUT_NS) {
                             std.debug.print("\nTimeout during backpressure at size {d}: sent={d}, count={d}\n", .{ size, sent, context.count });
                             return error.Timeout;
                         }
@@ -139,7 +140,7 @@ pub fn main() !void {
                     resetLogBuffer(initial_term_id, lb, &pub_instance, img);
                     context.count = 0;
                     sent = 0;
-                    timer = try std.time.Timer.start();
+                    timer_start = time.nanoTimestamp();
                     continue;
                 },
                 else => {},
@@ -147,11 +148,12 @@ pub fn main() !void {
             _ = driver.doWork();
             _ = sub.poll(handler, &context, 1000);
         }
-        const elapsed_ns = timer.read();
+        const elapsed_ns_i128 = time.nanoTimestamp() - timer_start;
+        const elapsed_ns = @as(u64, @intCast(@max(elapsed_ns_i128, 0)));
         const elapsed_sec = @as(f64, @floatFromInt(elapsed_ns)) / 1e9;
 
         while (context.count < message_count_i32) {
-            if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) {
+            if (time.nanoTimestamp() - start_time > TIMEOUT_NS) {
                 std.debug.print("\nTimeout during draining at size {d}: sent={d}, count={d}\n", .{ size, sent, context.count });
                 return error.Timeout;
             }

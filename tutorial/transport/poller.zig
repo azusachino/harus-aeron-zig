@@ -14,18 +14,25 @@ pub const Poller = struct {
 
     pub fn init(allocator: std.mem.Allocator) Poller {
         return .{
-            .fds = std.ArrayList(std.posix.pollfd).init(allocator),
-            .endpoints = std.ArrayList(*ReceiveChannelEndpoint).init(allocator),
+            .fds = .{
+                .items = &.{},
+                .capacity = 0,
+            },
+            .endpoints = .{
+                .items = &.{},
+                .capacity = 0,
+            },
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: *Poller) void {
-        self.fds.deinit();
-        self.endpoints.deinit();
+        self.fds.deinit(self.allocator);
+        self.endpoints.deinit(self.allocator);
     }
 
     pub fn add(self: *Poller, fd: std.posix.fd_t, endpoint: *ReceiveChannelEndpoint) !void {
+        _ = self;
         _ = fd;
         _ = endpoint;
         @panic("TODO: implement Poller.add");

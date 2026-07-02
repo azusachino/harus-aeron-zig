@@ -23,6 +23,8 @@ throughput
 vendor/aeron
 vendor/zig
 vendor/zig-std
+site/
+.venv/
 
 # Agent state (session-volatile)
 .agents/CURRENT_TASK.md

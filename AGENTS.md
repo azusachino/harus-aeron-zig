@@ -5,7 +5,7 @@ Aeron protocol reimplementation in Zig. Wire-compatible with the real Aeron UDP 
 
 ## Tech Stack & Architecture
 
-- **Language**: Zig 0.15.2 (nixpkgs unstable)
+- **Language**: Zig 0.16.0 (nixpkgs unstable)
 - **Build**: `zig build` via Makefile
 - **Dev tooling**: Nix devShell (`nix develop`)
 - **Components**:

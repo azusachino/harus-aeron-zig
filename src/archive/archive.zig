@@ -2,6 +2,8 @@
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-archive/src/main/java/io/aeron/archive/Archive.java
 
 const std = @import("std");
+const time = @import("../time.zig");
+const io_mod = @import("../io.zig");
 const conductor_mod = @import("conductor.zig");
 
 // =============================================================================
@@ -157,7 +159,7 @@ pub const ListRecordingsCmd = conductor_mod.ListRecordingsCmd;
 // =============================================================================
 
 fn makeTempArchiveDir(allocator: std.mem.Allocator) ![]u8 {
-    return std.fmt.allocPrint(allocator, "/tmp/harus-aeron-archive-{d}", .{std.time.nanoTimestamp()});
+    return std.fmt.allocPrint(allocator, "/tmp/harus-aeron-archive-{d}", .{time.nanoTimestamp()});
 }
 
 test "ArchiveContext has sensible defaults" {
@@ -171,13 +173,13 @@ test "ArchiveContext has sensible defaults" {
 }
 
 test "Archive init and deinit" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     const archive_dir = try makeTempArchiveDir(allocator);
     defer allocator.free(archive_dir);
-    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), archive_dir) catch {};
 
     const ctx = ArchiveContext{ .archive_dir = archive_dir };
     var archive = try Archive.init(allocator, ctx);
@@ -187,13 +189,13 @@ test "Archive init and deinit" {
 }
 
 test "Archive start and stop" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     const archive_dir = try makeTempArchiveDir(allocator);
     defer allocator.free(archive_dir);
-    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), archive_dir) catch {};
 
     const ctx = ArchiveContext{ .archive_dir = archive_dir };
     var archive = try Archive.init(allocator, ctx);
@@ -209,13 +211,13 @@ test "Archive start and stop" {
 }
 
 test "Archive doWork returns 0 when not running" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     const archive_dir = try makeTempArchiveDir(allocator);
     defer allocator.free(archive_dir);
-    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), archive_dir) catch {};
 
     const ctx = ArchiveContext{ .archive_dir = archive_dir };
     var archive = try Archive.init(allocator, ctx);
@@ -226,14 +228,14 @@ test "Archive doWork returns 0 when not running" {
 }
 
 test "Archive end-to-end: start recording, write data, replay" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     // Create and start archive
     const archive_dir = try makeTempArchiveDir(allocator);
     defer allocator.free(archive_dir);
-    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), archive_dir) catch {};
 
     const ctx = ArchiveContext{ .archive_dir = archive_dir };
     var archive = try Archive.init(allocator, ctx);
@@ -336,13 +338,13 @@ test "Archive end-to-end: start recording, write data, replay" {
 }
 
 test "Archive survives restart for listing and replay" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     const archive_dir = try makeTempArchiveDir(allocator);
     defer allocator.free(archive_dir);
-    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), archive_dir) catch {};
 
     const ctx = ArchiveContext{ .archive_dir = archive_dir };
 

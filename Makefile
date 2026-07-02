@@ -7,9 +7,10 @@ AERON_UPSTREAM_REPO ?= https://github.com/aeron-io/aeron.git
 AERON_UPSTREAM_REF ?= release/1.50.x
 AERON_UPSTREAM_DIR ?= vendor/aeron
 ZIG_UPSTREAM_REPO ?= https://codeberg.org/ziglang/zig
-ZIG_UPSTREAM_REF ?= 0.15.2
+ZIG_UPSTREAM_REF ?= 0.16.0
 ZIG_UPSTREAM_DIR ?= vendor/zig
 INTEROP_ZIG_BUILD_ENV_IMAGE ?= harus-aeron-zig-build-env:latest
+DOCS_PORT ?= 8000
 
 ifeq ($(origin CONTAINER_ENGINE), undefined)
 CONTAINER_ENGINE := $(shell if command -v docker >/dev/null 2>&1; then printf '%s' 'docker'; \
@@ -18,6 +19,7 @@ CONTAINER_ENGINE := $(shell if command -v docker >/dev/null 2>&1; then printf '%
 endif
 
 .PHONY: fmt fmt-check build test lint check clean run tutorial-check lesson-lint \
+       docs docs-serve docs-build \
        fuzz bench stress \
        nix-image k8s-up k8s-down k8s-status k8s-logs colima-up colima-down \
        setup setup-interop setup-interop-base setup-upstream-aeron setup-upstream-zig \
@@ -72,6 +74,14 @@ lesson-lint:  ## Verify all LESSON annotation slugs have a matching docs/tutoria
 	bash scripts/lesson-lint.sh
 
 check: fmt-check build test test-scenarios lesson-lint  ## Full check: fmt + build + all tests
+
+docs: docs-serve  ## Preview tutorial/docs site locally
+
+docs-serve:  ## Preview tutorial/docs site locally
+	NO_MKDOCS_2_WARNING=1 DISABLE_MKDOCS_2_WARNING=true uv run mkdocs serve --dev-addr 127.0.0.1:$(DOCS_PORT)
+
+docs-build:  ## Build tutorial/docs site
+	NO_MKDOCS_2_WARNING=1 DISABLE_MKDOCS_2_WARNING=true uv run mkdocs build --strict
 
 status:  ## Show parity and chapter status from JSONL sources
 	@echo "=== Parity Gaps ==="

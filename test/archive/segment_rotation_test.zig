@@ -5,11 +5,15 @@
 const std = @import("std");
 const aeron = @import("aeron");
 
+fn deleteTree(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(aeron.io.io(), path) catch {};
+}
+
 test "RecordingWriter: rotates segment" {
     const allocator = std.testing.allocator;
     const archive_dir = "/tmp/aeron-archive-test";
-    std.fs.deleteTreeAbsolute(archive_dir) catch {};
-    defer std.fs.deleteTreeAbsolute(archive_dir) catch {};
+    deleteTree(archive_dir);
+    defer deleteTree(archive_dir);
 
     const segment_len: i64 = 1024;
     var writer = try aeron.archive.recorder.RecordingWriter.initWithSegment(
@@ -38,8 +42,8 @@ test "RecordingWriter: rotates segment" {
 test "RecordingWriter: reads across segment boundary" {
     const allocator = std.testing.allocator;
     const archive_dir = "/tmp/aeron-archive-multi-segment";
-    std.fs.deleteTreeAbsolute(archive_dir) catch {};
-    defer std.fs.deleteTreeAbsolute(archive_dir) catch {};
+    deleteTree(archive_dir);
+    defer deleteTree(archive_dir);
 
     const segment_len: i64 = 100;
     var writer = try aeron.archive.recorder.RecordingWriter.initWithSegment(
@@ -77,8 +81,8 @@ test "RecordingWriter: reads across segment boundary" {
 test "RecordingWriter: writes up to boundary then rotates" {
     const allocator = std.testing.allocator;
     const archive_dir = "/tmp/aeron-archive-boundary";
-    std.fs.deleteTreeAbsolute(archive_dir) catch {};
-    defer std.fs.deleteTreeAbsolute(archive_dir) catch {};
+    deleteTree(archive_dir);
+    defer deleteTree(archive_dir);
 
     const segment_len: i64 = 100;
     var writer = try aeron.archive.recorder.RecordingWriter.initWithSegment(
@@ -109,30 +113,30 @@ test "RecordingWriter: writes up to boundary then rotates" {
 
     const seg0_path = try aeron.archive.recorder.RecordingWriter.segmentFilePath(allocator, archive_dir, 99, 0);
     defer allocator.free(seg0_path);
-    const seg0_file = std.fs.openFileAbsolute(seg0_path, .{}) catch |err| {
+    const seg0_file = std.Io.Dir.openFileAbsolute(aeron.io.io(), seg0_path, .{}) catch |err| {
         std.debug.print("Failed to open segment 0: {}\n", .{err});
         return err;
     };
-    defer seg0_file.close();
-    const seg0_size = (try seg0_file.stat()).size;
+    defer seg0_file.close(aeron.io.io());
+    const seg0_size = (try seg0_file.stat(aeron.io.io())).size;
     try std.testing.expectEqual(@as(u64, 100), seg0_size);
 
     const seg1_path = try aeron.archive.recorder.RecordingWriter.segmentFilePath(allocator, archive_dir, 99, 100);
     defer allocator.free(seg1_path);
-    const seg1_file = std.fs.openFileAbsolute(seg1_path, .{}) catch |err| {
+    const seg1_file = std.Io.Dir.openFileAbsolute(aeron.io.io(), seg1_path, .{}) catch |err| {
         std.debug.print("Failed to open segment 1: {}\n", .{err});
         return err;
     };
-    defer seg1_file.close();
-    const seg1_size = (try seg1_file.stat()).size;
+    defer seg1_file.close(aeron.io.io());
+    const seg1_size = (try seg1_file.stat(aeron.io.io())).size;
     try std.testing.expectEqual(@as(u64, 1), seg1_size);
 }
 
 test "RecordingWriter: start and stop positions consistent across segments" {
     const allocator = std.testing.allocator;
     const archive_dir = "/tmp/aeron-archive-positions";
-    std.fs.deleteTreeAbsolute(archive_dir) catch {};
-    defer std.fs.deleteTreeAbsolute(archive_dir) catch {};
+    deleteTree(archive_dir);
+    defer deleteTree(archive_dir);
 
     const segment_len: i64 = 50;
     const start_pos: i64 = 10;

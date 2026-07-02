@@ -35,9 +35,9 @@ Use `make status` to query the current state across these registries.
 - One-off command: `nix develop --command <cmd>` (or `make <target>` — handles this automatically)
 - Never install tools outside the flake — add to `devShells.default.packages` in `flake.nix`
 - `make setup-upstream-aeron` creates/refreshes a shallow clone of the official Aeron upstream in `vendor/aeron`
-- `make setup-upstream-zig` creates/refreshes a shallow clone of Zig `0.15.2` in `vendor/zig`
+- `make setup-upstream-zig` creates/refreshes a shallow clone of Zig `0.16.0` in `vendor/zig`
 - Prefer `vendor/aeron` as the first source of truth for upstream protocol/spec checks when it exists
-- Prefer `vendor/zig` as the first source of truth for Zig 0.15.2 API/source checks when it exists
+- Prefer `vendor/zig` as the first source of truth for Zig 0.16.0 API/source checks when it exists
 - `build.zig` explicitly links libc for executables/tests because the driver records `getpid()` in `cnc.dat`; do not remove that linkage unless the PID path is redesigned to avoid libc
 - Local interop iteration uses a reusable Zig Nix build-env image; warm it with `make setup-interop-base` and reuse it via `ZIG_BUILD_ENV_IMAGE`
 
@@ -69,7 +69,7 @@ Two parallel code trees — agents must maintain both:
 - Current upstream pin for interop/docs/tests: Aeron `1.50.2`
 - Local upstream source checkout should come from `make setup-upstream-aeron` and defaults to `release/1.50.x`
 - If `vendor/aeron` is missing or stale, refresh it before using secondary local docs or network lookups
-- Local Zig upstream source checkout should come from `make setup-upstream-zig` and defaults to tag `0.15.2`
+- Local Zig upstream source checkout should come from `make setup-upstream-zig` and defaults to tag `0.16.0`
 - If Zig API behavior is unclear, check `vendor/zig` before guessing from memory
 - For Agrona shared-memory IPC parity, prefer the vendored C client sources when the Java Agrona sources are not present:
   `vendor/aeron/aeron-client/src/main/c/concurrent/aeron_broadcast_{descriptor,transmitter,receiver}.*`
@@ -97,11 +97,11 @@ Two parallel code trees — agents must maintain both:
 - `src/signal.zig` — installs SIGTERM/SIGINT handlers; exposes `signal.isRunning()` atomic flag for graceful shutdown loops
 - `src/health.zig` — HTTP server on `AERON_HEALTH_PORT` (default 8080) serving `/healthz` (always 200) and `/readyz` (200 when ready flag set); must be started in `main.zig` and loop must check `signal.isRunning()`
 
-## Current Parity State (2026-04-04)
+## Current Parity State (2026-07-01)
 
-- **Core Implementation**: Reached 100% Protocol parity (EXT frame variant implemented) and 95%+ Cluster parity (snapshot state machine and dynamic discovery implemented).
-- **IPC Support**: Implemented IPC Multi-destination support, allowing multiple subscribers on a single IPC channel.
-- **Educational Layer**: Fully recovered. All 24 chapters now have corresponding tutorial stubs in `tutorial/`, verified by `make tutorial-check` and enhanced `scripts/lesson-lint.sh`.
-- **Infrastructure**: `build.zig` unified via `tutorial/test_all.zig`. `Aeron` client updated with advanced driver liveness checks via `cnc.dat` heartbeat verification.
-- **Known parity gaps**: Archive segment rotation edge cases, full snapshot persistence to disk (currently simulated).
-- **Performance**: Baseline established; automation into CI (`make bench-ci`) is the next priority.
+- **Core Implementation**: Protocol, IPC, URI, interop-smoke, and CI-readiness are at 100% in `.agents/registry/parity_status.jsonl`.
+- **Archive**: 98% parity. Remaining gap is full segment file I/O persistence beyond the current segmented writer/replayer coverage.
+- **Cluster**: 98% parity. Remaining gap is `MEMBER_LIST` wire-message discovery; static configuration and local dynamic-discovery state machine coverage already exist.
+- **Educational Layer**: All 24 chapters have tutorial stubs in `tutorial/`; `make tutorial-check` and `scripts/lesson-lint.sh` are the course gates.
+- **Infrastructure**: `build.zig` unified via `tutorial/test_all.zig`. `Aeron` client includes advanced driver liveness checks via `cnc.dat` heartbeat verification.
+- **Performance**: Baseline established; `make bench` is the local regression gate.

@@ -1,6 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+fn getenv(comptime name: [:0]const u8) ?[]const u8 {
+    const ptr = std.c.getenv(name) orelse return null;
+    return std.mem.span(ptr);
+}
+
 pub const Config = struct {
     aeron_dir: []const u8,
     term_buffer_length: i32,
@@ -12,12 +17,12 @@ pub const Config = struct {
 
     pub fn fromEnv() Config {
         return .{
-            .aeron_dir = std.posix.getenv("AERON_DIR") orelse defaultAeronDir(),
+            .aeron_dir = getenv("AERON_DIR") orelse defaultAeronDir(),
             .term_buffer_length = parseEnvInt(i32, "AERON_TERM_LENGTH", 16 * 1024 * 1024),
             .mtu_length = parseEnvInt(i32, "AERON_MTU", 1408),
             .client_timeout_ns = parseEnvInt(i64, "AERON_CLIENT_TIMEOUT_NS", 5_000_000_000),
-            .log_level = std.posix.getenv("AERON_LOG_LEVEL") orelse "info",
-            .log_format = std.posix.getenv("AERON_LOG_FORMAT") orelse "json",
+            .log_level = getenv("AERON_LOG_LEVEL") orelse "info",
+            .log_format = getenv("AERON_LOG_FORMAT") orelse "json",
             .health_port = parseEnvInt(u16, "AERON_HEALTH_PORT", 8080),
         };
     }
@@ -26,8 +31,8 @@ pub const Config = struct {
         return if (builtin.os.tag == .linux) "/dev/shm/aeron" else "/tmp/aeron";
     }
 
-    fn parseEnvInt(comptime T: type, name: []const u8, default: T) T {
-        const val = std.posix.getenv(name) orelse return default;
+    fn parseEnvInt(comptime T: type, comptime name: [:0]const u8, default: T) T {
+        const val = getenv(name) orelse return default;
         return std.fmt.parseInt(T, val, 10) catch default;
     }
 

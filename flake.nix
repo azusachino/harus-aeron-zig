@@ -65,9 +65,9 @@
 
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
-            zig    # 0.15.2 — pinned via flake.lock
+            zig    # 0.16.0 — pinned via flake.lock
             zls
-            nodePackages.prettier
+            prettier
             skopeo  # OCI image transport (push/pull without Docker)
             podman-compose  # local CI interop smoke (podman-compose / podman compose)
           ];

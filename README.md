@@ -56,7 +56,7 @@ Start the course at [`docs/tutorial/README.md`](docs/tutorial/README.md).
 ## Getting Started
 
 ```bash
-# Enter dev shell (provides zig 0.15.2, zls, prettier)
+# Enter dev shell (provides zig 0.16.0, zls, prettier)
 nix develop
 
 # Build
@@ -78,7 +78,7 @@ concept with one Zig concept. Audience: engineers from C/C++/Rust, Go, or Java b
 
 ## Stack
 
-- **Language**: Zig 0.15.2 (pinned via `flake.lock`)
+- **Language**: Zig 0.16.0 (pinned via `flake.lock`)
 - **Dev tooling**: Nix devShell (`nix develop`)
 - **Task runner**: `make`
 - **Interop pin**: Aeron `1.50.2`
@@ -92,10 +92,10 @@ concept with one Zig concept. Audience: engineers from C/C++/Rust, Go, or Java b
 - Shadow clone the official upstream with `make setup-upstream-aeron`.
 - Default upstream ref is `release/1.50.x`, cloned into `vendor/aeron`.
 - Override if needed: `make setup-upstream-aeron AERON_UPSTREAM_REF=1.50.2`.
-- Preferred source of truth for Zig 0.15.2 API/source checks: local `vendor/zig` when present.
+- Preferred source of truth for Zig 0.16.0 API/source checks: local `vendor/zig` when present.
 - If `vendor/zig` is missing or stale, refresh it with `make setup-upstream-zig`.
 - Shadow clone the Zig upstream tag with `make setup-upstream-zig`.
-- Default upstream ref is `0.15.2`, cloned into `vendor/zig`.
+- Default upstream ref is `0.16.0`, cloned into `vendor/zig`.
 - Interop jars and upstream test/doc references in this repo are pinned to Aeron `1.50.2`.
 - For local interop iteration, warm the reusable Zig Nix build-env image once with `make setup-interop-base`.
 - `make interop-smoke` now uses the finite Java helper in `deploy/InteropSmoke.java` so the smoke target exits cleanly after a successful Java subscription handshake against the Zig driver.

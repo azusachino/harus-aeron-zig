@@ -2,6 +2,7 @@
 // LESSON(conductor): Maps the driver's shared memory to read counters, errors, loss reports, and events. See docs/tutorial/03-driver/03-conductor.md
 // Reference: https://github.com/aeron-io/aeron
 const std = @import("std");
+const io_mod = @import("io.zig");
 const counters_mod = @import("ipc/counters.zig");
 const driver_cnc = @import("driver/cnc.zig");
 
@@ -49,7 +50,7 @@ pub const CncDescriptor = struct {
     }
 
     pub fn openMappedCounters(self: CncDescriptor, allocator: std.mem.Allocator) !MappedCounters {
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const preferred_path = self.cncFilePath(&path_buf);
 
         var cnc_file = driver_cnc.CncFile.open(allocator, preferred_path) catch |err| switch (err) {
@@ -69,7 +70,7 @@ pub const CncDescriptor = struct {
     /// Get version from the mapped CnC file.
     /// Returns version number or 0 if file not accessible.
     pub fn getCncVersion(self: CncDescriptor, allocator: std.mem.Allocator) i32 {
-        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const preferred_path = self.cncFilePath(&path_buf);
 
         var cnc_file = driver_cnc.CncFile.open(allocator, preferred_path) catch |err| switch (err) {
@@ -169,8 +170,8 @@ test "CncDescriptor: loadCounters returns valid CountersMap" {
 test "CncDescriptor: openMappedCounters opens live cnc.dat" {
     const allocator = std.testing.allocator;
     const aeron_dir = "/tmp/harus-aeron-cnc-open";
-    defer std.fs.deleteTreeAbsolute(aeron_dir) catch {};
-    try std.fs.makeDirAbsolute(aeron_dir);
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), aeron_dir) catch {};
+    try std.Io.Dir.createDirAbsolute(io_mod.io(), aeron_dir, .default_dir);
 
     const path = try std.fmt.allocPrint(allocator, "{s}/cnc.dat", .{aeron_dir});
     defer allocator.free(path);
@@ -201,8 +202,8 @@ test "CncDescriptor: eventLogPath" {
 test "CncDescriptor: MappedCounters metadata reads version and magic" {
     const allocator = std.testing.allocator;
     const aeron_dir = "/tmp/harus-aeron-cnc-meta";
-    defer std.fs.deleteTreeAbsolute(aeron_dir) catch {};
-    try std.fs.makeDirAbsolute(aeron_dir);
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), aeron_dir) catch {};
+    try std.Io.Dir.createDirAbsolute(io_mod.io(), aeron_dir, .default_dir);
 
     const path = try std.fmt.allocPrint(allocator, "{s}/cnc.dat", .{aeron_dir});
     defer allocator.free(path);
@@ -228,8 +229,8 @@ test "CncDescriptor: MappedCounters metadata reads version and magic" {
 test "CncDescriptor: getCncVersion reads from live CnC file" {
     const allocator = std.testing.allocator;
     const aeron_dir = "/tmp/harus-aeron-cnc-version";
-    defer std.fs.deleteTreeAbsolute(aeron_dir) catch {};
-    try std.fs.makeDirAbsolute(aeron_dir);
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), aeron_dir) catch {};
+    try std.Io.Dir.createDirAbsolute(io_mod.io(), aeron_dir, .default_dir);
 
     const path = try std.fmt.allocPrint(allocator, "{s}/cnc.dat", .{aeron_dir});
     defer allocator.free(path);

@@ -3,6 +3,7 @@
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-archive/src/main/java/io/aeron/archive/ArchiveConductor.java
 
 const std = @import("std");
+const time = @import("../time.zig");
 const catalog_mod = @import("catalog.zig");
 const recorder_mod = @import("recorder.zig");
 const replayer_mod = @import("replayer.zig");
@@ -142,8 +143,8 @@ pub const ArchiveConductor = struct {
             .catalog = catalog_mod.Catalog.init(allocator),
             .recorder = null,
             .replayer = replayer_mod.Replayer.init(allocator),
-            .pending_commands = .{},
-            .responses = .{},
+            .pending_commands = .empty,
+            .responses = .empty,
             .default_segment_file_length = 128 * 1024 * 1024,
         };
     }
@@ -155,8 +156,8 @@ pub const ArchiveConductor = struct {
             .catalog = try catalog_mod.Catalog.initWithArchiveDir(allocator, archive_dir),
             .recorder = null,
             .replayer = replayer_mod.Replayer.init(allocator),
-            .pending_commands = .{},
-            .responses = .{},
+            .pending_commands = .empty,
+            .responses = .empty,
             .default_segment_file_length = 128 * 1024 * 1024,
         };
     }
@@ -270,7 +271,7 @@ pub const ArchiveConductor = struct {
     /// Handle stop_recording command.
     fn handleStopRecording(self: *ArchiveConductor, cmd: StopRecordingCmd) !void {
         const recorder = self.recorder orelse return error.RecorderNotInitialized;
-        try recorder.onStopRecording(cmd.recording_id, std.time.milliTimestamp());
+        try recorder.onStopRecording(cmd.recording_id, time.milliTimestamp());
         try self.queueSuccessResponse(cmd.correlation_id, cmd.recording_id);
     }
 
@@ -495,7 +496,7 @@ pub const ArchiveConductor = struct {
 // =============================================================================
 
 test "ArchiveConductor init and deinit" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -507,7 +508,7 @@ test "ArchiveConductor init and deinit" {
 }
 
 test "ArchiveConductor start_recording command creates recording" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -557,7 +558,7 @@ test "ArchiveConductor start_recording command creates recording" {
 }
 
 test "ArchiveConductor start_recording preserves provided descriptor metadata" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -595,7 +596,7 @@ test "ArchiveConductor start_recording preserves provided descriptor metadata" {
 }
 
 test "ArchiveConductor stop_recording command stops recording" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -640,7 +641,7 @@ test "ArchiveConductor stop_recording command stops recording" {
 }
 
 test "ArchiveConductor replay command creates replay session" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -693,7 +694,7 @@ test "ArchiveConductor replay command creates replay session" {
 }
 
 test "ArchiveConductor stop_replay command stops replay" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -759,7 +760,7 @@ test "ArchiveConductor stop_replay command stops replay" {
 }
 
 test "ArchiveConductor list_recordings command" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -813,7 +814,7 @@ test "ArchiveConductor list_recordings command" {
 }
 
 test "ArchiveConductor processes multiple commands in one doWork" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -867,7 +868,7 @@ test "ArchiveConductor processes multiple commands in one doWork" {
 }
 
 test "ArchiveConductor pollResponses drains queue" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -918,7 +919,7 @@ test "ArchiveConductor pollResponses drains queue" {
 }
 
 test "ArchiveConductor extend_recording reuses existing recording" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -979,7 +980,7 @@ test "ArchiveConductor extend_recording reuses existing recording" {
 }
 
 test "ArchiveConductor extend_recording unknown id returns error response" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1008,7 +1009,7 @@ test "ArchiveConductor extend_recording unknown id returns error response" {
 }
 
 test "getRecordingDescriptorBytes returns encoded descriptor" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1049,7 +1050,7 @@ test "getRecordingDescriptorBytes returns encoded descriptor" {
 }
 
 test "getRecordingDescriptorBytes with unknown recording" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1062,7 +1063,7 @@ test "getRecordingDescriptorBytes with unknown recording" {
 }
 
 test "truncate recording: success" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1119,7 +1120,7 @@ test "truncate recording: success" {
 }
 
 test "truncate recording: unknown recording" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1139,7 +1140,7 @@ test "truncate recording: unknown recording" {
 }
 
 test "truncate recording: position out of range" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1189,7 +1190,7 @@ test "truncate recording: position out of range" {
 }
 
 test "truncate recording: active recording rejected" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

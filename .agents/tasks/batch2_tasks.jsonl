@@ -1,0 +1,3 @@
+{"id": "P1-11", "lane": "liveness", "status": "done", "file": ".agents/tasks/p1-batch2-liveness.md"}
+{"id": "P1-12", "lane": "flowcontrol", "status": "done", "file": ".agents/tasks/p1-batch2-flowcontrol.md"}
+{"id": "P1-15", "lane": "idlestrategy", "status": "done", "file": ".agents/tasks/p1-batch2-idlestrategy.md"}

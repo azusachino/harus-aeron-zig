@@ -4,7 +4,7 @@ const ring_buffer = @import("aeron").ipc.ring_buffer;
 /// Fuzz parser for ring buffer operations.
 /// Creates a ring buffer backed by corrupted memory and attempts reads.
 pub fn fuzz(input: []const u8) void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

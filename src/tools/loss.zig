@@ -4,11 +4,12 @@
 const std = @import("std");
 const loss_report_mod = @import("../loss_report.zig");
 const cnc_mod = @import("../cnc.zig");
+const io_mod = @import("../io.zig");
 
 pub fn run(aeron_dir: []const u8) void {
     var stdout_buf: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&stdout_buf);
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var stdout = std.Io.File.stdout().writer(io_mod.io(), &stdout_buf);
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -20,14 +21,14 @@ pub fn run(aeron_dir: []const u8) void {
     stdout.interface.print("===========\n\n", .{}) catch return;
 
     // Try to read loss-report.dat as a flat binary file (array of LossEntry structs).
-    const file = std.fs.cwd().openFile(loss_path, .{}) catch {
+    const file = std.Io.Dir.cwd().openFile(io_mod.io(), loss_path, .{}) catch {
         stdout.interface.print("No loss report file found at {s}\n", .{loss_path}) catch return;
         stdout.interface.print("(driver may not be running or no gaps have been observed)\n", .{}) catch return;
         return;
     };
-    defer file.close();
+    defer file.close(io_mod.io());
 
-    const stat = file.stat() catch {
+    const stat = file.stat(io_mod.io()) catch {
         stdout.interface.print("Could not stat loss report file.\n", .{}) catch return;
         return;
     };
@@ -48,7 +49,7 @@ pub fn run(aeron_dir: []const u8) void {
     defer allocator.free(buf);
     @memset(buf, 0);
 
-    const n = file.readAll(buf) catch {
+    const n = file.readPositionalAll(io_mod.io(), buf, 0) catch {
         stdout.interface.print("Could not read loss report file.\n", .{}) catch return;
         return;
     };
@@ -97,8 +98,8 @@ test "loss tool: reads real loss-report.dat fixture" {
 
     // Write a loss-report fixture to a temp file
     const dir_path = "/tmp/harus-aeron-loss-tool-test";
-    defer std.fs.deleteTreeAbsolute(dir_path) catch {};
-    try std.fs.makeDirAbsolute(dir_path);
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), dir_path) catch {};
+    try std.Io.Dir.createDirAbsolute(io_mod.io(), dir_path, .default_dir);
 
     const loss_path = try std.fmt.allocPrint(allocator, "{s}/loss-report.dat", .{dir_path});
     defer allocator.free(loss_path);
@@ -110,17 +111,17 @@ test "loss tool: reads real loss-report.dat fixture" {
     report.recordObservation(512, 200_000_000, 2, 102, "aeron:ipc");
 
     {
-        const f = try std.fs.cwd().createFile(loss_path, .{});
-        defer f.close();
-        try f.writeAll(&buf);
+        const f = try std.Io.Dir.cwd().createFile(io_mod.io(), loss_path, .{});
+        defer f.close(io_mod.io());
+        try f.writeStreamingAll(io_mod.io(), &buf);
     }
 
     // Verify we can open and parse the fixture
-    const f2 = try std.fs.cwd().openFile(loss_path, .{});
-    defer f2.close();
+    const f2 = try std.Io.Dir.cwd().openFile(io_mod.io(), loss_path, .{});
+    defer f2.close(io_mod.io());
 
     var read_buf align(64) = [_]u8{0} ** loss_report_mod.LOSS_REPORT_BUFFER_LENGTH;
-    const n = try f2.readAll(&read_buf);
+    const n = try f2.readPositionalAll(io_mod.io(), &read_buf, 0);
     try std.testing.expect(n >= @sizeOf(loss_report_mod.LossEntry));
 
     const r2 = loss_report_mod.LossReport.init(&read_buf);

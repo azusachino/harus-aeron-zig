@@ -1,5 +1,6 @@
 const std = @import("std");
 const aeron = @import("aeron");
+const time = aeron.time;
 const MediaDriver = aeron.driver.MediaDriver;
 const ExclusivePublication = aeron.ExclusivePublication;
 const Subscription = aeron.Subscription;
@@ -15,11 +16,11 @@ const Context = struct {
 const TIMEOUT_NS = 60 * std.time.ns_per_s;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const start_time = std.time.nanoTimestamp();
+    const start_time = time.nanoTimestamp();
 
     // Start embedded driver
     const driver = try MediaDriver.create(allocator, .{
@@ -65,7 +66,7 @@ pub fn main() !void {
             if (data.len < 8) return;
             const c = @as(*Context, @ptrCast(@alignCast(ctx)));
             const sent_ts = std.mem.readInt(i64, data[0..8], .little);
-            const now = @as(i64, @intCast(std.time.nanoTimestamp()));
+            const now = @as(i64, @intCast(time.nanoTimestamp()));
             const latency = @as(u64, @intCast(now - sent_ts));
             if (c.count < c.latencies.len) {
                 c.latencies[c.count] = latency;
@@ -77,14 +78,14 @@ pub fn main() !void {
     std.debug.print("Measuring round-trip latency for {d} messages...\n", .{message_count});
 
     for (0..message_count) |i| {
-        if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
-        const now = @as(i64, @intCast(std.time.nanoTimestamp()));
+        if (time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
+        const now = @as(i64, @intCast(time.nanoTimestamp()));
         var payload: [16]u8 = undefined;
         std.mem.writeInt(i64, payload[0..8], now, .little);
         std.mem.writeInt(i64, payload[8..16], @as(i64, @intCast(i)), .little);
 
         while (true) {
-            if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
+            if (time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
             const result = pub_instance.offer(&payload);
             if (result == .ok) break;
             _ = driver.doWork();
@@ -96,7 +97,7 @@ pub fn main() !void {
 
     // Collect remaining latencies
     while (context.count < message_count) {
-        if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
+        if (time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
         _ = driver.doWork();
         _ = sub.poll(handler, &context, 100);
     }

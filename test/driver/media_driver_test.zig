@@ -5,24 +5,28 @@
 const std = @import("std");
 const aeron = @import("aeron");
 
+fn deleteTree(path: []const u8) void {
+    std.Io.Dir.cwd().deleteTree(aeron.io.io(), path) catch {};
+}
+
 test "MediaDriver: create and destroy" {
     const allocator = std.testing.allocator;
     const ctx = aeron.driver.MediaDriverContext{
         .aeron_dir = "/tmp/aeron-test-driver",
     };
     // Ensure clean state
-    std.fs.deleteTreeAbsolute(ctx.aeron_dir) catch {};
-    defer std.fs.deleteTreeAbsolute(ctx.aeron_dir) catch {};
+    deleteTree(ctx.aeron_dir);
+    defer deleteTree(ctx.aeron_dir);
 
     const md = try aeron.driver.MediaDriver.create(allocator, ctx);
     defer md.destroy();
 
     try std.testing.expect(md.cnc != null);
 
-    const dir = try std.fs.openDirAbsolute(ctx.aeron_dir, .{});
+    const dir = try std.Io.Dir.openDirAbsolute(aeron.io.io(), ctx.aeron_dir, .{});
     var dir_mutable = dir;
-    defer dir_mutable.close();
-    try dir_mutable.access("cnc.dat", .{});
+    defer dir_mutable.close(aeron.io.io());
+    try dir_mutable.access(aeron.io.io(), "cnc.dat", .{});
 }
 
 test "MediaDriver: conductor doWork cycle executes" {
@@ -31,8 +35,8 @@ test "MediaDriver: conductor doWork cycle executes" {
         .aeron_dir = "/tmp/aeron-test-driver-conduct",
     };
     // Ensure clean state
-    std.fs.deleteTreeAbsolute(ctx.aeron_dir) catch {};
-    defer std.fs.deleteTreeAbsolute(ctx.aeron_dir) catch {};
+    deleteTree(ctx.aeron_dir);
+    defer deleteTree(ctx.aeron_dir);
 
     const md = try aeron.driver.MediaDriver.create(allocator, ctx);
     defer md.destroy();
@@ -56,8 +60,8 @@ test "MediaDriver: sender and receiver accessible" {
         .aeron_dir = "/tmp/aeron-test-driver-agents",
     };
     // Ensure clean state
-    std.fs.deleteTreeAbsolute(ctx.aeron_dir) catch {};
-    defer std.fs.deleteTreeAbsolute(ctx.aeron_dir) catch {};
+    deleteTree(ctx.aeron_dir);
+    defer deleteTree(ctx.aeron_dir);
 
     const md = try aeron.driver.MediaDriver.create(allocator, ctx);
     defer md.destroy();

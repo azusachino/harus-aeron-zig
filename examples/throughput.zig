@@ -45,10 +45,10 @@ fn printUsage() void {
     , .{});
 }
 
-fn parseArgs(allocator: std.mem.Allocator) !Options {
+fn parseArgs(init: std.process.Init, allocator: std.mem.Allocator) !Options {
     var opts = Options{};
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(allocator);
+    defer allocator.free(args);
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
@@ -92,13 +92,13 @@ fn resetIpcLogBuffer(initial_term_id: i32, lb: *LogBuffer, publication: *Exclusi
     img.* = Image.init(img.session_id, img.stream_id, initial_term_id, lb);
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     // ZIG: GPA for memory safety.
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const opts = parseArgs(allocator) catch |err| switch (err) {
+    const opts = parseArgs(init, allocator) catch |err| switch (err) {
         error.InvalidArguments => {
             printUsage();
             return;
@@ -168,7 +168,7 @@ pub fn main() !void {
         // AERON: offer() writes the message and advances the tail cursor via CAS.
         // Reset the single-term IPC log when it fills so the example does not stall permanently.
         switch (publication.offer(msg)) {
-            .ok => |_| total_sent += 1,
+            .ok => total_sent += 1,
             .admin_action => {},
             .back_pressure => resetIpcLogBuffer(initial_term_id, lb, &publication, img),
             else => {},

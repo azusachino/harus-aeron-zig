@@ -1,6 +1,7 @@
 // Aeron client library root
 // Reference: https://github.com/aeron-io/aeron
 const std = @import("std");
+const io_mod = @import("io.zig");
 
 pub const protocol = @import("protocol/frame.zig");
 pub const logbuffer = @import("logbuffer/log_buffer.zig");
@@ -10,6 +11,9 @@ pub const cnc = @import("driver/cnc.zig");
 pub const loss_report = @import("loss_report.zig");
 pub const event_log = @import("event_log.zig");
 pub const counters_report = @import("counters_report.zig");
+pub const io = io_mod;
+pub const time = @import("time.zig");
+pub const net = @import("net.zig");
 pub const archive = struct {
     pub const protocol = @import("archive/protocol.zig");
     pub const catalog = @import("archive/catalog.zig");
@@ -82,7 +86,7 @@ pub const Aeron = struct {
 
         // Verify driver heartbeat (must be recent)
         const heartbeat = file.getDriverHeartbeat();
-        const now = std.time.milliTimestamp();
+        const now = time.milliTimestamp();
         if (now - heartbeat > 10_000) { // 10s threshold
             return error.DriverTimeout;
         }
@@ -158,7 +162,7 @@ pub const Aeron = struct {
 
     // LESSON(what-is-aeron): sendKeepaliveIfDue maintains client liveness with the driver during idle periods by writing CMD_CLIENT_KEEPALIVE with the 8-byte little-endian client_id into the shared to-driver ring buffer. This is independent of publication/subscription commands so the conductor does not evict quiet clients after its 5-second timeout. See docs/tutorial/00-orientation/01-what-is-aeron.md
     fn sendKeepaliveIfDue(self: *Aeron) i32 {
-        const now_ms = std.time.milliTimestamp();
+        const now_ms = time.milliTimestamp();
         if (self.last_keepalive_ms != 0 and (now_ms - self.last_keepalive_ms) < KEEPALIVE_INTERVAL_MS) {
             return 0;
         }
@@ -393,13 +397,13 @@ pub const Aeron = struct {
 };
 
 test {
-    std.testing.refAllDeclsRecursive(@This());
+    std.testing.refAllDecls(@This());
 }
 
 test "Aeron init and deinit" {
     const allocator = std.testing.allocator;
     const ctx = AeronContext{ .aeron_dir = "/tmp/aeron-test-client" };
-    defer std.fs.deleteTreeAbsolute(ctx.aeron_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), ctx.aeron_dir) catch {};
 
     // Need a driver to create cnc.dat first
     var md = try driver.MediaDriver.create(allocator, .{ .aeron_dir = ctx.aeron_dir });
@@ -424,7 +428,7 @@ test "Aeron addSubscription encodes upstream SubscriptionMessageFlyweight layout
         .to_clients_broadcast_receiver = undefined,
         .counters_map = undefined,
         .client_id = 7,
-        .last_keepalive_ms = std.time.milliTimestamp(),
+        .last_keepalive_ms = time.milliTimestamp(),
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},
@@ -475,7 +479,7 @@ test "Aeron addPublication encodes upstream PublicationMessageFlyweight layout" 
         .to_clients_broadcast_receiver = undefined,
         .counters_map = undefined,
         .client_id = 9,
-        .last_keepalive_ms = std.time.milliTimestamp(),
+        .last_keepalive_ms = time.milliTimestamp(),
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},
@@ -514,8 +518,8 @@ test "Aeron addPublication encodes upstream PublicationMessageFlyweight layout" 
 test "Aeron doWork parses full publication-ready payload and maps log buffer" {
     const allocator = std.testing.allocator;
     const aeron_dir = "/tmp/aeron-test-publication-ready";
-    defer std.fs.deleteTreeAbsolute(aeron_dir) catch {};
-    try std.fs.makeDirAbsolute(aeron_dir);
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), aeron_dir) catch {};
+    try std.Io.Dir.createDirAbsolute(io_mod.io(), aeron_dir, .default_dir);
 
     const log_file_name = "pub-ready.logbuffer";
     const log_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ aeron_dir, log_file_name });
@@ -556,7 +560,7 @@ test "Aeron doWork parses full publication-ready payload and maps log buffer" {
         .to_clients_broadcast_receiver = ipc.broadcast.BroadcastReceiver.wrap(bcast.full_buffer),
         .counters_map = counters_map,
         .client_id = 12,
-        .last_keepalive_ms = std.time.milliTimestamp(),
+        .last_keepalive_ms = time.milliTimestamp(),
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},
@@ -644,7 +648,7 @@ test "Aeron removePublication encodes upstream RemoveMessageFlyweight layout" {
         .to_clients_broadcast_receiver = undefined,
         .counters_map = undefined,
         .client_id = 11,
-        .last_keepalive_ms = std.time.milliTimestamp(),
+        .last_keepalive_ms = time.milliTimestamp(),
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},
@@ -691,7 +695,7 @@ test "Aeron removeSubscription encodes upstream RemoveMessageFlyweight layout" {
         .to_clients_broadcast_receiver = undefined,
         .counters_map = undefined,
         .client_id = 13,
-        .last_keepalive_ms = std.time.milliTimestamp(),
+        .last_keepalive_ms = time.milliTimestamp(),
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},

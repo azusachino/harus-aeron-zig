@@ -3,6 +3,9 @@
 // LESSON(media-driver): MediaDriver is the top-level facade that allocates and wires three agents (Conductor, Sender, Receiver), shared IPC buffers (ring buffer, broadcast, counters), and endpoints. It can run standalone (thread-per-agent) or embedded (doWork loop). See docs/tutorial/03-driver/04-media-driver.md
 
 const std = @import("std");
+const io_mod = @import("../io.zig");
+const net = @import("../net.zig");
+const time = @import("../time.zig");
 const builtin = @import("builtin");
 pub const conductor = @import("conductor.zig");
 pub const sender = @import("sender.zig");
@@ -21,6 +24,13 @@ const ManyToOneRingBuffer = ring_buffer.ManyToOneRingBuffer;
 const BroadcastTransmitter = broadcast.BroadcastTransmitter;
 const CountersMap = counters.CountersMap;
 const IdleStrategy = idle_strategy.IdleStrategy;
+
+fn makeDir(path: []const u8) !void {
+    std.Io.Dir.cwd().createDir(io_mod.io(), path, .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return error.CreateDirFailed,
+    };
+}
 
 // LESSON(media-driver): MediaDriverContext holds all tunable driver parameters (buffer sizes, timeouts, MTU, port). Callers pass this struct to create/init; Zig's partial-field initialisation makes overriding a single setting clean: .{ .mtu_length = 8192 }. See docs/tutorial/03-driver/04-media-driver.md
 pub const MediaDriverContext = struct {
@@ -82,9 +92,7 @@ pub const MediaDriver = struct {
         errdefer allocator.destroy(self);
 
         // Ensure aeron_dir exists
-        std.fs.cwd().makePath(ctx_.aeron_dir) catch |err| {
-            if (err != error.PathAlreadyExists) return err;
-        };
+        try makeDir(ctx_.aeron_dir);
 
         const cnc_path = try std.fmt.allocPrint(allocator, "{s}/cnc.dat", .{ctx_.aeron_dir});
         defer allocator.free(cnc_path);
@@ -100,7 +108,7 @@ pub const MediaDriver = struct {
             .counters_values_buffer_length = 1024 * 1024,
             .error_log_buffer_length = 1024 * 1024,
             .client_liveness_timeout_ns = ctx_.client_liveness_timeout_ns,
-            .start_timestamp_ms = std.time.milliTimestamp(),
+            .start_timestamp_ms = time.milliTimestamp(),
             .driver_pid = @as(i64, @intCast(std.c.getpid())),
         };
 
@@ -108,7 +116,7 @@ pub const MediaDriver = struct {
         errdefer self.cnc.?.deinit();
 
         // Write initial driver heartbeat so Java client's connectToDriver() check passes
-        const now_ms: i64 = std.time.milliTimestamp();
+        const now_ms: i64 = time.milliTimestamp();
         self.cnc.?.setDriverHeartbeat(now_ms);
 
         // Use buffers from CnC
@@ -143,15 +151,15 @@ pub const MediaDriver = struct {
         self.counters_map = CountersMap.init(self.counters_meta_buf, self.counters_values_buf);
 
         // Create dummy endpoints for sender/receiver
-        const recv_fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
-        errdefer std.posix.close(recv_fd);
-        const send_fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
-        errdefer std.posix.close(send_fd);
+        const recv_fd = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
+        errdefer net.closeSocket(recv_fd);
+        const send_fd = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
+        errdefer net.closeSocket(send_fd);
 
         // Bind socket to configured port (if non-zero)
         const bound = if (ctx_.listen_port != 0) blk: {
-            const bind_addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, ctx_.listen_port);
-            std.posix.bind(recv_fd, &bind_addr.any, bind_addr.getOsSockLen()) catch |err| {
+            const bind_addr = net.Address.initIp4(.{ 0, 0, 0, 0 }, ctx_.listen_port);
+            net.bindSocket(recv_fd, &bind_addr.any, bind_addr.getOsSockLen()) catch |err| {
                 if (builtin.mode == .Debug) {
                     std.debug.print("[DRIVER] Failed to bind to port {d}: {any}\n", .{ ctx_.listen_port, err });
                 }
@@ -165,7 +173,7 @@ pub const MediaDriver = struct {
 
         self.recv_endpoint = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
             .socket = recv_fd,
-            .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, if (bound) ctx_.listen_port else 0),
+            .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, if (bound) ctx_.listen_port else 0),
         };
         self.send_endpoint = @import("../transport/endpoint.zig").SendChannelEndpoint{
             .socket = send_fd,
@@ -228,10 +236,10 @@ pub const MediaDriver = struct {
         const broadcaster = try BroadcastTransmitter.init(allocator, 8192);
         const counters_map = CountersMap.init(counters_meta_buf, counters_values_buf);
 
-        const recv_fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
-        errdefer std.posix.close(recv_fd);
-        const send_fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
-        errdefer std.posix.close(send_fd);
+        const recv_fd = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
+        errdefer net.closeSocket(recv_fd);
+        const send_fd = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
+        errdefer net.closeSocket(send_fd);
 
         return .{
             .allocator = allocator,
@@ -253,7 +261,7 @@ pub const MediaDriver = struct {
             .ring_buf = ring_buf,
             .broadcaster = broadcaster,
             .counters_map = counters_map,
-            .recv_endpoint = .{ .socket = recv_fd, .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0) },
+            .recv_endpoint = .{ .socket = recv_fd, .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0) },
             .send_endpoint = .{ .socket = send_fd },
         };
     }
@@ -270,9 +278,9 @@ pub const MediaDriver = struct {
             self.allocator.free(self.counters_meta_buf);
             self.allocator.free(self.counters_values_buf);
         }
-        std.posix.close(self.send_endpoint.socket);
+        net.closeSocket(self.send_endpoint.socket);
         if (self.recv_endpoint.socket != self.send_endpoint.socket) {
-            std.posix.close(self.recv_endpoint.socket);
+            net.closeSocket(self.recv_endpoint.socket);
         }
     }
 
@@ -300,7 +308,7 @@ pub const MediaDriver = struct {
         work_count += self.receiver_agent.doWork();
 
         if (self.cnc) |*c| {
-            c.setDriverHeartbeat(std.time.milliTimestamp());
+            c.setDriverHeartbeat(time.milliTimestamp());
         }
         self.conductor_idle_strategy.idle(work_count);
         return work_count;
@@ -359,7 +367,7 @@ fn conductorThreadFunc(md: *MediaDriver) void {
     while (md.running.load(.acquire)) {
         const work_count = md.conductor_agent.doWork();
         if (md.cnc) |*c| {
-            c.setDriverHeartbeat(std.time.milliTimestamp());
+            c.setDriverHeartbeat(time.milliTimestamp());
         }
         md.conductor_idle_strategy.idle(work_count);
     }
@@ -368,7 +376,7 @@ fn conductorThreadFunc(md: *MediaDriver) void {
 // Thread function for sender agent
 fn senderThreadFunc(md: *MediaDriver) void {
     while (md.running.load(.acquire)) {
-        md.sender_agent.setCurrentTimeMs(std.time.milliTimestamp());
+        md.sender_agent.setCurrentTimeMs(time.milliTimestamp());
         const work_count = md.sender_agent.doWork();
         md.sender_idle_strategy.idle(work_count);
     }
@@ -393,13 +401,13 @@ test "MediaDriver: create and destroy with cnc.dat" {
     const ctx = MediaDriverContext{
         .aeron_dir = "/tmp/aeron-test-create",
     };
-    defer std.fs.deleteTreeAbsolute(ctx.aeron_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), ctx.aeron_dir) catch {};
 
     const md = try MediaDriver.create(allocator, ctx);
     defer md.destroy();
 
     try testing.expect(md.cnc != null);
-    try testing.expect(std.fs.cwd().access("/tmp/aeron-test-create/cnc.dat", .{}) == error.FileNotFound or true); // Access check
+    std.Io.Dir.cwd().access(io_mod.io(), "/tmp/aeron-test-create/cnc.dat", .{}) catch {}; // Access check
 }
 
 test "MediaDriver: init and deinit" {
@@ -415,7 +423,7 @@ test "MediaDriver: doWork updates cnc heartbeat in embedded mode" {
     const ctx = MediaDriverContext{
         .aeron_dir = "/tmp/aeron-test-heartbeat",
     };
-    defer std.fs.deleteTreeAbsolute(ctx.aeron_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), ctx.aeron_dir) catch {};
 
     const md = try MediaDriver.create(allocator, ctx);
     defer md.destroy();
@@ -425,7 +433,8 @@ test "MediaDriver: doWork updates cnc heartbeat in embedded mode" {
     const heartbeat_off = cnc_mod.CNC_HEADER_SIZE + data_capacity + cnc_mod.CONSUMER_HEARTBEAT_OFFSET;
 
     const before = std.mem.readInt(i64, md.cnc.?.mapped[heartbeat_off..][0..8], .little);
-    std.Thread.sleep(2 * std.time.ns_per_ms);
+    var ts: std.c.timespec = .{ .sec = 0, .nsec = 2 * std.time.ns_per_ms };
+    _ = std.c.nanosleep(&ts, null);
     _ = md.doWork();
     const after = std.mem.readInt(i64, md.cnc.?.mapped[heartbeat_off..][0..8], .little);
 

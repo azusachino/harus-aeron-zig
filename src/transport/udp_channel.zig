@@ -1,16 +1,17 @@
 const std = @import("std");
+const net = @import("../net.zig");
 const uri_mod = @import("uri.zig");
 const AeronUri = uri_mod.AeronUri;
 
 // LESSON(udp-transport): Channel configuration encodes transport mode (unicast/multicast), endpoints, and MTU. See docs/tutorial/02-data-path/03-udp-transport.md
 pub const UdpChannel = struct {
     uri: []const u8,
-    endpoint: ?std.net.Address, // remote address (unicast dest or mcast group)
-    local_address: ?std.net.Address, // interface bind address (from `interface=` param)
+    endpoint: ?net.Address, // remote address (unicast dest or mcast group)
+    local_address: ?net.Address, // interface bind address (from `interface=` param)
     is_multicast: bool,
     mtu: ?usize,
     ttl: ?u8,
-    control: ?std.net.Address,
+    control: ?net.Address,
     control_mode: ?AeronUri.ControlMode,
     session_id: ?i32,
     term_length: ?u32,
@@ -74,7 +75,7 @@ pub const UdpChannel = struct {
         return self.is_multicast;
     }
 
-    fn parseAddress(host_port: []const u8, default_port: u16) !std.net.Address {
+    fn parseAddress(host_port: []const u8, default_port: u16) !net.Address {
         const address_str = stripSubnetMask(host_port);
         if (address_str.len == 0) {
             return error.InvalidAddress;
@@ -94,7 +95,7 @@ pub const UdpChannel = struct {
                 }
             }
             if (std.mem.eql(u8, host, "*")) {
-                return std.net.Address.initIp6(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, port, 0, 0);
+                return net.Address.initIp6(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, port, 0, 0);
             }
             return resolveHost(host, port);
         }
@@ -125,30 +126,29 @@ pub const UdpChannel = struct {
         return address_str;
     }
 
-    fn resolveHost(host: []const u8, port: u16) !std.net.Address {
+    fn resolveHost(host: []const u8, port: u16) !net.Address {
         if (std.mem.eql(u8, host, "*")) {
-            return std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
+            return net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
         }
         if (std.mem.eql(u8, host, "localhost")) {
-            return std.net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
+            return net.Address.initIp4(.{ 127, 0, 0, 1 }, port);
         }
-        return std.net.Address.resolveIp(host, port) catch |err| switch (err) {
+        return net.Address.resolveIp(host, port) catch |err| switch (err) {
             error.InvalidIPAddressFormat => error.InvalidAddress,
-            else => err,
         };
     }
 
     // LESSON(udp-transport): Multicast detection relies on IPv4 class D (224.0.0.0/4) and IPv6 ff00::/8. MDC needs no mcast join. See docs/tutorial/02-data-path/03-udp-transport.md
-    fn isMulticastAddress(address: std.net.Address) bool {
+    fn isMulticastAddress(address: net.Address) bool {
         switch (address.any.family) {
             std.posix.AF.INET => {
-                const addr = address.in.sa.addr;
+                const addr = address.in.addr;
                 const ip_u32 = std.mem.bigToNative(u32, addr);
                 const first_byte = (ip_u32 >> 24) & 0xFF;
                 return first_byte >= 224 and first_byte <= 239;
             },
             std.posix.AF.INET6 => {
-                return address.in6.sa.addr[0] == 0xff;
+                return address.in6.addr[0] == 0xff;
             },
             else => return false,
         }
@@ -214,7 +214,7 @@ test "UdpChannel: parse wildcard interface" {
 
     try std.testing.expect(channel.local_address != null);
     try std.testing.expectEqual(@as(u16, 0), channel.local_address.?.getPort());
-    const addr = channel.local_address.?.in.sa.addr;
+    const addr = channel.local_address.?.in.addr;
     try std.testing.expectEqual(@as(u32, 0), std.mem.bigToNative(u32, addr));
 }
 
@@ -248,7 +248,7 @@ test "UdpChannel: parse wildcard endpoint" {
 
     try std.testing.expect(channel.endpoint != null);
     try std.testing.expectEqual(@as(u16, 0), channel.endpoint.?.getPort());
-    const addr = channel.endpoint.?.in.sa.addr;
+    const addr = channel.endpoint.?.in.addr;
     try std.testing.expectEqual(@as(u32, 0), std.mem.bigToNative(u32, addr));
 }
 
@@ -259,7 +259,7 @@ test "UdpChannel: parse wildcard port" {
 
     try std.testing.expect(channel.endpoint != null);
     try std.testing.expectEqual(@as(u16, 0), channel.endpoint.?.getPort());
-    const addr = channel.endpoint.?.in.sa.addr;
+    const addr = channel.endpoint.?.in.addr;
     try std.testing.expectEqual(@as(u32, 0x7f000001), std.mem.bigToNative(u32, addr));
 }
 

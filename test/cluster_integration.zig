@@ -33,7 +33,7 @@ fn runElection(candidate: *ConsensusModule, voter: *ConsensusModule, start_ns: i
 }
 
 test "cluster integration: new leader continues after leader death" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -152,7 +152,7 @@ test "cluster integration: new leader continues after leader death" {
 
 test "cluster integration: repeated failover preserves commit position" {
     // Three nodes survive two consecutive leader deaths and verify log continuity.
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -245,7 +245,7 @@ test "cluster integration: repeated failover preserves commit position" {
 
 test "cluster integration: follower redirects client to leader" {
     // Verify that a client connecting to a follower receives a redirect response.
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -310,7 +310,7 @@ test "cluster integration: follower redirects client to leader" {
 
 test "cluster integration: leader demotion emits redirect to all sessions" {
     // When a node loses leadership, its open sessions should receive redirects.
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

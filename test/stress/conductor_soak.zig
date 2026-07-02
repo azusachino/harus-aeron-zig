@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const aeron = @import("aeron");
+const net = aeron.net;
 
 fn getSoakIterations() usize {
     if (std.process.getEnvVarOwned(std.testing.allocator, "SOAK_ITERS")) |env| {
@@ -39,12 +40,12 @@ test "conductor_soak: add/remove publication cycles" {
     var cm = aeron.ipc.counters.CountersMap.init(meta_buf, values_buf);
 
     // Setup transport endpoints
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    defer std.posix.close(sock);
+    const sock = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer net.closeSocket(sock);
 
     var recv_ep = aeron.transport.ReceiveChannelEndpoint{
         .socket = sock,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_endpoint = aeron.transport.SendChannelEndpoint{ .socket = sock };
     var sender = try aeron.driver.Sender.init(allocator, &send_endpoint, &cm);
@@ -124,12 +125,12 @@ test "conductor_soak: publication lifecycle stress" {
     @memset(values_buf, 0);
     var cm = aeron.ipc.counters.CountersMap.init(meta_buf, values_buf);
 
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    defer std.posix.close(sock);
+    const sock = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer net.closeSocket(sock);
 
     var recv_ep = aeron.transport.ReceiveChannelEndpoint{
         .socket = sock,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_endpoint = aeron.transport.SendChannelEndpoint{ .socket = sock };
     var sender = try aeron.driver.Sender.init(allocator, &send_endpoint, &cm);

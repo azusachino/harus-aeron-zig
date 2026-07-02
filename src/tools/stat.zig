@@ -1,13 +1,15 @@
 // Live counters display with ANSI refresh.
 // Displays counters every second until Ctrl+C.
 const std = @import("std");
+const time = @import("../time.zig");
 const cnc_mod = @import("../cnc.zig");
 const counters_report = @import("../counters_report.zig");
+const io_mod = @import("../io.zig");
 
 pub fn run(aeron_dir: []const u8) void {
     var stdout_buf: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&stdout_buf);
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var stdout = std.Io.File.stdout().writer(io_mod.io(), &stdout_buf);
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -24,10 +26,11 @@ pub fn run(aeron_dir: []const u8) void {
         // ANSI: clear screen, move cursor to top-left
         stdout.interface.print("\x1b[2J\x1b[H", .{}) catch return;
         stdout.interface.print("Aeron Stat — {s}\n", .{aeron_dir}) catch return;
-        stdout.interface.print("Refreshed at {:0>8}\n\n", .{std.time.nanoTimestamp()}) catch return;
+        stdout.interface.print("Refreshed at {:0>8}\n\n", .{time.nanoTimestamp()}) catch return;
         report.formatTable(&stdout.interface) catch return;
         stdout.interface.print("\nRefreshing every 1s... (Ctrl+C to stop)\n", .{}) catch return;
 
-        std.Thread.sleep(1 * std.time.ns_per_s);
+        var ts: std.c.timespec = .{ .sec = 1, .nsec = 0 };
+        _ = std.c.nanosleep(&ts, null);
     }
 }

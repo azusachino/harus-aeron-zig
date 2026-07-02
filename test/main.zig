@@ -7,5 +7,5 @@ pub const cluster_integration = @import("cluster_integration.zig");
 pub const integration_test = @import("integration_test.zig");
 
 test {
-    std.testing.refAllDeclsRecursive(@This());
+    std.testing.refAllDecls(@This());
 }

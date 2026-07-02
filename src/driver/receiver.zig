@@ -1,6 +1,8 @@
 // Receiver duty agent — polls incoming UDP frames and dispatches by type
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-driver/src/main/c/aeron_receiver.c
 const std = @import("std");
+const net = @import("../net.zig");
+const time = @import("../time.zig");
 const builtin = @import("builtin");
 const logbuffer = @import("../logbuffer/log_buffer.zig");
 const metadata = @import("../logbuffer/metadata.zig");
@@ -9,6 +11,20 @@ const protocol = @import("../protocol/frame.zig");
 const transport = @import("../transport/endpoint.zig");
 const loss_report = @import("../loss_report.zig");
 const event_log_mod = @import("../event_log.zig");
+
+const SpinMutex = struct {
+    state: std.atomic.Mutex = .unlocked,
+
+    pub fn lock(self: *SpinMutex) void {
+        while (!self.state.tryLock()) {
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    pub fn unlock(self: *SpinMutex) void {
+        self.state.unlock();
+    }
+};
 
 pub const Image = struct {
     session_id: i32,
@@ -20,7 +36,7 @@ pub const Image = struct {
     receiver_hwm: counters.CounterHandle, // highest term_offset seen
     subscriber_position: counters.CounterHandle, // client-owned image position counter
     rebuild_position: i64, // tracks gap filling progress
-    source_address: std.net.Address,
+    source_address: net.Address,
     nak_state: NakState,
     last_activity_ns: i64,
 
@@ -34,7 +50,7 @@ pub const Image = struct {
         log_buffer: *logbuffer.LogBuffer,
         receiver_hwm: counters.CounterHandle,
         subscriber_position: counters.CounterHandle,
-        source_address: std.net.Address,
+        source_address: net.Address,
     ) Image {
         // H4 fix: start rebuild at the active term so advanceRebuildPosition
         // doesn't stall waiting for data in an earlier (empty) partition.
@@ -55,7 +71,7 @@ pub const Image = struct {
             .rebuild_position = initial_rebuild_position,
             .source_address = source_address,
             .nak_state = NakState.init(log_buffer.allocator, stream_id),
-            .last_activity_ns = @as(i64, @intCast(std.time.nanoTimestamp())),
+            .last_activity_ns = @as(i64, @intCast(time.nanoTimestamp())),
         };
     }
 
@@ -158,7 +174,7 @@ pub const SetupSignal = struct {
     active_term_id: i32,
     term_length: i32,
     mtu: i32,
-    source_address: std.net.Address,
+    source_address: net.Address,
 };
 
 pub const StatusSignal = struct {
@@ -177,7 +193,7 @@ pub const GapRange = struct { offset: i32, length: i32 };
 pub const NakState = struct {
     allocator: std.mem.Allocator,
     stream_id: i32,
-    gap_list: std.ArrayListUnmanaged(GapRange) = .{},
+    gap_list: std.ArrayListUnmanaged(GapRange) = .empty,
     first_gap_ns: i64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, stream_id: i32) NakState {
@@ -191,7 +207,7 @@ pub const NakState = struct {
 
     pub fn deinit(self: *NakState) void {
         self.gap_list.deinit(self.allocator);
-        self.gap_list = .{};
+        self.gap_list = .empty;
         self.first_gap_ns = 0;
     }
 
@@ -207,7 +223,7 @@ pub const NakState = struct {
                 return;
             }
         }
-        if (self.gap_list.items.len == 0) self.first_gap_ns = @as(i64, @intCast(std.time.nanoTimestamp()));
+        if (self.gap_list.items.len == 0) self.first_gap_ns = @as(i64, @intCast(time.nanoTimestamp()));
         try self.gap_list.append(self.allocator, .{ .offset = offset, .length = length });
     }
 
@@ -227,8 +243,8 @@ pub const NakState = struct {
 
 pub const Receiver = struct {
     images: std.ArrayListUnmanaged(*Image),
-    pending_setups: std.ArrayListUnmanaged(SetupSignal) = .{},
-    pending_status_messages: std.ArrayListUnmanaged(StatusSignal) = .{},
+    pending_setups: std.ArrayListUnmanaged(SetupSignal) = .empty,
+    pending_status_messages: std.ArrayListUnmanaged(StatusSignal) = .empty,
     recv_endpoint: *transport.ReceiveChannelEndpoint,
     send_endpoint: *transport.SendChannelEndpoint,
     counters_map: *counters.CountersMap,
@@ -236,7 +252,7 @@ pub const Receiver = struct {
     event_log: ?*event_log_mod.EventLog,
     allocator: std.mem.Allocator,
     recv_buf: [65536]u8 align(8), // 64KB — fits any Aeron datagram incl. batched frames
-    mutex: std.Thread.Mutex = .{},
+    mutex: SpinMutex = .{},
     // Diagnostic counters (atomic for cross-thread visibility)
     data_frames_total: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     data_frames_before_image: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
@@ -260,8 +276,8 @@ pub const Receiver = struct {
         el: ?*event_log_mod.EventLog,
     ) !Receiver {
         return .{
-            .images = .{},
-            .pending_setups = .{},
+            .images = std.ArrayListUnmanaged(*Image).empty,
+            .pending_setups = std.ArrayListUnmanaged(SetupSignal).empty,
             .recv_endpoint = recv_ep,
             .send_endpoint = send_ep,
             .counters_map = counters_map_,
@@ -301,7 +317,7 @@ pub const Receiver = struct {
         return slice;
     }
 
-    pub fn processDatagram(self: *Receiver, data: []const u8, src_addr: std.net.Address) i32 {
+    pub fn processDatagram(self: *Receiver, data: []const u8, src_addr: net.Address) i32 {
         if (data.len < 8) return 0;
 
         // H2 fix: walk ALL Aeron frames packed into this UDP datagram.
@@ -343,7 +359,7 @@ pub const Receiver = struct {
                 for (self.images.items) |image| {
                     if (image.session_id == header.session_id and image.stream_id == header.stream_id) {
                         found_image = true;
-                        image.last_activity_ns = @as(i64, @intCast(std.time.nanoTimestamp()));
+                        image.last_activity_ns = @as(i64, @intCast(time.nanoTimestamp()));
                         if (payload_offset + payload_len <= frame_data.len) {
                             const payload = frame_data[payload_offset .. payload_offset + payload_len];
 
@@ -357,7 +373,7 @@ pub const Receiver = struct {
                             }
 
                             if (self.event_log) |el| {
-                                const evt_now: i64 = @as(i64, @intCast(std.time.nanoTimestamp()));
+                                const evt_now: i64 = @as(i64, @intCast(time.nanoTimestamp()));
                                 el.log(.frame_in, evt_now, image.session_id, image.stream_id, payload);
                             }
 
@@ -369,12 +385,12 @@ pub const Receiver = struct {
                                     std.log.err("receiver failed to record NAK gap session_id={} stream_id={} err={}", .{ image.session_id, image.stream_id, err });
                                 };
                                 if (self.loss_report_instance) |lr| {
-                                    const lnow: i64 = @as(i64, @intCast(std.time.nanoTimestamp()));
+                                    const lnow: i64 = @as(i64, @intCast(time.nanoTimestamp()));
                                     lr.recordObservation(@as(i64, @intCast(payload.len)), lnow, image.session_id, image.stream_id, "aeron:udp");
                                 }
                             }
 
-                            const now = @as(i64, @intCast(std.time.nanoTimestamp()));
+                            const now = @as(i64, @intCast(time.nanoTimestamp()));
                             if (image.nak_state.shouldSend(now)) {
                                 self.sendNak(image) catch {};
                                 image.nak_state.clear();
@@ -461,7 +477,7 @@ pub const Receiver = struct {
 
     // Single duty cycle: recv one frame, dispatch, return work count (0 or 1)
     pub fn doWork(self: *Receiver) i32 {
-        var src_addr: std.net.Address = undefined;
+        var src_addr: net.Address = undefined;
         const bytes_read = self.recv_endpoint.recv(&self.recv_buf, &src_addr) catch |err| {
             if (err == error.WouldBlock) {
                 return 0;
@@ -528,7 +544,7 @@ pub const Receiver = struct {
 
             // Log send_nak event
             if (self.event_log) |el| {
-                const nak_now: i64 = @as(i64, @intCast(std.time.nanoTimestamp()));
+                const nak_now: i64 = @as(i64, @intCast(time.nanoTimestamp()));
                 el.log(.send_nak, nak_now, image.session_id, image.stream_id, nak_bytes);
             }
         }
@@ -575,7 +591,7 @@ test "NAK: adjacent gaps produce one coalesced NAK" {
 
 test "NAK: no NAK sent within delay window" {
     const allocator = std.testing.allocator;
-    // Use an injectable base_time to avoid non-determinism from @as(i64, @intCast(std.time.nanoTimestamp())).
+    // Use an injectable base_time to avoid non-determinism from @as(i64, @intCast(time.nanoTimestamp())).
     // NakState.initWithTime(allocator, stream_id, first_gap_ns) sets first_gap_ns directly.
     var nak_state = NakState.initWithTime(allocator, 1001, 0);
     defer nak_state.deinit();
@@ -610,7 +626,7 @@ test "Receiver init and deinit" {
 
     // Create mock endpoints (we won't actually use them)
     // Just test that Receiver can be created and destroyed
-    const dummy_socket: std.posix.socket_t = undefined;
+    const dummy_socket: net.socket_t = undefined;
     var recv_ep = transport.ReceiveChannelEndpoint{
         .socket = dummy_socket,
         .bound_address = undefined,
@@ -632,7 +648,7 @@ test "Receiver onAddSubscription and onRemoveSubscription" {
     var values_buffer align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
     var counters_map = counters.CountersMap.init(&meta_buffer, &values_buffer);
 
-    const dummy_socket: std.posix.socket_t = undefined;
+    const dummy_socket: net.socket_t = undefined;
     var recv_ep = transport.ReceiveChannelEndpoint{
         .socket = dummy_socket,
         .bound_address = undefined,
@@ -819,10 +835,10 @@ test "Receiver queues STATUS messages for sender flow control" {
     var values_buffer align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
     var counters_map = counters.CountersMap.init(&meta_buffer, &values_buffer);
 
-    const dummy_socket: std.posix.socket_t = undefined;
+    const dummy_socket: net.socket_t = undefined;
     var recv_endpoint = transport.ReceiveChannelEndpoint{
         .socket = dummy_socket,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_endpoint = transport.SendChannelEndpoint{
         .socket = dummy_socket,
@@ -844,7 +860,7 @@ test "Receiver queues STATUS messages for sender flow control" {
     status.receiver_id = 77;
 
     const bytes = @as([*]const u8, @ptrCast(&status))[0..protocol.StatusMessage.LENGTH];
-    try std.testing.expectEqual(@as(i32, 1), receiver.processDatagram(bytes, std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123)));
+    try std.testing.expectEqual(@as(i32, 1), receiver.processDatagram(bytes, net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123)));
 
     const pending = receiver.drainPendingStatusMessages();
     defer allocator.free(pending);

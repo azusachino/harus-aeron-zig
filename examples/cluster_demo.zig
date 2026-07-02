@@ -9,8 +9,8 @@ const log_mod = aeron.cluster.log;
 const conductor_mod = aeron.cluster.conductor;
 
 pub fn main() !void {
-    // ZIG: GeneralPurposeAllocator ensures no memory leaks in this complex simulation.
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    // ZIG: DebugAllocator ensures no memory leaks in this complex simulation.
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

@@ -6,6 +6,7 @@
 // reading the length fields from the header and computing byte offsets. See docs/tutorial/03-driver/03-conductor.md
 
 const std = @import("std");
+const io_mod = @import("../io.zig");
 
 // Version number at offset 0 — SemanticVersion encoding: (major<<16)|(minor<<8)|patch
 // CnC FILE FORMAT version is 0.2.0, NOT the Aeron library version.
@@ -65,11 +66,12 @@ pub const CncFile = struct {
             @as(usize, @intCast(cfg.counters_values_buffer_length)) +
             @as(usize, @intCast(cfg.error_log_buffer_length));
 
-        const file = try std.fs.createFileAbsolute(path, .{ .read = true, .truncate = true });
-        defer file.close();
-        try file.setEndPos(total);
+        const io = io_mod.io();
+        var file = try std.Io.Dir.cwd().createFile(io, path, .{ .read = true, .truncate = true });
+        defer file.close(io);
+        try file.setLength(io, total);
 
-        const ptr = try std.posix.mmap(null, total, std.posix.PROT.READ | std.posix.PROT.WRITE, .{ .TYPE = .SHARED }, file.handle, 0);
+        const ptr = try std.posix.mmap(null, total, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, file.handle, 0);
         const mapped = @as([*]align(std.heap.page_size_min) u8, @ptrCast(ptr))[0..total];
         @memset(mapped, 0);
 
@@ -93,12 +95,12 @@ pub const CncFile = struct {
     }
 
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !CncFile {
-        const file = try std.fs.openFileAbsolute(path, .{ .mode = .read_write });
-        defer file.close();
-        const stat = try file.stat();
-        const total = stat.size;
+        const io = io_mod.io();
+        var file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write });
+        defer file.close(io);
+        const total: usize = @intCast(try file.length(io));
 
-        const ptr = try std.posix.mmap(null, total, std.posix.PROT.READ | std.posix.PROT.WRITE, .{ .TYPE = .SHARED }, file.handle, 0);
+        const ptr = try std.posix.mmap(null, total, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, file.handle, 0);
         const mapped = @as([*]align(std.heap.page_size_min) u8, @ptrCast(ptr))[0..total];
 
         return CncFile{
@@ -174,7 +176,7 @@ pub const CncFile = struct {
 test "CnC: file created with correct magic, version, and buffer sizes" {
     const allocator = std.testing.allocator;
     const path = "/tmp/test-cnc.dat";
-    defer std.fs.deleteFileAbsolute(path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(io_mod.io(), path) catch {};
 
     const cfg = CncConfig{
         .to_driver_buffer_length = 1024 * 1024 + RING_BUFFER_TRAILER_LENGTH,
@@ -198,7 +200,7 @@ test "CnC: file created with correct magic, version, and buffer sizes" {
 test "CnC: metadata header fields match descriptor offsets" {
     const allocator = std.testing.allocator;
     const path = "/tmp/test-cnc-header.dat";
-    defer std.fs.deleteFileAbsolute(path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(io_mod.io(), path) catch {};
 
     const cfg = CncConfig{
         .to_driver_buffer_length = 1024 * 1024 + RING_BUFFER_TRAILER_LENGTH,
@@ -228,7 +230,7 @@ test "CnC: metadata header fields match descriptor offsets" {
 test "CnC: section offsets and total size match configured layout" {
     const allocator = std.testing.allocator;
     const path = "/tmp/test-cnc-offsets.dat";
-    defer std.fs.deleteFileAbsolute(path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(io_mod.io(), path) catch {};
 
     const cfg = CncConfig{
         .to_driver_buffer_length = 4096 + RING_BUFFER_TRAILER_LENGTH,
@@ -259,7 +261,7 @@ test "CnC: section offsets and total size match configured layout" {
 test "CnC: setDriverHeartbeat writes to consumer heartbeat slot" {
     const allocator = std.testing.allocator;
     const path = "/tmp/test-cnc-heartbeat.dat";
-    defer std.fs.deleteFileAbsolute(path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(io_mod.io(), path) catch {};
 
     const cfg = CncConfig{
         .to_driver_buffer_length = 1024 * 1024 + RING_BUFFER_TRAILER_LENGTH,

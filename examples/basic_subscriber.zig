@@ -23,7 +23,7 @@ fn fragmentHandler(header: *const frame.DataHeader, buffer: []const u8, any_ctx:
 
 pub fn main() !void {
     // ZIG: Standard memory setup. All resources in the loop are scoped to the GPA.
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

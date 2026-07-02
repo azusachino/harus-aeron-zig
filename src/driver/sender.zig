@@ -2,6 +2,8 @@
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-driver/src/main/java/io/aeron/driver/Sender.java
 
 const std = @import("std");
+const net = @import("../net.zig");
+const time = @import("../time.zig");
 const logbuffer = @import("../logbuffer/log_buffer.zig");
 const metadata = @import("../logbuffer/metadata.zig");
 const counters = @import("../ipc/counters.zig");
@@ -9,7 +11,7 @@ const protocol = @import("../protocol/frame.zig");
 const endpoint = @import("../transport/endpoint.zig");
 const event_log_mod = @import("../event_log.zig");
 const flow_control = @import("flow_control.zig");
-const INVALID_SOCKET: std.posix.socket_t = std.math.maxInt(std.posix.socket_t);
+const INVALID_SOCKET: net.socket_t = std.math.maxInt(net.socket_t);
 
 pub const RetransmitRequest = struct {
     session_id: i32,
@@ -28,7 +30,7 @@ pub const NetworkPublication = struct {
     sender_position: counters.CounterHandle,
     publisher_limit: counters.CounterHandle,
     send_channel: *endpoint.SendChannelEndpoint,
-    dest_address: std.net.Address,
+    dest_address: net.Address,
     mtu: i32,
     last_setup_time_ms: i64,
     last_heartbeat_time_ms: i64,
@@ -60,11 +62,11 @@ pub const Sender = struct {
         el: ?*event_log_mod.EventLog,
     ) !Sender {
         return .{
-            .publications = std.ArrayList(*NetworkPublication){},
+            .publications = std.ArrayList(*NetworkPublication).empty,
             .send_endpoint = send_ep,
             .counters_map = counters_map_,
             .allocator = allocator,
-            .retransmit_queue = std.ArrayList(RetransmitRequest){},
+            .retransmit_queue = std.ArrayList(RetransmitRequest).empty,
             .current_time_ms = 0,
             .event_log = el,
         };
@@ -262,7 +264,7 @@ pub const Sender = struct {
 
             // Log frame_out event
             if (self.event_log) |el| {
-                const now: i64 = @intCast(@as(i128, std.time.nanoTimestamp()));
+                const now: i64 = @intCast(@as(i128, time.nanoTimestamp()));
                 el.log(.frame_out, now, publication.session_id, publication.stream_id, frame_data);
             }
 
@@ -449,8 +451,8 @@ test "Sender: onAddPublication adds to list" {
     var meta align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
     var values align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
     var counters_map = counters.CountersMap.init(&meta, &values);
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    defer std.posix.close(sock);
+    const sock = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer net.closeSocket(sock);
     var send_endpoint = endpoint.SendChannelEndpoint{ .socket = sock };
 
     var sender = try Sender.init(allocator, &send_endpoint, &counters_map);
@@ -467,7 +469,7 @@ test "Sender: onAddPublication adds to list" {
         .sender_position = counters.CounterHandle{ .counter_id = 0 },
         .publisher_limit = counters.CounterHandle{ .counter_id = 1 },
         .send_channel = &send_endpoint,
-        .dest_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
+        .dest_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
         .mtu = 1408,
         .last_setup_time_ms = 0,
         .last_heartbeat_time_ms = 0,
@@ -485,8 +487,8 @@ test "Sender: onRemovePublication removes from list" {
     var meta align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
     var values align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
     var counters_map = counters.CountersMap.init(&meta, &values);
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    defer std.posix.close(sock);
+    const sock = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer net.closeSocket(sock);
     var send_endpoint = endpoint.SendChannelEndpoint{ .socket = sock };
 
     var sender = try Sender.init(allocator, &send_endpoint, &counters_map);
@@ -503,7 +505,7 @@ test "Sender: onRemovePublication removes from list" {
         .sender_position = counters.CounterHandle{ .counter_id = 0 },
         .publisher_limit = counters.CounterHandle{ .counter_id = 1 },
         .send_channel = &send_endpoint,
-        .dest_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
+        .dest_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
         .mtu = 1408,
         .last_setup_time_ms = 0,
         .last_heartbeat_time_ms = 0,
@@ -519,7 +521,7 @@ test "Sender: onRemovePublication removes from list" {
         .sender_position = counters.CounterHandle{ .counter_id = 2 },
         .publisher_limit = counters.CounterHandle{ .counter_id = 3 },
         .send_channel = &send_endpoint,
-        .dest_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40124),
+        .dest_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 40124),
         .mtu = 1408,
         .last_setup_time_ms = 0,
         .last_heartbeat_time_ms = 0,
@@ -649,8 +651,8 @@ test "Sender: STATUS updates publisher limit" {
     var meta align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
     var values align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
     var counters_map = counters.CountersMap.init(&meta, &values);
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    defer std.posix.close(sock);
+    const sock = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer net.closeSocket(sock);
     var send_endpoint = endpoint.SendChannelEndpoint{ .socket = sock };
 
     const sender_pos = counters_map.allocate(counters.SENDER_POSITION, "sender-pos");
@@ -670,7 +672,7 @@ test "Sender: STATUS updates publisher limit" {
         .sender_position = sender_pos,
         .publisher_limit = pub_limit,
         .send_channel = &send_endpoint,
-        .dest_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
+        .dest_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
         .mtu = 1408,
         .last_setup_time_ms = 0,
         .last_heartbeat_time_ms = 0,
@@ -720,8 +722,8 @@ test "Sender: heartbeat sent when publication idle" {
     var meta align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
     var values align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
     var counters_map = counters.CountersMap.init(&meta, &values);
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    defer std.posix.close(sock);
+    const sock = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer net.closeSocket(sock);
     var send_endpoint = endpoint.SendChannelEndpoint{ .socket = sock };
 
     const sender_pos = counters_map.allocate(counters.SENDER_POSITION, "sender-pos");
@@ -745,7 +747,7 @@ test "Sender: heartbeat sent when publication idle" {
         .sender_position = sender_pos,
         .publisher_limit = pub_limit,
         .send_channel = &send_endpoint,
-        .dest_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
+        .dest_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
         .mtu = 1408,
         .last_setup_time_ms = 0,
         .last_heartbeat_time_ms = 0,

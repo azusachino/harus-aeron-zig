@@ -91,7 +91,7 @@ pub const Election = struct {
 
     /// Initialize a new Election state machine.
     pub fn init(allocator: std.mem.Allocator, member_id: i32, initial_cluster_size: u32) !Election {
-        var members = std.ArrayListUnmanaged(MemberState){};
+        var members = std.ArrayListUnmanaged(MemberState).empty;
         errdefer members.deinit(allocator);
 
         var i: u32 = 0;
@@ -360,7 +360,7 @@ pub const Election = struct {
 // =============================================================================
 
 test "election init" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -383,7 +383,7 @@ test "quorum threshold" {
 }
 
 test "election state machine: init to canvass" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -396,7 +396,7 @@ test "election state machine: init to canvass" {
 }
 
 test "election state machine: canvass to candidate_ballot" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -416,7 +416,7 @@ test "election state machine: canvass to candidate_ballot" {
 }
 
 test "election state machine: candidate wins with quorum" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -442,7 +442,7 @@ test "election state machine: candidate wins with quorum" {
 }
 
 test "onRequestVote grants vote for higher term" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -462,7 +462,7 @@ test "onRequestVote grants vote for higher term" {
 }
 
 test "onRequestVote rejects stale term" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -484,7 +484,7 @@ test "onRequestVote rejects stale term" {
 }
 
 test "onNewLeadershipTerm transitions to follower_ready" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -501,7 +501,7 @@ test "onNewLeadershipTerm transitions to follower_ready" {
 }
 
 test "follower times out leader heartbeat and restarts canvass" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -518,7 +518,7 @@ test "follower times out leader heartbeat and restarts canvass" {
 }
 
 test "leader heartbeat extends follower deadline" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -535,7 +535,7 @@ test "leader heartbeat extends follower deadline" {
 }
 
 test "three node election full simulation" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
