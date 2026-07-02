@@ -4,26 +4,27 @@ All the pieces — election, replication, and conductor — live inside a **Cons
 
 This chapter shows how to compose these parts, configure a cluster, and understand what happens during a node restart or leader failover.
 
-## What You'll Build
+!!! abstract "What you'll build"
+    A complete cluster node orchestrator that integrates all components:
 
-By the end of this chapter, you'll understand:
-- How the ConsensusModule owns and orchestrates Election, Log, and Conductor
-- The `ClusterContext` configuration structure
-- Node startup sequence: discovery → election → ready to serve
-- Typical deployment patterns (3-node or 5-node clusters)
-- What happens during a leader failover (step by step)
+    - How the ConsensusModule owns and orchestrates Election, Log, and Conductor
+    - The `ClusterContext` configuration structure
+    - Node startup sequence: discovery → election → ready to serve
+    - Typical deployment patterns (3-node or 5-node clusters)
+    - What happens during a leader failover (step by step)
 
 ## Why It Works This Way (Aeron Concept)
 
-Real Aeron Cluster (`aeron-cluster/src/main/java/io/aeron/cluster/ConsensusModule.java`) runs the following agents in parallel:
+!!! info "Aeron concept: multi-threaded consensus orchestration"
+    Real Aeron Cluster (`aeron-cluster/src/main/java/io/aeron/cluster/ConsensusModule.java`) runs the following agents in parallel:
 
-1. **ArchiveProxy**: publishes log entries to the Archive for durability
-2. **ServiceProxy**: calls the application's `ClusteredService` interface
-3. **Election**: state machine for leader election
-4. **LogReplication**: pushes `AppendRequest` to followers, collects `AppendPosition` ACKs
-5. **EgressPublisher**: publishes `SessionEvent` and service responses back to clients
+    1. **ArchiveProxy**: publishes log entries to the Archive for durability
+    2. **ServiceProxy**: calls the application's `ClusteredService` interface
+    3. **Election**: state machine for leader election
+    4. **LogReplication**: pushes `AppendRequest` to followers, collects `AppendPosition` ACKs
+    5. **EgressPublisher**: publishes `SessionEvent` and service responses back to clients
 
-These agents run on separate threads and coordinate through shared-memory rings and atomic counters. For this tutorial, we'll keep it simpler: a single `ConsensusModule` that drives all components sequentially.
+    These agents run on separate threads and coordinate through shared-memory rings and atomic counters. For this tutorial, we'll keep it simpler: a single `ConsensusModule` that drives all components sequentially.
 
 ### Node Lifecycle
 
@@ -51,7 +52,8 @@ stateDiagram-v2
 
 ## Zig Concept: Multi-Thread Orchestration with `std.Thread`
 
-Cluster work is parallelizable: while the sender is replicating entries to follower A, the receiver can be getting ACKs from follower B. But for this tutorial, we'll show how to compose the components sequentially and how threading would extend this.
+!!! info "Zig concept: parallelizing cluster work with threads"
+    Cluster work is parallelizable: while the sender is replicating entries to follower A, the receiver can be getting ACKs from follower B. But for this tutorial, we'll show how to compose the components sequentially and how threading would extend this.
 
 ### Standalone Example
 
@@ -59,7 +61,7 @@ Cluster work is parallelizable: while the sender is replicating entries to follo
 const std = @import("std");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -290,32 +292,30 @@ Notice:
 
 ## Exercise (Prose)
 
-**Describe what happens during a 3-node cluster leader failover, step by step.**
+!!! question "Exercise: Trace a 3-node cluster leader failover"
+    Describe what happens during a 3-node cluster leader failover, step by step.
 
-Scenario:
-- 3-node cluster: A (leader, term=5), B (follower, term=5), C (follower, term=5)
-- A crashes at time T=0
-- B's election timeout is 1.1 seconds; C's is 1.5 seconds
-- All nodes have identical log state (position=100, all committed)
+    Scenario:
+    - 3-node cluster: A (leader, term=5), B (follower, term=5), C (follower, term=5)
+    - A crashes at time T=0
+    - B's election timeout is 1.1 seconds; C's is 1.5 seconds
+    - All nodes have identical log state (position=100, all committed)
 
-Write out the sequence of events:
+    Write out the sequence of events:
 
-1. **T=0**: A crashes. B and C don't know yet; they're still in `follower_ready`.
-2. **T=1.1s**: B's election timer fires. B transitions to `canvass`, then immediately to `candidate_ballot`.
-3. B increments its candidate term to 6 and sends `RequestVote` to A and C.
-4. C hasn't crashed; it receives B's `RequestVote(term=6)`. C's term is 5, so it votes for B.
-5. A doesn't respond (it's down).
-6. B gets 2 votes (itself + C). Quorum reached. B transitions to `leader_ready`.
-7. **T=1.5s**: C's timer fires. But C has already seen B's `NewLeadershipTerm(term=6, leader_id=B)`, so it goes to `follower_ready`.
-8. New leader is B. Clients reconnect to B.
+    1. **T=0**: A crashes. B and C don't know yet; they're still in `follower_ready`.
+    2. **T=1.1s**: B's election timer fires. B transitions to `canvass`, then immediately to `candidate_ballot`.
+    3. B increments its candidate term to 6 and sends `RequestVote` to A and C.
+    4. C hasn't crashed; it receives B's `RequestVote(term=6)`. C's term is 5, so it votes for B.
+    5. A doesn't respond (it's down).
+    6. B gets 2 votes (itself + C). Quorum reached. B transitions to `leader_ready`.
+    7. **T=1.5s**: C's timer fires. But C has already seen B's `NewLeadershipTerm(term=6, leader_id=B)`, so it goes to `follower_ready`.
+    8. New leader is B. Clients reconnect to B.
 
-Write this as a timeline, then explain why A crashing doesn't cause data loss.
-
-**Acceptance criteria:**
-- Timeline includes all 8 steps (or similar)
-- Explains why the cluster recovers automatically (quorum election)
-- Explains why data isn't lost (B already had the committed entries)
-- Notes that A restarting will receive `NewLeadershipTerm` and catch up via log replication
+    - [ ] Timeline includes all 8 steps (or similar)
+    - [ ] Explains why the cluster recovers automatically (quorum election)
+    - [ ] Explains why data isn't lost (B already had the committed entries)
+    - [ ] Notes that A restarting will receive `NewLeadershipTerm` and catch up via log replication
 
 ## Check Your Work
 
@@ -328,23 +328,23 @@ Look for integration tests like `test_3node_election` or `test_leader_failover`.
 
 ## Deployment Note: 3-Node vs 5-Node Clusters
 
-**3-node cluster**: minimum for quorum. Quorum = 2. Tolerates 1 failure.
-- Pros: low latency (fewer ACKs), cheap
-- Cons: not fault-tolerant to 2+ simultaneous failures
+!!! tip "Choosing cluster size: trade-offs"
+    **3-node cluster**: minimum for quorum. Quorum = 2. Tolerates 1 failure.
+    - Pros: low latency (fewer ACKs), cheap
+    - Cons: not fault-tolerant to 2+ simultaneous failures
 
-**5-node cluster**: common for production. Quorum = 3. Tolerates 2 failures.
-- Pros: survives 2 simultaneous failures; leaders elected consistently
-- Cons: higher latency (more ACKs), higher cost
+    **5-node cluster**: common for production. Quorum = 3. Tolerates 2 failures.
+    - Pros: survives 2 simultaneous failures; leaders elected consistently
+    - Cons: higher latency (more ACKs), higher cost
 
-Real Aeron often uses a **2+1 configuration**: two voting nodes + one observer. Observer receives replicated entries but doesn't vote, saving resources.
+    Real Aeron often uses a **2+1 configuration**: two voting nodes + one observer. Observer receives replicated entries but doesn't vote, saving resources.
 
-## Key Takeaways
-
-1. **ConsensusModule is the orchestrator**: owns election, log, and conductor; runs their duty cycles.
-2. **ClusterContext is configuration**: channel URIs, member IDs, stream IDs — everything a node needs to join.
-3. **Node startup is automatic**: no manual election or recovery needed. The election state machine handles it.
-4. **Leader failover is survivable**: quorum election ensures the new leader has all committed entries.
-5. **Deterministic state machine replication**: if a node crashes and restarts, it replays the committed log identically, recovering its state.
+!!! success "Key takeaways"
+    1. **ConsensusModule is the orchestrator**: owns election, log, and conductor; runs their duty cycles.
+    2. **ClusterContext is configuration**: channel URIs, member IDs, stream IDs — everything a node needs to join.
+    3. **Node startup is automatic**: no manual election or recovery needed. The election state machine handles it.
+    4. **Leader failover is survivable**: quorum election ensures the new leader has all committed entries.
+    5. **Deterministic state machine replication**: if a node crashes and restarts, it replays the committed log identically, recovering its state.
 
 ## Further Reading
 

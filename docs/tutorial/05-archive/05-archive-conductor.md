@@ -2,60 +2,56 @@
 
 You've seen the pieces: Catalog stores metadata, Recorder captures streams, Replayer reads them back. The ArchiveConductor is the dispatcher that glues them together — it listens for control commands from clients, routes them to the appropriate component, and sends responses back.
 
-## What You'll Build
+!!! abstract "What you'll build"
+    A complete command/response dispatcher:
 
-A command/response dispatcher that polls an Aeron Subscription for control messages (StartRecordingRequest, ReplayRequest, etc.), decodes them, routes to Recorder or Replayer, and enqueues responses back to the client via correlation ID matching.
+    - Polls an Aeron Subscription for control messages (StartRecordingRequest, ReplayRequest, etc.)
+    - Decodes messages and routes them to Recorder or Replayer
+    - Enqueues responses back to the client, matched by correlation ID
+    - Advances all components through a unified duty cycle
 
-## Why It Works This Way (Aeron Concept)
+!!! info "Aeron concept: Command dispatch and correlation-ID matching"
+    The archive is a separate service from the media driver. It needs a way to receive commands from
+    many clients and respond to each one. The solution is the same pattern the media driver uses for
+    its conductor:
 
-The archive is a separate service from the media driver. It needs a way to receive commands from many clients and respond to each one. The solution is the same pattern the media driver uses for its conductor:
+    1. **Command subscription**: the archive subscribes to a well-known control channel.
+    2. **Message decoding**: incoming messages are decoded by type ID and parameters extracted.
+    3. **Dispatch**: each command type triggers a handler (start recording, stop recording, replay, etc.).
+    4. **Response enqueuing**: handlers enqueue responses (with the original correlation ID) for delivery
+       back to the client.
+    5. **Duty cycle**: `doWork()` is called repeatedly, advancing the state machines.
 
-1. **Command subscription**: the archive subscribes to a well-known control channel.
-2. **Message decoding**: incoming messages are decoded by type ID and parameters extracted.
-3. **Dispatch**: each command type triggers a handler (start recording, stop recording, replay, etc.).
-4. **Response enqueuing**: handlers enqueue responses (with the original correlation ID) for delivery back to the client.
-5. **Duty cycle**: `doWork()` is called repeatedly, advancing the state machines.
+    Because the archive uses standard Aeron Publications for responses (not shared-memory rings), clients
+    can be on different machines, different programs, even different languages. The protocol is just
+    binary messages.
 
-Because the archive uses standard Aeron Publications for responses (not shared-memory rings), clients can be on different machines, different programs, even different languages. The protocol is just binary messages.
+    The key is **correlation ID**: every request includes a unique ID, and the archive echoes it back in
+    responses. This allows clients to multiplex multiple async commands without blocking.
 
-### Command Flow
-
+```mermaid
+flowchart TD
+    A["Start doWork()"] --> B["Poll control subscription"]
+    B --> C["Decode incoming messages"]
+    C --> D{"Message type?"}
+    D -->|StartRecording| E["Call Recorder.startRecording()"]
+    D -->|StopRecording| F["Call Recorder.stopRecording()"]
+    D -->|Replay| G["Call Replayer.startReplay()"]
+    D -->|ListRecordings| H["Query catalog"]
+    E --> I["Enqueue response<br/>with correlation_id"]
+    F --> I
+    G --> I
+    H --> I
+    I --> J["Advance Recorder.doWork()"]
+    J --> K["Advance Replayer.doWork()"]
+    K --> L["Publish queued responses"]
+    L --> M["Return work count"]
 ```
-Client App                          Archive (separate process)
-    │                                      │
-    │─ Publish StartRecordingRequest      │
-    │  (correlation_id=42)                │
-    ├──────────────────────────────────────>│
-    │                                       │
-    │                                   [ArchiveConductor]
-    │                                   ├─ Poll subscription
-    │                                   ├─ Decode message (type=1)
-    │                                   ├─ Extract correlation_id=42
-    │                                   │
-    │                                   ├─ Call Recorder.startRecording()
-    │                                   │
-    │                                   ├─ Enqueue Response {
-    │                                   │    correlation_id: 42,
-    │                                   │    code: ok,
-    │                                   │    recording_id: 1
-    │                                   │  }
-    │                                   │
-    │<────────────────────────────────────┤
-    │  Publish ControlResponse             │
-    │  (correlation_id=42, recording_id=1)│
-    │
-    └─ Client polls response subscription
-       Finds correlation_id=42
-       Reads recording_id=1
-```
 
-The key is **correlation ID**: every request includes a unique ID, and the archive echoes it back in responses. This allows clients to multiplex multiple async commands without blocking.
-
-## Zig Concept: Command Union and Exhaustive Switching
-
-Archive commands come in many types (StartRecording, StopRecording, Replay, etc.). How do you handle them uniformly while staying type-safe?
-
-Answer: a tagged union.
+!!! info "Zig concept: Command union and exhaustive switching"
+    Archive commands come in many types (StartRecording, StopRecording, Replay, etc.). How do you
+    handle them uniformly while staying type-safe? Answer: a tagged union. The Zig compiler verifies
+    that your `switch` statement covers all variants, preventing missed cases.
 
 ### Command Union
 
@@ -188,37 +184,39 @@ The conductor owns the Catalog, Recorder, and Replayer. It is responsible for:
 3. Starting/stopping recording and replay sessions.
 4. Enqueueing responses matched by correlation_id.
 
-## Exercise
+!!! question "Exercise"
+    Implement the `handleStartRecording` dispatch path in `tutorial/archive/conductor.zig`.
 
-**Implement the `handleStartRecording` dispatch path in `tutorial/archive/conductor.zig`.**
+    Your task:
+    1. Extract parameters from `StartRecordingCmd` (session_id, stream_id, channel, source_identity).
+    2. Call `self.catalog.addNewRecording()` with those parameters. Capture the returned `recording_id`.
+    3. Call `self.recorder.startRecording()` to create a recording session.
+    4. Enqueue a `RecordingStarted` response with the correlation_id and recording_id.
 
-Your task:
-1. Extract parameters from `StartRecordingCmd` (session_id, stream_id, channel, source_identity).
-2. Call `self.catalog.addNewRecording()` with those parameters. Capture the returned `recording_id`.
-3. Call `self.recorder.startRecording()` to create a recording session.
-4. Enqueue a `RecordingStarted` response with the correlation_id and recording_id.
+    Acceptance criteria:
+    - [ ] The catalog entry is created before the recorder session
+    - [ ] The recording_id from the catalog is passed to the recorder and echoed back in the response
+    - [ ] If anything fails, an error response is sent instead
+    - [ ] The response is enqueued, not directly published
 
-**Acceptance criteria:**
-- The catalog entry is created before the recorder session.
-- The recording_id from the catalog is passed to the recorder and echoed back in the response.
-- If anything fails, an error response is sent instead.
-- The response is enqueued, not directly published (the conductor's `doWork()` publishes all responses at once).
-
-**Hint:** Use `self.catalog.addNewRecording()` to create the entry, then `self.recorder.startRecording()` to subscribe. Both operations must succeed before enqueueing the success response.
-
-## Check Your Work
+    Hint: Use `self.catalog.addNewRecording()` to create the entry, then `self.recorder.startRecording()` to
+    subscribe. Both operations must succeed before enqueueing the success response.
 
 ```bash
 cd /Users/azusachino/Projects/project-github/harus-aeron-zig
 make test-unit
 ```
 
-Test scenario: send a StartRecordingRequest, verify the catalog entry and recorder session are created, then verify the RecordingStarted response echoes the correct recording_id and correlation_id.
+Test scenario: send a StartRecordingRequest, verify the catalog entry and recorder session are created,
+then verify the RecordingStarted response echoes the correct recording_id and correlation_id.
 
-## Key Takeaways
-
-1. **Conductor as dispatcher**: it's the single point where all commands are routed.
-2. **Correlation IDs for async matching**: clients send a request with a unique ID; archive echoes it in responses.
-3. **Tagged unions for type-safe dispatch**: `switch` on the command variant; compiler ensures all cases are handled.
-4. **Duty cycle orchestration**: conductor calls `doWork()` on Recorder and Replayer each cycle, advancing their state machines.
-5. **Command/response queues**: commands are parsed into a queue, dispatched, then responses are enqueued for publication.
+!!! success "Key takeaways"
+    - **Conductor as dispatcher**: it's the single point where all commands are routed.
+    - **Correlation IDs for async matching**: clients send a request with a unique ID; archive echoes it
+      in responses.
+    - **Tagged unions for type-safe dispatch**: `switch` on the command variant; compiler ensures all
+      cases are handled.
+    - **Duty cycle orchestration**: conductor calls `doWork()` on Recorder and Replayer each cycle,
+      advancing their state machines.
+    - **Command/response queues**: commands are parsed into a queue, dispatched, then responses are
+      enqueued for publication.
