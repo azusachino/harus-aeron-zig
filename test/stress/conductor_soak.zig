@@ -9,12 +9,8 @@ const aeron = @import("aeron");
 const net = aeron.net;
 
 fn getSoakIterations() usize {
-    if (std.process.getEnvVarOwned(std.testing.allocator, "SOAK_ITERS")) |env| {
-        defer std.testing.allocator.free(env);
-        return std.fmt.parseInt(usize, env, 10) catch 100;
-    } else |_| {
-        return 100;
-    }
+    const ptr = std.c.getenv("SOAK_ITERS") orelse return 100;
+    return std.fmt.parseInt(usize, std.mem.span(ptr), 10) catch 100;
 }
 
 test "conductor_soak: add/remove publication cycles" {

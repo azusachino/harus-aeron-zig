@@ -11,12 +11,8 @@ const ring_buffer = aeron.ipc.ring_buffer;
 const ManyToOneRingBuffer = ring_buffer.ManyToOneRingBuffer;
 
 fn getSoakIterations() usize {
-    if (std.process.getEnvVarOwned(std.testing.allocator, "SOAK_ITERS")) |env| {
-        defer std.testing.allocator.free(env);
-        return std.fmt.parseInt(usize, env, 10) catch 1000;
-    } else |_| {
-        return 1000;
-    }
+    const ptr = std.c.getenv("SOAK_ITERS") orelse return 1000;
+    return std.fmt.parseInt(usize, std.mem.span(ptr), 10) catch 1000;
 }
 
 test "ring_buffer_soak: write/read N messages without loss" {
