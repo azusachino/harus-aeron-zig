@@ -61,7 +61,7 @@ pub const MinMulticastFlowControl = struct {
     pub fn init(allocator: std.mem.Allocator, timeout_ns: i64) MinMulticastFlowControl {
         return .{
             .allocator = allocator,
-            .receivers = .{},
+            .receivers = .empty,
             .timeout_ns = timeout_ns,
         };
     }

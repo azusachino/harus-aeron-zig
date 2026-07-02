@@ -4,6 +4,14 @@ The client and the media driver live in separate processes. To issue a command �
 
 The implementation is `ManyToOneRingBuffer` in `src/ipc/ring_buffer.zig`, modeled on Agrona's Java implementation.
 
+!!! abstract "What you'll build"
+    A mental model of lock-free IPC between client and driver:
+
+    - How a ring buffer layout isolates data from metadata with cache-line awareness
+    - The write protocol: CAS loop, wrap-around, and padding records
+    - The read protocol: single-threaded, commitment flags, padding detection
+    - Why no mutex is needed for many writers, one reader
+
 ## Buffer Layout
 
 The ring buffer is a flat byte slice. The last 128 bytes are reserved metadata; everything before that is the data region whose byte capacity is called `capacity`.
@@ -94,27 +102,50 @@ pub fn read(self: *ManyToOneRingBuffer, handler: MessageHandler, ctx: *anyopaque
 
 The `*anyopaque` pattern is Zig's equivalent of `void *` — the caller casts their own state to `*anyopaque` when calling `read`, and casts back inside the handler. It avoids allocating a closure.
 
-## Why No Mutex
+## The Claim and Read Cycle
 
-A mutex would serialize all writers, adding kernel overhead and priority inversion risk. The CAS loop is cheaper for low-contention cases (the common case: one client, one driver). Under high contention the CAS retries, but the critical section — claim a tail range — is a single atomic word operation. The actual data copy happens outside the CAS, so writers do not block each other during the slow memcpy.
-
-Head is only written by the single reader, so storing it needs no CAS — a plain atomic store with `.release` ordering suffices.
-
-## Padding Records
-
-When a record would straddle the end of the buffer, a padding record (`PADDING_MSG_TYPE_ID = -1`) is inserted to fill the remaining space, and the tail wraps to zero. The reader recognizes this sentinel and skips the padding without dispatching it to the handler.
-
-## Correlation IDs
-
-`nextCorrelationId` uses an atomic fetch-and-add on the metadata region:
-
-```zig
-const current = @atomicRmw(i64, ptr, .Add, 1, .acq_rel);
-return current + 1;
+```mermaid
+flowchart LR
+    A["Writer: Load tail<br/>Check wrap"] --> B["Writer: CAS<br/>claim slot"]
+    B -->|CAS wins| C["Writer: Write<br/>msg_type_id + data"]
+    B -->|CAS fails| A
+    C --> D["Writer: Store length<br/>release ordering"]
+    D --> E["Reader: Load head"]
+    E --> F["Reader: Read<br/>msg_type_id"]
+    F -->|length == 0| G["Nothing yet"]
+    F -->|type == -1| H["Skip padding"]
+    F -->|else| I["Dispatch to handler"]
+    H --> J["Reader: Advance head"]
+    I --> J
+    G --> K["Reader: Store head<br/>release ordering"]
+    J --> K
 ```
 
-Each command written to the ring buffer carries a correlation ID. When the driver broadcasts its response, it echoes the same ID, allowing the client to match responses to requests without any shared state.
+!!! info "Why no mutex"
+    A mutex would serialize all writers, adding kernel overhead and priority inversion risk. The CAS loop is cheaper for low-contention cases (the common case: one client, one driver). Under high contention the CAS retries, but the critical section — claim a tail range — is a single atomic word operation. The actual data copy happens outside the CAS, so writers do not block each other during the slow memcpy.
+
+    Head is only written by the single reader, so storing it needs no CAS — a plain atomic store with `.release` ordering suffices.
+
+!!! info "Padding records and wrap-around"
+    When a record would straddle the end of the buffer, a padding record (`PADDING_MSG_TYPE_ID = -1`) is inserted to fill the remaining space, and the tail wraps to zero. The reader recognizes this sentinel and skips the padding without dispatching it to the handler.
+
+!!! tip "Correlation IDs for request–response matching"
+    `nextCorrelationId` uses an atomic fetch-and-add on the metadata region:
+
+    ```zig
+    const current = @atomicRmw(i64, ptr, .Add, 1, .acq_rel);
+    return current + 1;
+    ```
+
+    Each command written to the ring buffer carries a correlation ID. When the driver broadcasts its response, it echoes the same ID, allowing the client to match responses to requests without any shared state.
 
 ## Key File
 
 `src/ipc/ring_buffer.zig` — `ManyToOneRingBuffer`, `RecordDescriptor`, `MessageHandler`, metadata offset constants, and unit tests covering alignment, wrap-around, and correlation ID monotonicity.
+
+!!! success "Key takeaways"
+    - A ring buffer isolates data from metadata to minimize false sharing across cores.
+    - Writers use a CAS loop to claim tail positions without serialization or blocking.
+    - A length field acts as a publication flag — readers detect committed records by checking for non-zero length.
+    - Padding records handle wrap-around without losing records or requiring reallocation.
+    - Correlation IDs in the metadata allow request–response pairing without shared state.

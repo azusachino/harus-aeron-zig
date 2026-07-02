@@ -68,7 +68,7 @@ pub const ClusterLog = struct {
     /// Initialize a new empty ClusterLog.
     pub fn init(allocator: std.mem.Allocator) ClusterLog {
         return .{
-            .entries = .{},
+            .entries = .empty,
             .append_position = 0,
             .commit_position = 0,
             .leader_ship_term_id = 0,
@@ -249,7 +249,7 @@ pub const LogLeader = struct {
     /// Initialize a new LogLeader.
     /// Allocates follower states for all members except the leader.
     pub fn init(allocator: std.mem.Allocator, log: *ClusterLog, cluster_size: u32) !LogLeader {
-        var followers: std.ArrayList(FollowerState) = .{};
+        var followers: std.ArrayList(FollowerState) = .{ .items = &.{}, .capacity = 0 };
         // Follower IDs are 0..cluster_size excluding the leader (assumed to be self)
         for (0..cluster_size - 1) |i| {
             try followers.append(allocator, .{
@@ -285,7 +285,7 @@ pub const LogLeader = struct {
     /// Check if a quorum of followers have acknowledged positions that allow commit to advance.
     pub fn checkCommitAdvance(self: *LogLeader) void {
         // Collect all positions: leader's append_position + all followers' append_positions
-        var positions: std.ArrayList(i64) = .{};
+        var positions: std.ArrayList(i64) = .{ .items = &.{}, .capacity = 0 };
         defer positions.deinit(self.allocator);
 
         positions.append(self.allocator, self.log.append_position) catch unreachable;

@@ -5,6 +5,7 @@
 const std = @import("std");
 const event_log_mod = @import("../event_log.zig");
 const cnc_mod = @import("../cnc.zig");
+const io_mod = @import("../io.zig");
 
 fn eventTypeStr(et: event_log_mod.EventType) []const u8 {
     return switch (et) {
@@ -21,8 +22,8 @@ fn eventTypeStr(et: event_log_mod.EventType) []const u8 {
 
 pub fn run(aeron_dir: []const u8) void {
     var stdout_buf: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&stdout_buf);
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var stdout = std.Io.File.stdout().writer(io_mod.io(), &stdout_buf);
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -36,14 +37,14 @@ pub fn run(aeron_dir: []const u8) void {
     stdout.interface.print("------------- ---------- ----------- ---------- -----\n", .{}) catch return;
 
     // Try to read event.log from the aeron directory
-    const file = std.fs.cwd().openFile(event_path, .{}) catch {
+    const file = std.Io.Dir.cwd().openFile(io_mod.io(), event_path, .{}) catch {
         stdout.interface.print("No event log file found at {s}\n", .{event_path}) catch return;
         stdout.interface.print("(driver event log is in-memory; no file was persisted)\n", .{}) catch return;
         return;
     };
-    defer file.close();
+    defer file.close(io_mod.io());
 
-    const stat = file.stat() catch {
+    const stat = file.stat(io_mod.io()) catch {
         stdout.interface.print("Could not stat event log file.\n", .{}) catch return;
         return;
     };
@@ -63,7 +64,7 @@ pub fn run(aeron_dir: []const u8) void {
     defer allocator.free(buf);
     @memset(buf, 0);
 
-    _ = file.readAll(buf) catch {
+    _ = file.readPositionalAll(io_mod.io(), buf, 0) catch {
         stdout.interface.print("Could not read event log file.\n", .{}) catch return;
         return;
     };
@@ -73,7 +74,7 @@ pub fn run(aeron_dir: []const u8) void {
     const handler = struct {
         pub fn handle(event_type: event_log_mod.EventType, timestamp_ns: i64, session_id: i32, stream_id: i32, payload: []const u8) void {
             var line_buf: [4096]u8 = undefined;
-            var line = std.fs.File.stdout().writer(&line_buf);
+            var line = std.Io.File.stdout().writer(io_mod.io(), &line_buf);
             line.interface.print("{d:>13} {s:>10} {d:>11} {d:>10} {s}\n", .{
                 timestamp_ns,
                 eventTypeStr(event_type),
@@ -99,8 +100,8 @@ test "events tool: reads real event.log fixture" {
     const allocator = std.testing.allocator;
 
     const dir_path = "/tmp/harus-aeron-events-tool-test";
-    defer std.fs.deleteTreeAbsolute(dir_path) catch {};
-    try std.fs.makeDirAbsolute(dir_path);
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), dir_path) catch {};
+    try std.Io.Dir.createDirAbsolute(io_mod.io(), dir_path, .default_dir);
 
     const event_path = try std.fmt.allocPrint(allocator, "{s}/event.log", .{dir_path});
     defer allocator.free(event_path);
@@ -112,17 +113,17 @@ test "events tool: reads real event.log fixture" {
     log.log(.cmd_in, 2_000_000_000, 2, 102, "cmd-subscribe");
 
     {
-        const f = try std.fs.cwd().createFile(event_path, .{});
-        defer f.close();
-        try f.writeAll(&buf);
+        const f = try std.Io.Dir.cwd().createFile(io_mod.io(), event_path, .{});
+        defer f.close(io_mod.io());
+        try f.writeStreamingAll(io_mod.io(), &buf);
     }
 
     // Re-read and verify we can parse the fixture
-    const f2 = try std.fs.cwd().openFile(event_path, .{});
-    defer f2.close();
+    const f2 = try std.Io.Dir.cwd().openFile(io_mod.io(), event_path, .{});
+    defer f2.close(io_mod.io());
 
     var read_buf = [_]u8{0} ** event_log_mod.EVENT_LOG_BUFFER_LENGTH;
-    _ = try f2.readAll(&read_buf);
+    _ = try f2.readPositionalAll(io_mod.io(), &read_buf, 0);
 
     const log2 = event_log_mod.EventLog{ .buffer = &read_buf, .capacity = read_buf.len, .write_pos = 0 };
 

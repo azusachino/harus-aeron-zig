@@ -1,5 +1,6 @@
 const std = @import("std");
 const aeron = @import("aeron");
+const time = aeron.time;
 const MediaDriver = aeron.driver.MediaDriver;
 const ExclusivePublication = aeron.ExclusivePublication;
 const Subscription = aeron.Subscription;
@@ -14,11 +15,11 @@ const Context = struct {
 const TIMEOUT_NS = 60 * std.time.ns_per_s;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const start_time = std.time.nanoTimestamp();
+    const start_time = time.nanoTimestamp();
 
     // Start embedded driver
     const driver = try MediaDriver.create(allocator, .{
@@ -79,17 +80,18 @@ pub fn main() !void {
         }
 
         // Send phase
-        var timer = try std.time.Timer.start();
+        const timer_start = time.nanoTimestamp();
         for (0..message_count) |_| {
             while (true) {
-                if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
+                if (time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
                 const result = pub_instance.offer(payload);
                 if (result == .ok) break;
                 _ = driver.doWork();
             }
             _ = driver.doWork();
         }
-        const elapsed_ns = timer.read();
+        const elapsed_ns_i128 = time.nanoTimestamp() - timer_start;
+        const elapsed_ns = @as(u64, @intCast(@max(elapsed_ns_i128, 0)));
 
         // Receive phase: all subs must receive all messages
         var contexts: [4]Context = undefined;
@@ -98,7 +100,7 @@ pub fn main() !void {
         }
 
         while (true) {
-            if (std.time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
+            if (time.nanoTimestamp() - start_time > TIMEOUT_NS) return error.Timeout;
             var all_done = true;
             for (0..sub_count) |i| {
                 if (contexts[i].count < message_count) {

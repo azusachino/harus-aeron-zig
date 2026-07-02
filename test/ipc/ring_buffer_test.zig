@@ -11,7 +11,7 @@ test "ring buffer: basic write and read roundtrip (single message)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -36,7 +36,7 @@ test "ring buffer: write fills buffer to capacity, then write returns false" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -56,7 +56,7 @@ test "ring buffer: wrap-around with padding record insertion" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 2048);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 2048);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -90,7 +90,7 @@ test "ring buffer: padding record has correct length and type" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -122,7 +122,7 @@ test "ring buffer: multiple messages write and read in order" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 2048);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 2048);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -161,7 +161,7 @@ test "ring buffer: nextCorrelationId returns sequential values" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -179,7 +179,7 @@ test "ring buffer: MessageHandler receives correct msg_type_id and data" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -211,7 +211,7 @@ test "ring buffer: write empty message (length = 0)" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -244,13 +244,13 @@ test "ring buffer: write max message (capacity - METADATA_LENGTH - RECORD_HEADER
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
 
     const max_payload_len = rb.capacity - RecordDescriptor.HEADER_LENGTH;
-    const max_payload = try arena.allocator().alloc(u8, max_payload_len);
+    const max_payload = try arena.allocator().alignedAlloc(u8, .@"8", max_payload_len);
     @memset(max_payload, 'a');
 
     try std.testing.expect(rb.write(88, max_payload));
@@ -272,7 +272,7 @@ test "ring buffer: read respects limit parameter" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 2048);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 2048);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -302,7 +302,7 @@ test "ring buffer: read stops when no more records available" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -331,7 +331,7 @@ test "ring buffer: record header is stored as [length(4)|type(4)]" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -353,7 +353,7 @@ test "ring buffer: write and read preserves message integrity after wrap" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 2048);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 2048);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -386,7 +386,7 @@ test "ring buffer: unblock() finds and recovers stalled writer" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);

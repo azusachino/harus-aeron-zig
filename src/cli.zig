@@ -2,6 +2,11 @@
 // Reference: https://github.com/aeron-io/aeron
 const std = @import("std");
 
+fn getenv(comptime name: [:0]const u8) ?[]const u8 {
+    const ptr = std.c.getenv(name) orelse return null;
+    return std.mem.span(ptr);
+}
+
 pub const Command = enum {
     driver,
     archive,
@@ -25,7 +30,7 @@ pub const CliOptions = struct {
 
 pub fn parse(args: []const []const u8) CliOptions {
     var opts = CliOptions{
-        .aeron_dir = std.posix.getenv("AERON_DIR") orelse "/dev/shm/aeron",
+        .aeron_dir = getenv("AERON_DIR") orelse "/dev/shm/aeron",
     };
 
     if (args.len < 2) return opts;
@@ -239,10 +244,10 @@ test "parse: multiple flags in sequence" {
 
 test "printUsage outputs help text" {
     var buf: [4096]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
-    try printUsage(stream.writer());
+    var writer = std.Io.Writer.fixed(&buf);
+    try printUsage(&writer);
 
-    const output = stream.getWritten();
+    const output = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "Usage:") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "stat") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "errors") != null);

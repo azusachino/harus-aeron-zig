@@ -2,6 +2,29 @@
 
 `ExclusivePublication` is the user-facing write API. If you have sent a message over Aeron, you called `offer`. This chapter walks through what happens between that call and bytes landing in the log buffer.
 
+!!! abstract "What you'll build"
+    A mental model of the publication write path from `offer()` to log buffer:
+
+    - The `ExclusivePublication` lifecycle: creation, flow-control checks, message framing
+    - The `OfferResult` sentinel enum: why it beats error unions for back-pressure
+    - The atomic tail read and position calculation
+    - Handling back-pressure: retry strategy without allocation
+
+```mermaid
+stateDiagram-v2
+    [*] --> add: init()
+    add --> PUBLICATION_READY: metadata set
+    PUBLICATION_READY --> check_closed: offer(data)
+    check_closed --> check_position: not closed?
+    check_position --> check_limit: raw_tail valid?
+    check_limit --> offer_frame: position < limit?
+    check_limit --> back_pressure: position >= limit
+    offer_frame --> appended: frame written
+    appended --> ok: tail advanced
+    back_pressure --> [*]: .back_pressure
+    ok --> [*]: .ok(pos)
+```
+
 ## Role
 
 A publication is a handle to one (channel, stream_id) pair opened exclusively by a single writer. "Exclusive" means no CAS contention: only this thread appends to the active term. The trade-off is that you cannot share an `ExclusivePublication` across threads without external synchronisation.
@@ -21,9 +44,11 @@ pub const OfferResult = union(enum) {
 };
 ```
 
-Zig error unions (`!T`) are for failures the caller cannot recover from inline — allocation failure, I/O error, invalid input. Back-pressure is not a failure: it is expected steady-state behaviour in a fast publisher / slow consumer scenario. Encoding it as a tagged union value keeps call sites explicit and forces the caller to handle every case, without paying for the unwinding machinery that error propagation implies.
+!!! info "Zig concept: tagged unions for control flow"
+    Zig error unions (`!T`) are for failures the caller cannot recover from inline — allocation failure, I/O error, invalid input. Back-pressure is not a failure: it is expected steady-state behaviour in a fast publisher / slow consumer scenario. Encoding it as a tagged union value keeps call sites explicit and forces the caller to handle every case, without paying for the unwinding machinery that error propagation implies.
 
-Compare to the Java API, which returns negative `long` sentinel values (`NOT_CONNECTED = -1`, `BACK_PRESSURED = -2`, etc.). The Zig union gives the same information with compiler-enforced exhaustive matching.
+!!! tip "Compare to Java"
+    The Java API returns negative `long` sentinel values (`NOT_CONNECTED = -1`, `BACK_PRESSURED = -2`, etc.). The Zig union gives the same information with compiler-enforced exhaustive matching.
 
 ## The offer() flow
 
@@ -44,13 +69,12 @@ pub fn offer(self: *ExclusivePublication, data: []const u8) OfferResult {
 }
 ```
 
-Three checks happen before a byte is written:
+!!! tip "Three guards before a write"
+    1. **Closed guard** — if `close()` was called, return immediately.
+    2. **Current position** — derived from the raw tail word packed in the log buffer metadata. The upper 32 bits are the term ID; the lower 32 bits are the byte offset within that term.
+    3. **Publisher limit** — a flow-control ceiling set by the Sender Agent via a shared counter. If `current_position >= publisher_limit`, the receiver window is full; return `back_pressure`.
 
-1. **Closed guard** — if `close()` was called, return immediately.
-2. **Current position** — derived from the raw tail word packed in the log buffer metadata. The upper 32 bits are the term ID; the lower 32 bits are the byte offset within that term.
-3. **Publisher limit** — a flow-control ceiling set by the Sender Agent via a shared counter. If `current_position >= publisher_limit`, the receiver window is full; return `back_pressure`.
-
-Once those checks pass, `offer` constructs a `DataHeader` with `BEGIN_FLAG | END_FLAG` (single-frame message) and delegates to `TermAppender.appendUnfragmented`, which copies the header and payload into the term buffer and advances the tail atomically.
+    Once those checks pass, `offer` constructs a `DataHeader` with `BEGIN_FLAG | END_FLAG` (single-frame message) and delegates to `TermAppender.appendUnfragmented`, which copies the header and payload into the term buffer and advances the tail atomically.
 
 The return value from `TermAppender` maps to `OfferResult`:
 
@@ -74,23 +98,24 @@ In the complete driver integration, `isConnected` reads a per-publication counte
 
 ## Handling back_pressure
 
-Back-pressure is the normal signal that your publisher is faster than the network path or the consumer. The correct response is to retry without allocating:
+!!! warning "Back-pressure is normal, not an error"
+    Back-pressure is the normal signal that your publisher is faster than the network path or the consumer. The correct response is to retry without allocating:
 
-```zig
-while (true) {
-    switch (pub.offer(msg)) {
-        .ok => |pos| { _ = pos; break; },
-        .back_pressure, .admin_action => {
-            // yield or sleep briefly, then retry
-            std.Thread.sleep(1 * std.time.ns_per_us);
-        },
-        .not_connected => return error.NoSubscribers,
-        .closed, .max_position_exceeded => return error.PublicationDead,
+    ```zig
+    while (true) {
+        switch (pub.offer(msg)) {
+            .ok => |pos| { _ = pos; break; },
+            .back_pressure, .admin_action => {
+                // yield or sleep briefly, then retry
+                std.Thread.sleep(1 * std.time.ns_per_us);
+            },
+            .not_connected => return error.NoSubscribers,
+            .closed, .max_position_exceeded => return error.PublicationDead,
+        }
     }
-}
-```
+    ```
 
-Never drop messages silently. The `switch` forces you to handle every variant.
+    Never drop messages silently. The `switch` forces you to handle every variant.
 
 ## Function reference
 
@@ -103,8 +128,7 @@ Never drop messages silently. The `switch` forces you to handle every variant.
 | `isConnected() bool` | True if sender is tracking at least one subscriber |
 | `close() void` | Mark closed; future `offer` calls return `.closed` |
 
-## Key Zig points
-
-- `@intCast` is checked in Debug builds — it traps if the value does not fit. Use it on the raw tail to catch metadata corruption early.
-- `rawTailVolatile` uses `@atomicLoad(.acquire)` so the compiler cannot reorder the position check above the memory load.
-- The packed tail word (`term_id << 32 | offset`) is a Zig `i64` interpreted as two `i32` halves. Zig's explicit integer casting makes the intent readable where Java or C would use unchecked bit shifts.
+!!! success "Key takeaways"
+    - `@intCast` is checked in Debug builds — it traps if the value does not fit. Use it on the raw tail to catch metadata corruption early.
+    - `rawTailVolatile` uses `@atomicLoad(.acquire)` so the compiler cannot reorder the position check above the memory load.
+    - The packed tail word (`term_id << 32 | offset`) is a Zig `i64` interpreted as two `i32` halves. Zig's explicit integer casting makes the intent readable where Java or C would use unchecked bit shifts.

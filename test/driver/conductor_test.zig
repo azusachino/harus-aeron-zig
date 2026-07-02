@@ -4,11 +4,12 @@
 
 const std = @import("std");
 const aeron = @import("aeron");
+const net = aeron.net;
 
 test "DriverConductor: handleAddPublication and handleRemovePublication" {
     const allocator = std.testing.allocator;
 
-    const ring_buf = try allocator.alloc(u8, 16384);
+    const ring_buf = try allocator.alignedAlloc(u8, .@"8", 16384);
     defer allocator.free(ring_buf);
     var rb = aeron.ipc.ring_buffer.ManyToOneRingBuffer.init(ring_buf);
 
@@ -26,7 +27,7 @@ test "DriverConductor: handleAddPublication and handleRemovePublication" {
     const sock = std.math.maxInt(std.posix.socket_t);
     var recv_ep = aeron.transport.ReceiveChannelEndpoint{
         .socket = sock,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_endpoint = aeron.transport.SendChannelEndpoint{ .socket = sock };
     var sender = try aeron.driver.Sender.init(allocator, &send_endpoint, &cm);
@@ -76,7 +77,7 @@ test "DriverConductor: handleAddPublication and handleRemovePublication" {
 test "DriverConductor: handleAddSubscription and handleRemoveSubscription" {
     const allocator = std.testing.allocator;
 
-    const ring_buf = try allocator.alloc(u8, 16384);
+    const ring_buf = try allocator.alignedAlloc(u8, .@"8", 16384);
     defer allocator.free(ring_buf);
     var rb = aeron.ipc.ring_buffer.ManyToOneRingBuffer.init(ring_buf);
 
@@ -91,12 +92,12 @@ test "DriverConductor: handleAddSubscription and handleRemoveSubscription" {
     @memset(values_buf, 0);
     var cm = aeron.ipc.counters.CountersMap.init(meta_buf, values_buf);
 
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    defer std.posix.close(sock);
+    const sock = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer net.closeSocket(sock);
 
     var recv_ep = aeron.transport.ReceiveChannelEndpoint{
         .socket = sock,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_endpoint = aeron.transport.SendChannelEndpoint{ .socket = sock };
     var sender = try aeron.driver.Sender.init(allocator, &send_endpoint, &cm);
@@ -139,7 +140,7 @@ test "DriverConductor: handleAddSubscription and handleRemoveSubscription" {
 test "DriverConductor: multiple publications on same channel with reference counting" {
     const allocator = std.testing.allocator;
 
-    const ring_buf = try allocator.alloc(u8, 16384);
+    const ring_buf = try allocator.alignedAlloc(u8, .@"8", 16384);
     defer allocator.free(ring_buf);
     var rb = aeron.ipc.ring_buffer.ManyToOneRingBuffer.init(ring_buf);
 
@@ -157,7 +158,7 @@ test "DriverConductor: multiple publications on same channel with reference coun
     const sock = std.math.maxInt(std.posix.socket_t);
     var recv_ep = aeron.transport.ReceiveChannelEndpoint{
         .socket = sock,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_endpoint = aeron.transport.SendChannelEndpoint{ .socket = sock };
     var sender = try aeron.driver.Sender.init(allocator, &send_endpoint, &cm);
@@ -218,7 +219,7 @@ test "DriverConductor: multiple publications on same channel with reference coun
 test "DriverConductor: ADD_SUBSCRIPTION with no matching publication" {
     const allocator = std.testing.allocator;
 
-    const ring_buf = try allocator.alloc(u8, 16384);
+    const ring_buf = try allocator.alignedAlloc(u8, .@"8", 16384);
     defer allocator.free(ring_buf);
     var rb = aeron.ipc.ring_buffer.ManyToOneRingBuffer.init(ring_buf);
 
@@ -236,7 +237,7 @@ test "DriverConductor: ADD_SUBSCRIPTION with no matching publication" {
     const sock = std.math.maxInt(std.posix.socket_t);
     var recv_ep = aeron.transport.ReceiveChannelEndpoint{
         .socket = sock,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_endpoint = aeron.transport.SendChannelEndpoint{ .socket = sock };
     var sender = try aeron.driver.Sender.init(allocator, &send_endpoint, &cm);
@@ -274,7 +275,7 @@ test "DriverConductor: ADD_SUBSCRIPTION with no matching publication" {
 test "DriverConductor: CLIENT_KEEPALIVE message processed without error" {
     const allocator = std.testing.allocator;
 
-    const ring_buf = try allocator.alloc(u8, 16384);
+    const ring_buf = try allocator.alignedAlloc(u8, .@"8", 16384);
     defer allocator.free(ring_buf);
     var rb = aeron.ipc.ring_buffer.ManyToOneRingBuffer.init(ring_buf);
 
@@ -292,7 +293,7 @@ test "DriverConductor: CLIENT_KEEPALIVE message processed without error" {
     const sock = std.math.maxInt(std.posix.socket_t);
     var recv_ep = aeron.transport.ReceiveChannelEndpoint{
         .socket = sock,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_endpoint = aeron.transport.SendChannelEndpoint{ .socket = sock };
     var sender = try aeron.driver.Sender.init(allocator, &send_endpoint, &cm);
@@ -319,7 +320,7 @@ test "DriverConductor: CLIENT_KEEPALIVE message processed without error" {
 test "DriverConductor: client eviction on timeout" {
     const allocator = std.testing.allocator;
 
-    const ring_buf = try allocator.alloc(u8, 16384);
+    const ring_buf = try allocator.alignedAlloc(u8, .@"8", 16384);
     defer allocator.free(ring_buf);
     var rb = aeron.ipc.ring_buffer.ManyToOneRingBuffer.init(ring_buf);
 
@@ -337,7 +338,7 @@ test "DriverConductor: client eviction on timeout" {
     const sock = std.math.maxInt(std.posix.socket_t);
     var recv_ep = aeron.transport.ReceiveChannelEndpoint{
         .socket = sock,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_endpoint = aeron.transport.SendChannelEndpoint{ .socket = sock };
     var sender = try aeron.driver.Sender.init(allocator, &send_endpoint, &cm);

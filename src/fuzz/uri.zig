@@ -6,7 +6,7 @@ const uri_module = struct {
 /// Fuzz parser for Aeron URIs.
 /// Feeds random/corrupted strings to AeronUri.parse().
 pub fn fuzz(input: []const u8) void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

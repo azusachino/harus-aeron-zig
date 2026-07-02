@@ -2,12 +2,13 @@
 
 The Sender is a duty-cycle agent: once per scheduler tick it wakes up, scans every active publication, drains frames from the log buffer into UDP datagrams, and goes back to sleep. It never blocks on I/O. It has no locks. It does not read from the network.
 
-## Role and Responsibilities
+!!! abstract "What you'll build"
+    A precise mental model of how the Sender continuously drains the publisher's log buffer to the network:
 
-- Read committed frames from each `NetworkPublication`'s term buffer.
-- Send `DATA` frames over UDP to the subscriber's address.
-- Emit `SETUP` frames periodically so new subscribers can learn stream geometry.
-- Drain a retransmit queue to satisfy `NAK`-requested re-sends.
+    - The lifecycle of a `NetworkPublication` — session, stream, address, and term buffers
+    - How `sender_position` and `publisher_limit` counters track the send window
+    - The four-step duty cycle: check window, send SETUP, drain DATA, process retransmits
+    - Why the busy-spin pattern achieves ultra-low latency
 
 ## NetworkPublication
 
@@ -28,7 +29,12 @@ pub const NetworkPublication = struct {
 };
 ```
 
-`sender_position` and `publisher_limit` are indices into a shared counter array — a memory-mapped slab visible to both the media driver and the client library. The client advances `publisher_limit` as it writes frames; the Sender advances `sender_position` as it reads and transmits them.
+!!! info "Aeron concept: sender position and publisher limit"
+    `sender_position` and `publisher_limit` are indices into a shared counter array — a
+    memory-mapped slab visible to both the media driver and the client library. The client
+    advances `publisher_limit` as it writes frames; the Sender advances `sender_position` as
+    it reads and transmits them. The range `[sender_pos, pub_limit)` is the live window of
+    bytes that have been committed but not yet sent.
 
 ## The doWork Loop
 
@@ -45,20 +51,32 @@ pub fn doWork(self: *Sender) i32 {
 
 `doWork` returns the number of work items completed. Returning 0 signals to the outer busy-spin that the system is idle and the thread may yield. A non-zero return means "I did something — call me again immediately."
 
+### The Sender Duty Cycle
+
+```mermaid
+flowchart LR
+    A["read sender_pos<br/>publisher_limit"] --> B{"sender_pos<br/>>= limit?"}
+    B -->|yes| C["return 0"]
+    B -->|no| D{"time to send<br/>SETUP?"}
+    D -->|yes| E["sendSetupFrame()"]
+    D -->|no| F["sendDataFrames()"]
+    E --> G["processRetransmits()"]
+    F --> G
+    G --> H["update counters<br/>return work_count"]
+    C --> Z["exit doWork"]
+    H --> Z
+```
+
 ### Inside processPublication
 
-```
-sender_pos = counters.get(publication.sender_position)
-pub_limit  = counters.get(publication.publisher_limit)
+For each publication, the Sender:
 
-if sender_pos >= pub_limit → return 0   // nothing to send
+1. Reads `sender_position` and `publisher_limit` from shared counters
+2. If nothing to send (`sender_pos >= pub_limit`), moves to the next publication
+3. Periodically (every 50 ms) transmits a SETUP frame with stream geometry
+4. Drains all committed DATA frames from `sender_pos` to `pub_limit`, scanning in frame-aligned steps
 
-if now_ms - last_setup_time_ms >= 50 → sendSetupFrame()
-
-sendDataFrames(sender_pos, pub_limit)
-```
-
-The range `[sender_pos, pub_limit)` is the window of bytes that have been committed by the client but not yet placed on the wire. The Sender iterates that window in frame-aligned steps.
+The range `[sender_pos, pub_limit)` is the window of bytes that have been committed by the client but not yet placed on the wire.
 
 ## DATA Frame Transmission
 
@@ -91,6 +109,11 @@ header.active_term_id  = current_term_id;
 header.term_length     = publication.log_buffer.term_length;
 header.mtu             = publication.mtu;
 ```
+
+!!! tip "Late-joining subscribers benefit from periodic SETUP"
+    Because a receiver may start listening at any time, the Sender continues to broadcast
+    SETUP frames throughout the publication's lifetime. This allows new subscribers to
+    learn the stream geometry without waiting for a client-side timeout.
 
 ## The Retransmit Queue
 
@@ -132,6 +155,17 @@ fn senderThreadFunc(md: *MediaDriver) void {
 
 This is a pure busy-spin: no sleep, no condition variable, no epoll. Aeron's design trades CPU for latency. On production deployments the thread is pinned to an isolated core with `pthread_setaffinity_np`. The `running` flag is a `std.atomic.Value(bool)`, ensuring the stop signal crosses the memory model boundary correctly.
 
+!!! warning "Busy-spin uses one full core"
+    The Sender thread will consume 100% CPU in steady state. Production deployments isolate this
+    thread to its own dedicated core to prevent it from interfering with application workloads.
+    For development and testing, this is acceptable; just be aware when profiling or monitoring.
+
+## Key File
+
+`src/driver/sender.zig` — the complete Sender implementation.
+
+Compare against the Java reference: [`sender.go`](https://github.com/aeron-io/aeron/blob/master/aeron-driver/src/main/java/io/aeron/driver/Sender.java).
+
 ## Function Reference
 
 | Function | Purpose |
@@ -146,3 +180,11 @@ This is a pure busy-spin: no sleep, no condition variable, no epoll. Aeron's des
 | `onAddPublication` | Append publication to active list |
 | `onRemovePublication` | Remove publication by (session, stream) |
 | `onRetransmit` | Enqueue a NAK-requested retransmit |
+
+!!! success "Key takeaways"
+    - The Sender is a pure duty-cycle agent: no blocking I/O, no locks, no network reads.
+    - `sender_position` and `publisher_limit` counters define the live window of data to send.
+    - Each duty cycle: check window → send periodic SETUP → drain DATA frames → process retransmits.
+    - The busy-spin pattern sacrifices CPU for microsecond-scale latency.
+
+Next, we'll examine the Receiver — the mirror-image agent that decodes incoming UDP frames and detects gaps in the sequence.

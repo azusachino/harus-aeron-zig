@@ -4,7 +4,7 @@
 
 **Architecture:** Sequential tasks, each independently shippable. Tutorial work comes first (higher learner impact), protocol polish last (lower urgency). All code changes go through `make check` before commit.
 
-**Tech Stack:** Zig 0.15.2, `make check` / `make tutorial-check`, git tags for chapter checkpoints.
+**Tech Stack:** Zig 0.16.0, `make check` / `make tutorial-check`, git tags for chapter checkpoints.
 
 ---
 

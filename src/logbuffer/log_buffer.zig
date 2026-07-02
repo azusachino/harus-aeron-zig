@@ -1,6 +1,7 @@
 // Aeron log buffer — three-term ring structure backed by mmap
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-client/src/main/java/io/aeron/logbuffer/LogBufferDescriptor.java
 const std = @import("std");
+const io_mod = @import("../io.zig");
 const metadata = @import("metadata.zig");
 
 pub const term_reader = @import("term_reader.zig");
@@ -62,14 +63,15 @@ pub const LogBuffer = struct {
         const total = @as(usize, @intCast(term_length)) * PARTITION_COUNT + metadata.LOG_META_DATA_LENGTH;
 
         // Create or open file and extend to required size
-        const file = try std.fs.createFileAbsolute(path, .{ .read = true, .truncate = false });
-        defer file.close();
-        try file.setEndPos(total);
+        const io = io_mod.io();
+        var file = try std.Io.Dir.cwd().createFile(io, path, .{ .read = true, .truncate = false });
+        defer file.close(io);
+        file.setLength(io, total) catch return error.FileTruncateFailed;
 
         const ptr = try std.posix.mmap(
             null,
             total,
-            std.posix.PROT.READ | std.posix.PROT.WRITE,
+            .{ .READ = true, .WRITE = true },
             .{ .TYPE = .SHARED },
             file.handle,
             0,
@@ -93,15 +95,16 @@ pub const LogBuffer = struct {
     }
 
     pub fn openMapped(allocator: std.mem.Allocator, path: []const u8) !LogBuffer {
-        const file = try std.fs.openFileAbsolute(path, .{ .mode = .read_write });
-        defer file.close();
+        const io = io_mod.io();
+        var file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_write });
+        defer file.close(io);
 
-        const stat = try file.stat();
-        if (stat.size < metadata.LOG_META_DATA_LENGTH) {
+        const stat_buf = file.stat(io) catch return error.InvalidLogBufferFile;
+        if (stat_buf.size < metadata.LOG_META_DATA_LENGTH) {
             return error.InvalidLogBufferFile;
         }
 
-        const total_size: usize = @intCast(stat.size);
+        const total_size: usize = @intCast(stat_buf.size);
         const term_bytes = total_size - metadata.LOG_META_DATA_LENGTH;
         if ((term_bytes % PARTITION_COUNT) != 0) {
             return error.InvalidLogBufferFile;
@@ -114,7 +117,7 @@ pub const LogBuffer = struct {
         const ptr = try std.posix.mmap(
             null,
             total_size,
-            std.posix.PROT.READ | std.posix.PROT.WRITE,
+            .{ .READ = true, .WRITE = true },
             .{ .TYPE = .SHARED },
             file.handle,
             0,
@@ -167,13 +170,13 @@ pub const LogBuffer = struct {
 test "LogBuffer: mmap file created on disk" {
     const allocator = std.testing.allocator;
     const path = "/tmp/test-logbuf.dat";
-    defer std.fs.deleteFileAbsolute(path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(io_mod.io(), path) catch {};
 
     var lb = try LogBuffer.initMapped(allocator, 64 * 1024, path);
     defer lb.deinit();
 
     // File must exist and have correct size
-    const stat = try std.fs.cwd().statFile(path);
+    const stat = try std.Io.Dir.cwd().statFile(io_mod.io(), path, .{});
     const expected_size = 3 * 64 * 1024 + metadata.LOG_META_DATA_LENGTH;
     try std.testing.expectEqual(expected_size, stat.size);
 }
@@ -181,7 +184,7 @@ test "LogBuffer: mmap file created on disk" {
 test "LogBuffer openMapped reopens existing mapped file" {
     const allocator = std.testing.allocator;
     const path = "/tmp/test-logbuf-open.dat";
-    defer std.fs.deleteFileAbsolute(path) catch {};
+    defer std.Io.Dir.deleteFileAbsolute(io_mod.io(), path) catch {};
 
     var created = try LogBuffer.initMapped(allocator, 64 * 1024, path);
     var meta = created.metaData();

@@ -3,6 +3,15 @@
 Before writing any code, build a mental model of the whole system. This chapter walks
 through every major component, how they are connected, and why the design is the way it is.
 
+!!! abstract "What you'll build"
+    A complete mental model of Aeron's architecture:
+
+    - The two-process boundary: client library vs Media Driver
+    - Five shared memory regions and their purposes
+    - Log buffer structure: terms, tail counters, frame layout
+    - Component relationships: Publication, Subscription, Conductor, Sender, Receiver
+    - Data flow: from `offer()` through the driver to `poll()`
+
 ## The Two Process Boundary
 
 An Aeron deployment has at least two processes: the **Media Driver** and one or more
@@ -12,24 +21,23 @@ regions backed by memory-mapped files in a directory called the `aeron.dir`
 
 The client library never touches a socket. All networking is the driver's responsibility.
 
-## The Five Shared Memory Regions
+!!! info "The Five Shared Memory Regions"
+    Every channel between a client and the driver uses one or more of these regions:
 
-Every channel between a client and the driver uses one or more of these regions:
+    ```
+    aeron.dir/
+      publications/<session-id>     ← publisher log buffer  (client writes, driver reads)
+      images/<session-id>           ← subscriber log buffer (driver writes, client reads)
+      cnc.dat                       ← CnC file: ring buffer + broadcast + counters
+    ```
 
-```
-aeron.dir/
-  publications/<session-id>     ← publisher log buffer  (client writes, driver reads)
-  images/<session-id>           ← subscriber log buffer (driver writes, client reads)
-  cnc.dat                       ← CnC file: ring buffer + broadcast + counters
-```
-
-| Region | Direction | Purpose |
-|--------|-----------|---------|
-| Publication log buffer | Client → Driver | Publisher writes frames; Sender reads and transmits |
-| Image log buffer | Driver → Client | Receiver writes incoming frames; Subscriber polls |
-| Ring buffer (in cnc.dat) | Client → Driver | Commands: add publication, add subscription, heartbeat |
-| Broadcast buffer (in cnc.dat) | Driver → Client | Responses: on_publication_ready, on_image_ready, errors |
-| Counters map (in cnc.dat) | Shared | Publisher limit, subscriber position, sender position |
+    | Region | Direction | Purpose |
+    |--------|-----------|---------|
+    | Publication log buffer | Client → Driver | Publisher writes frames; Sender reads and transmits |
+    | Image log buffer | Driver → Client | Receiver writes incoming frames; Subscriber polls |
+    | Ring buffer (in cnc.dat) | Client → Driver | Commands: add publication, add subscription, heartbeat |
+    | Broadcast buffer (in cnc.dat) | Driver → Client | Responses: on_publication_ready, on_image_ready, errors |
+    | Counters map (in cnc.dat) | Shared | Publisher limit, subscriber position, sender position |
 
 ## The Log Buffer in Detail
 
@@ -56,68 +64,58 @@ and the Conductor cleans the old term.
 
 ## Component Diagram
 
-```
-Client Process
-┌──────────────────────────────────────────────────────────┐
-│  Aeron (context)                                         │
-│   ├── Publication ──write──▶ publication log buffer      │
-│   └── Subscription ◀──read── image log buffer            │
-│                                                          │
-│   ├── RingBuffer.write() ──▶ cnc.dat ring buffer         │
-│   └── BroadcastReceiver ◀── cnc.dat broadcast buffer     │
-└──────────────────────────────────────────────────────────┘
-              │ mmap (shared memory)
-┌─────────────▼────────────────────────────────────────────┐
-│  Media Driver Process                                     │
-│                                                          │
-│  ┌─────────────────────────────────────────────────┐     │
-│  │ Conductor (duty-cycle, ~1 ms)                   │     │
-│  │  - reads ring buffer commands                   │     │
-│  │  - writes broadcast responses                   │     │
-│  │  - manages publication/image lifecycle          │     │
-│  │  - triggers term rotation                       │     │
-│  └───────────────┬─────────────────────┬───────────┘     │
-│                  │                     │                  │
-│  ┌───────────────▼──────┐  ┌───────────▼─────────────┐   │
-│  │ Sender (busy-spin)   │  │ Receiver (busy-spin)    │   │
-│  │  - reads pub log buf │  │  - dispatches UDP frames│   │
-│  │  - sends DATA frames │  │  - writes image log buf │   │
-│  │  - sends SETUP/RTT   │  │  - sends STATUS/NAK     │   │
-│  └───────────────┬──────┘  └───────────┬─────────────┘   │
-└──────────────────┼─────────────────────┼─────────────────┘
-                   │  UDP unicast         │
-             ┌─────▼─────────────────────▼────┐
-             │        Network                 │
-             └────────────────────────────────┘
+```mermaid
+graph TB
+    subgraph client["Client Process"]
+        pub["Publication<br/>offer()"]
+        sub["Subscription<br/>poll()"]
+        ring["RingBuffer<br/>.write()"]
+        bcast["BroadcastReceiver"]
+    end
+    
+    subgraph driver["Media Driver Process"]
+        conductor["Conductor<br/>duty-cycle ~1ms<br/>- reads commands<br/>- writes responses<br/>- manages lifecycle"]
+        sender["Sender<br/>busy-spin<br/>- reads pub log buf<br/>- sends DATA/SETUP/RTT"]
+        receiver["Receiver<br/>busy-spin<br/>- dispatches UDP<br/>- writes image log buf<br/>- sends STATUS/NAK"]
+    end
+    
+    subgraph net["Network"]
+        udp["UDP unicast"]
+    end
+    
+    pub -->|mmap: pub log buf| sender
+    sender -->|commands| conductor
+    conductor -->|coordinated by| receiver
+    receiver -->|mmap: image log buf| sub
+    ring -->|mmap: ring buf| conductor
+    conductor -->|mmap: broadcast buf| bcast
+    sender -->|UDP| udp
+    udp -->|UDP| receiver
 ```
 
 ## Data Flow: offer() to poll()
 
 A message takes this path from publisher to subscriber:
 
-```
-1. offer(msg)
-   └─ TermAppender.appendFrame()
-       └─ atomic tail increment (claims N bytes)
-       └─ write FrameHeader + payload into term
+```mermaid
+sequenceDiagram
+    participant Pub as Publisher
+    participant LogBuf as Log Buffer<br/>term[active]
+    participant Sender as Sender
+    participant Network as UDP Network
+    participant Receiver as Receiver
+    participant ImageBuf as Image Buffer<br/>term[active]
+    participant Sub as Subscriber
 
-2. Sender duty cycle
-   └─ reads term from current tail
-   └─ builds DATA frame (header already in log buffer)
-   └─ sendmsg() via UDP socket
-
-3. [network]
-
-4. Receiver duty cycle
-   └─ recvmsg() from UDP socket
-   └─ validates frame header
-   └─ writes frame into subscriber image log buffer
-   └─ updates receiver position counter
-
-5. poll(handler, limit)
-   └─ TermReader.read() from current subscriber position
-   └─ calls handler(buffer, offset, length, header)
-   └─ advances subscriber position counter
+    Pub->>LogBuf: 1. offer(msg)<br/>atomic tail increment<br/>write frame header + payload
+    Sender->>LogBuf: 2. read from current tail
+    Sender->>Network: sendmsg() DATA frame
+    Network->>Receiver: 3. UDP packet arrives
+    Receiver->>Receiver: 4. validate header
+    Receiver->>ImageBuf: write frame into image buffer
+    Sub->>ImageBuf: 5. poll(handler)<br/>read from position
+    ImageBuf->>Sub: frame data (zero-copy)
+    Sub->>Sub: call handler()
 ```
 
 ## Thread Model
@@ -149,9 +147,8 @@ When the client receives `ON_PUBLICATION_READY`, it memory-maps the log buffer f
 creates a `Publication` object backed by that mapping. From that point, `offer()` writes
 directly to shared memory — no further IPC with the driver on the hot path.
 
-## What the Next Parts Build
-
-- **Part 1** — The primitives: frame codec, ring buffer, broadcast, counters, log buffer.
-- **Part 2** — The data path: TermAppender (write), TermReader (read), frame reassembly.
-- **Part 3** — The driver agents: Sender, Receiver, Conductor, and MediaDriver bootstrap.
-- **Part 4** — The client library: Publication, Subscription, and Aeron context.
+!!! success "What the Next Parts Build"
+    - **Part 1** — The primitives: frame codec, ring buffer, broadcast, counters, log buffer.
+    - **Part 2** — The data path: TermAppender (write), TermReader (read), frame reassembly.
+    - **Part 3** — The driver agents: Sender, Receiver, Conductor, and MediaDriver bootstrap.
+    - **Part 4** — The client library: Publication, Subscription, and Aeron context.

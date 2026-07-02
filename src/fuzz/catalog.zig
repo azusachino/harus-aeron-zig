@@ -1,10 +1,11 @@
 const std = @import("std");
+const time = @import("aeron").time;
 const catalog = @import("aeron").archive.catalog;
 
 /// Fuzz parser for archive catalog operations.
 /// Creates catalog entries from corrupted data and attempts lookups.
 pub fn fuzz(input: []const u8) void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -53,7 +54,7 @@ pub fn fuzz(input: []const u8) void {
 
     // Try updates (safe even if no entries exist)
     _ = cat.updateStopPosition(1, 1024) catch {};
-    _ = cat.updateStopTimestamp(1, std.time.milliTimestamp()) catch {};
+    _ = cat.updateStopTimestamp(1, time.milliTimestamp()) catch {};
 }
 
 test "fuzz_catalog: empty input" {

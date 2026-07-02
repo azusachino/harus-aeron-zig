@@ -3,6 +3,8 @@
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-archive/src/main/java/io/aeron/archive/Catalog.java
 
 const std = @import("std");
+const time = @import("../time.zig");
+const io_mod = @import("../io.zig");
 
 /// Fixed-size recording descriptor entry (1024 bytes on disk)
 pub const RecordingDescriptorEntry = extern struct {
@@ -75,7 +77,7 @@ pub const Catalog = struct {
     pub fn init(allocator: std.mem.Allocator) Catalog {
         return Catalog{
             .allocator = allocator,
-            .entries = .{},
+            .entries = .empty,
             .next_recording_id = 1,
             .path = null,
         };
@@ -83,14 +85,15 @@ pub const Catalog = struct {
 
     /// Initialize a catalog that persists its entries under the given archive directory.
     pub fn initWithArchiveDir(allocator: std.mem.Allocator, archive_dir: []const u8) !Catalog {
-        try std.fs.cwd().makePath(archive_dir);
+        // Ensure the archive directory exists (no error if it already does).
+        try std.Io.Dir.cwd().createDirPath(io_mod.io(), archive_dir);
 
         const path = try std.fmt.allocPrint(allocator, "{s}/catalog.dat", .{archive_dir});
         errdefer allocator.free(path);
 
         var catalog = Catalog{
             .allocator = allocator,
-            .entries = .{},
+            .entries = .empty,
             .next_recording_id = 1,
             .path = path,
         };
@@ -252,17 +255,17 @@ pub const Catalog = struct {
 
     fn loadFromDisk(self: *Catalog) !void {
         const path = self.path orelse return;
-        const file = std.fs.cwd().openFile(path, .{}) catch |err| switch (err) {
-            error.FileNotFound => {
+        const file = std.Io.Dir.cwd().openFile(io_mod.io(), path, .{}) catch |err| {
+            if (err == error.FileNotFound) {
                 // catalog.dat is missing — attempt to reconstruct from segment files
                 try self.reconstructFromSegments();
                 return;
-            },
-            else => return err,
+            }
+            return err;
         };
-        defer file.close();
+        defer file.close(io_mod.io());
 
-        const file_size = (try file.stat()).size;
+        const file_size = @as(usize, @intCast(try file.length(io_mod.io())));
         if (file_size == 0) {
             // Empty catalog file — attempt segment-based reconstruction
             try self.reconstructFromSegments();
@@ -272,8 +275,10 @@ pub const Catalog = struct {
             return error.CorruptCatalog;
         }
 
-        const bytes = try file.readToEndAlloc(self.allocator, file_size);
+        const bytes = try self.allocator.alloc(u8, file_size);
         defer self.allocator.free(bytes);
+        const n = try file.readPositionalAll(io_mod.io(), bytes, 0);
+        if (n != file_size) return error.CorruptCatalog;
 
         var offset: usize = 0;
         var max_recording_id: i64 = 0;
@@ -301,29 +306,22 @@ pub const Catalog = struct {
             break :blk p[0..last_sep];
         };
 
-        var dir = std.fs.cwd().openDir(archive_dir, .{ .iterate = true }) catch return;
-        defer dir.close();
+        var dir = std.Io.Dir.cwd().openDir(io_mod.io(), archive_dir, .{ .iterate = true }) catch return;
+        defer dir.close(io_mod.io());
 
-        var it = dir.iterate();
         var max_recording_id: i64 = 0;
 
         // Collect segment files first so we can sort and fold them per recording.
-        var segments = std.ArrayListUnmanaged(SegmentFile){};
+        var segments = std.ArrayListUnmanaged(SegmentFile).empty;
         defer segments.deinit(self.allocator);
 
-        while (try it.next()) |entry| {
+        var it = dir.iterate();
+        while (try it.next(io_mod.io())) |entry| {
             if (entry.kind != .file) continue;
             const parsed = parseSegmentFileName(entry.name) orelse continue;
 
-            const seg_path = try std.fmt.allocPrint(self.allocator, "{s}/{s}", .{ archive_dir, entry.name });
-            defer self.allocator.free(seg_path);
-
-            const seg_file = std.fs.cwd().openFile(seg_path, .{}) catch continue;
-            const seg_size = (seg_file.stat() catch {
-                seg_file.close();
-                continue;
-            }).size;
-            seg_file.close();
+            const seg_stat = dir.statFile(io_mod.io(), entry.name, .{}) catch continue;
+            const seg_size = seg_stat.size;
 
             try segments.append(self.allocator, .{
                 .recording_id = parsed.recording_id,
@@ -404,13 +402,14 @@ pub const Catalog = struct {
 
     fn persist(self: *Catalog) !void {
         const path = self.path orelse return;
-        const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
-        defer file.close();
+        const file = try std.Io.Dir.cwd().createFile(io_mod.io(), path, .{ .truncate = true });
+        defer file.close(io_mod.io());
 
         if (self.entries.items.len > 0) {
-            try file.writeAll(std.mem.sliceAsBytes(self.entries.items));
+            const bytes = std.mem.sliceAsBytes(self.entries.items);
+            try file.writeStreamingAll(io_mod.io(), bytes);
         }
-        try file.sync();
+        try file.sync(io_mod.io());
     }
 };
 
@@ -420,7 +419,7 @@ test "RecordingDescriptorEntry is exactly 1024 bytes" {
 }
 
 test "addNewRecording returns sequential IDs" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -437,7 +436,7 @@ test "addNewRecording returns sequential IDs" {
 }
 
 test "recordingDescriptor lookup by ID" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -455,7 +454,7 @@ test "recordingDescriptor lookup by ID" {
 }
 
 test "updateStopPosition updates correct entry" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -471,13 +470,13 @@ test "updateStopPosition updates correct entry" {
 }
 
 test "persistent catalog survives re-init" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/harus-aeron-catalog-{d}", .{std.time.nanoTimestamp()});
+    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/harus-aeron-catalog-{d}", .{time.nanoTimestamp()});
     defer allocator.free(archive_dir);
-    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), archive_dir) catch {};
 
     {
         var catalog = try Catalog.initWithArchiveDir(allocator, archive_dir);
@@ -502,7 +501,7 @@ test "persistent catalog survives re-init" {
 }
 
 test "listRecordings iterates range" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -526,7 +525,7 @@ test "listRecordings iterates range" {
 }
 
 test "findLastMatchingRecording finds by channel and stream_id" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -543,7 +542,7 @@ test "findLastMatchingRecording finds by channel and stream_id" {
 }
 
 test "findLastMatchingRecording returns null for no match" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -558,16 +557,16 @@ test "findLastMatchingRecording returns null for no match" {
 }
 
 test "reconstructFromSegments rebuilds descriptors when catalog.dat is missing" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/harus-aeron-recon-{d}", .{std.time.nanoTimestamp()});
+    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/harus-aeron-recon-{d}", .{time.nanoTimestamp()});
     defer allocator.free(archive_dir);
-    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), archive_dir) catch {};
 
     // Simulate two segment files left behind after a crash (no catalog.dat).
-    try std.fs.cwd().makePath(archive_dir);
+    try std.Io.Dir.cwd().createDirPath(io_mod.io(), archive_dir);
     const seg1 = try std.fmt.allocPrint(allocator, "{s}/1-0.dat", .{archive_dir});
     defer allocator.free(seg1);
     const seg2 = try std.fmt.allocPrint(allocator, "{s}/1-4.dat", .{archive_dir});
@@ -576,19 +575,19 @@ test "reconstructFromSegments rebuilds descriptors when catalog.dat is missing" 
     defer allocator.free(seg3);
 
     {
-        const f = try std.fs.cwd().createFile(seg1, .{});
-        defer f.close();
-        try f.writeAll("abcd");
+        const f = try std.Io.Dir.cwd().createFile(io_mod.io(), seg1, .{});
+        defer f.close(io_mod.io());
+        try f.writeStreamingAll(io_mod.io(), "abcd");
     }
     {
-        const f = try std.fs.cwd().createFile(seg2, .{});
-        defer f.close();
-        try f.writeAll("efghij");
+        const f = try std.Io.Dir.cwd().createFile(io_mod.io(), seg2, .{});
+        defer f.close(io_mod.io());
+        try f.writeStreamingAll(io_mod.io(), "efghij");
     }
     {
-        const f = try std.fs.cwd().createFile(seg3, .{});
-        defer f.close();
-        try f.writeAll("klmno");
+        const f = try std.Io.Dir.cwd().createFile(io_mod.io(), seg3, .{});
+        defer f.close(io_mod.io());
+        try f.writeStreamingAll(io_mod.io(), "klmno");
     }
 
     // Open the catalog with the archive dir — no catalog.dat present.
@@ -611,32 +610,32 @@ test "reconstructFromSegments rebuilds descriptors when catalog.dat is missing" 
 }
 
 test "reconstructFromSegments skips non-recording files" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/harus-aeron-recon-skip-{d}", .{std.time.nanoTimestamp()});
+    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/harus-aeron-recon-skip-{d}", .{time.nanoTimestamp()});
     defer allocator.free(archive_dir);
-    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), archive_dir) catch {};
 
-    try std.fs.cwd().makePath(archive_dir);
+    try std.Io.Dir.cwd().createDirPath(io_mod.io(), archive_dir);
 
     // Valid segment
     const seg1 = try std.fmt.allocPrint(allocator, "{s}/2-0.dat", .{archive_dir});
     defer allocator.free(seg1);
     {
-        const f = try std.fs.cwd().createFile(seg1, .{});
-        defer f.close();
-        try f.writeAll("payload");
+        const f = try std.Io.Dir.cwd().createFile(io_mod.io(), seg1, .{});
+        defer f.close(io_mod.io());
+        try f.writeStreamingAll(io_mod.io(), "payload");
     }
 
     // Non-numeric — should be ignored
     const junk = try std.fmt.allocPrint(allocator, "{s}/some-log.dat", .{archive_dir});
     defer allocator.free(junk);
     {
-        const f = try std.fs.cwd().createFile(junk, .{});
-        defer f.close();
-        try f.writeAll("junk");
+        const f = try std.Io.Dir.cwd().createFile(io_mod.io(), junk, .{});
+        defer f.close(io_mod.io());
+        try f.writeStreamingAll(io_mod.io(), "junk");
     }
 
     var catalog = try Catalog.initWithArchiveDir(allocator, archive_dir);

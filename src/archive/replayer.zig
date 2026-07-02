@@ -194,7 +194,7 @@ pub const Replayer = struct {
     pub fn init(allocator: std.mem.Allocator) Replayer {
         return Replayer{
             .allocator = allocator,
-            .sessions = .{},
+            .sessions = .empty,
             .next_replay_session_id = 1,
         };
     }
@@ -297,7 +297,7 @@ pub const Replayer = struct {
 
 test "ReplaySession reads chunks sequentially" {
     const data = "Hello, World! This is test data.";
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -324,7 +324,7 @@ test "ReplaySession reads chunks sequentially" {
 
 test "ReplaySession respects replay_limit" {
     const data = "0123456789ABCDEFGHIJ";
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -343,7 +343,7 @@ test "ReplaySession respects replay_limit" {
 
 test "ReplaySession detects completion" {
     const data = "short";
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -357,7 +357,7 @@ test "ReplaySession detects completion" {
 
 test "ReplaySession close marks inactive" {
     const data = "test data";
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -375,7 +375,7 @@ test "ReplaySession close marks inactive" {
 
 test "ReplaySession doWork returns 1 when active" {
     const data = "data";
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -388,7 +388,7 @@ test "ReplaySession doWork returns 1 when active" {
 
 test "ReplaySession doWork returns 0 when inactive" {
     const data = "data";
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -402,7 +402,7 @@ test "ReplaySession doWork returns 0 when inactive" {
 
 test "ReplaySession progress tracking" {
     const data = "0123456789";
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -420,7 +420,7 @@ test "ReplaySession progress tracking" {
 }
 
 test "Replayer onReplayRequest creates session with unique ID" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -439,7 +439,7 @@ test "Replayer onReplayRequest creates session with unique ID" {
 }
 
 test "Replayer onStopReplay closes correct session" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -459,7 +459,7 @@ test "Replayer onStopReplay closes correct session" {
 }
 
 test "Replayer doWork advances all active sessions" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -477,7 +477,7 @@ test "Replayer doWork advances all active sessions" {
 }
 
 test "Replayer doWork returns 0 when no active sessions" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -489,7 +489,7 @@ test "Replayer doWork returns 0 when no active sessions" {
 }
 
 test "Replayer findSession returns correct session" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -515,7 +515,7 @@ test "Replayer findSession returns correct session" {
 }
 
 test "Replayer activeSessions counts correctly" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -537,7 +537,7 @@ test "Replayer activeSessions counts correctly" {
 }
 
 test "Replayer handles multiple sessions reaching completion" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -561,7 +561,7 @@ test "Replayer handles multiple sessions reaching completion" {
 }
 
 test "replay rejects position before start_position" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -574,7 +574,7 @@ test "replay rejects position before start_position" {
 }
 
 test "replay rejects position beyond stop_position" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -587,7 +587,7 @@ test "replay rejects position beyond stop_position" {
 }
 
 test "replay rejects length exceeding recording" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -609,7 +609,7 @@ test "replay rejects length exceeding recording" {
 test "ReplaySession: replay starting mid-segment (non-zero offset)" {
     // Simulate two 32-byte segments concatenated into one 64-byte source buffer.
     // The replay request starts at byte offset 20 (mid first segment).
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -637,7 +637,7 @@ test "ReplaySession: replay starting mid-segment (non-zero offset)" {
 
 test "ReplaySession: replay starting exactly at segment boundary" {
     // Two 32-byte segments; replay starts at the boundary (offset 32).
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -660,7 +660,7 @@ test "ReplaySession: replay starting exactly at segment boundary" {
 
 test "ReplaySession: replay spanning multiple segments reads all bytes" {
     // Three 16-byte segments; replay starts at 0 and should return all 48 bytes.
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -690,7 +690,7 @@ test "ReplaySession: replay spanning multiple segments reads all bytes" {
 
 test "ReplaySession: replay length ends exactly at segment boundary" {
     // 64-byte source; request to replay exactly 32 bytes (first segment only).
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -714,7 +714,7 @@ test "ReplaySession: replay length ends exactly at segment boundary" {
 
 test "ReplaySession: mid-segment start with length ending at next boundary" {
     // 64-byte source; replay from offset 16, length 32 → bytes [16,48).
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -739,7 +739,7 @@ test "ReplaySession: mid-segment start with length ending at next boundary" {
 }
 
 test "replay accepts valid position and length" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -761,7 +761,7 @@ test "replay accepts valid position and length" {
 }
 
 test "replay reads from non-zero recording start position" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

@@ -199,9 +199,9 @@ pub const ClusterConductor = struct {
             .leader_member_id = -1,
             .leader_ship_term_id = 0,
             .log = log_mod.ClusterLog.init(allocator),
-            .command_queue = .{},
-            .response_queue = .{},
-            .sessions = .{},
+            .command_queue = .empty,
+            .response_queue = .empty,
+            .sessions = .empty,
             .next_session_id = 1,
             .commit_position = 0,
             .snapshot_state = .none,
@@ -523,7 +523,7 @@ pub const ClusterConductor = struct {
 // =============================================================================
 
 test "conductor init" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -538,7 +538,7 @@ test "conductor init" {
 }
 
 test "session connect and close" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -596,7 +596,7 @@ test "session connect and close" {
 }
 
 test "session message as leader" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -638,7 +638,7 @@ test "session message as leader" {
 }
 
 test "session message as follower rejects" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -678,7 +678,7 @@ test "session message as follower rejects" {
 }
 
 test "become leader and follower" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -699,7 +699,7 @@ test "become leader and follower" {
 }
 
 test "commit position advance" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -724,7 +724,7 @@ test "commit position advance" {
 }
 
 test "multiple sessions" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -753,7 +753,7 @@ test "multiple sessions" {
 }
 
 test "poll responses clears queue" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -793,7 +793,7 @@ test "poll responses clears queue" {
 }
 
 test "conductor catch up from leader preserves replicated state" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -841,7 +841,7 @@ test "conductor catch up from leader preserves replicated state" {
 }
 
 test "conductor state round trip restores leader progress" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -891,7 +891,7 @@ test "conductor state round trip restores leader progress" {
 }
 
 test "follower redirects session_connect to leader" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -937,7 +937,7 @@ test "follower redirects session_connect to leader" {
 }
 
 test "leader-to-follower transition emits redirect for open sessions" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -982,7 +982,7 @@ test "leader-to-follower transition emits redirect for open sessions" {
 }
 
 test "snapshot state machine transitions" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -1001,7 +1001,7 @@ test "snapshot state machine transitions" {
 }
 
 test "admin_catchup command restores state from leader" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

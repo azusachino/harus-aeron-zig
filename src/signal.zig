@@ -12,7 +12,7 @@ pub fn install() void {
     std.posix.sigaction(std.posix.SIG.INT, &handler, null);
 }
 
-fn handleSignal(_: c_int) callconv(.c) void {
+fn handleSignal(_: std.c.SIG) callconv(.c) void {
     running.store(false, .release);
 }
 

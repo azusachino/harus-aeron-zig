@@ -11,12 +11,8 @@ const ring_buffer = aeron.ipc.ring_buffer;
 const ManyToOneRingBuffer = ring_buffer.ManyToOneRingBuffer;
 
 fn getSoakIterations() usize {
-    if (std.process.getEnvVarOwned(std.testing.allocator, "SOAK_ITERS")) |env| {
-        defer std.testing.allocator.free(env);
-        return std.fmt.parseInt(usize, env, 10) catch 1000;
-    } else |_| {
-        return 1000;
-    }
+    const ptr = std.c.getenv("SOAK_ITERS") orelse return 1000;
+    return std.fmt.parseInt(usize, std.mem.span(ptr), 10) catch 1000;
 }
 
 test "ring_buffer_soak: write/read N messages without loss" {
@@ -27,7 +23,7 @@ test "ring_buffer_soak: write/read N messages without loss" {
     const iterations = getSoakIterations();
 
     // 256 KB ring buffer
-    const buf = try allocator.alloc(u8, 256 * 1024);
+    const buf = try allocator.alignedAlloc(u8, .@"8", 256 * 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -89,7 +85,7 @@ test "ring_buffer_soak: capacity-aware write loop" {
     const allocator = arena.allocator();
     const iterations = getSoakIterations();
 
-    const buf = try allocator.alloc(u8, 256 * 1024);
+    const buf = try allocator.alignedAlloc(u8, .@"8", 256 * 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -140,7 +136,7 @@ test "ring_buffer_soak: wrap-around with high message velocity" {
     const allocator = arena.allocator();
     const iterations = getSoakIterations() / 10; // 10x smaller for wrap test
 
-    const buf = try allocator.alloc(u8, 64 * 1024);
+    const buf = try allocator.alignedAlloc(u8, .@"8", 64 * 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);

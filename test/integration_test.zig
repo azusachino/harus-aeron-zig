@@ -1,4 +1,5 @@
 const std = @import("std");
+const net = @import("aeron").net;
 const testing = std.testing;
 const harness = @import("harness.zig");
 const aeron = @import("aeron");
@@ -64,7 +65,7 @@ test "subscriber receives data after SETUP handshake" {
         .active_term_id = 0,
         .term_length = 64 * 1024,
         .mtu = 1408,
-        .source_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
+        .source_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
     });
 
     // Allow conductor duty cycle to process the signal
@@ -112,7 +113,7 @@ test "repeated setup/teardown cycles do not leak images" {
             .active_term_id = 0,
             .term_length = 64 * 1024,
             .mtu = 1408,
-            .source_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
+            .source_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
         });
         h.doConductorWork(10);
         try std.testing.expectEqual(@as(usize, 1), h.driver.receiver_agent.images.items.len);
@@ -154,7 +155,7 @@ test "subscriber catch-up preserves client-owned subscriber position" {
         .active_term_id = initial_term_id,
         .term_length = term_length,
         .mtu = 1408,
-        .source_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
+        .source_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
     });
     h.doConductorWork(10);
     try std.testing.expectEqual(@as(usize, 1), h.driver.receiver_agent.images.items.len);

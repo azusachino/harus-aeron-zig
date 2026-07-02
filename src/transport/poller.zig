@@ -1,4 +1,5 @@
 const std = @import("std");
+const net = @import("../net.zig");
 const ReceiveChannelEndpoint = @import("endpoint.zig").ReceiveChannelEndpoint;
 
 // LESSON(udp-transport): Multiplexing strategy reduces per-datagram syscall overhead by batching multiple sockets into a single poll() call. See docs/tutorial/02-data-path/03-udp-transport.md
@@ -98,8 +99,8 @@ test "Poller with real socket fd add and remove" {
     defer poller.deinit();
 
     // Open an actual UDP socket
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
-    defer std.posix.close(sock);
+    const sock = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
+    defer net.closeSocket(sock);
 
     // Create a mock endpoint
     var endpoint: ReceiveChannelEndpoint = undefined;

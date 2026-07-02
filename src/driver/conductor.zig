@@ -3,6 +3,8 @@
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-driver/src/main/java/io/aeron/driver/DriverConductor.java
 
 const std = @import("std");
+const net = @import("../net.zig");
+const time = @import("../time.zig");
 const builtin = @import("builtin");
 const ring_buffer = @import("../ipc/ring_buffer.zig");
 const broadcast = @import("../ipc/broadcast.zig");
@@ -15,7 +17,7 @@ const frame = @import("../protocol/frame.zig");
 const transport_uri = @import("../transport/udp_channel.zig");
 const endpoint_mod = @import("../transport/endpoint.zig");
 const signal = @import("../signal.zig");
-const INVALID_SOCKET: std.posix.socket_t = std.math.maxInt(std.posix.socket_t);
+const INVALID_SOCKET: net.socket_t = std.math.maxInt(net.socket_t);
 
 const ManyToOneRingBuffer = ring_buffer.ManyToOneRingBuffer;
 const BroadcastTransmitter = broadcast.BroadcastTransmitter;
@@ -133,9 +135,9 @@ pub const DriverConductor = struct {
             .recv_endpoint = recv_ep,
             .recv_bound = recv_bound,
             .allocator = allocator,
-            .publications = .{},
-            .subscriptions = .{},
-            .clients = .{},
+            .publications = std.ArrayList(PublicationEntry).empty,
+            .subscriptions = std.ArrayList(SubscriptionEntry).empty,
+            .clients = std.ArrayList(ClientEntry).empty,
             .next_session_id = 1,
             .current_time_ms = 0,
             .aeron_dir = aeron_dir,
@@ -526,7 +528,7 @@ pub const DriverConductor = struct {
         var udp_ch = transport_uri.UdpChannel.parse(self.allocator, channel_data) catch null;
         defer if (udp_ch) |*ch| ch.deinit(self.allocator);
 
-        const dest_address = if (udp_ch) |ch| ch.endpoint orelse std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40124) else std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 40124);
+        const dest_address = if (udp_ch) |ch| ch.endpoint orelse net.Address.initIp4(.{ 127, 0, 0, 1 }, 40124) else net.Address.initIp4(.{ 127, 0, 0, 1 }, 40124);
 
         const is_ipc = if (udp_ch) |ch| ch.uri.len >= 9 and std.mem.eql(u8, ch.uri[0..9], "aeron:ipc") else std.mem.startsWith(u8, channel_data, "aeron:ipc");
 
@@ -635,7 +637,7 @@ pub const DriverConductor = struct {
                 .mtu = 1408,
                 .last_setup_time_ms = 0,
                 .last_heartbeat_time_ms = 0,
-                .last_activity_ns = @as(i64, @intCast(std.time.nanoTimestamp())),
+                .last_activity_ns = @as(i64, @intCast(time.nanoTimestamp())),
                 .flow_control_strategy = fc_strategy,
             };
             self.sender.onAddPublication(net_pub.?) catch {
@@ -797,8 +799,8 @@ pub const DriverConductor = struct {
                 if (ch.endpoint) |ep| {
                     const port = ep.getPort();
                     if (port != 0) {
-                        const bind_addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
-                        std.posix.bind(self.recv_endpoint.socket, &bind_addr.any, bind_addr.getOsSockLen()) catch {};
+                        const bind_addr = net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
+                        net.bindSocket(self.recv_endpoint.socket, &bind_addr.any, bind_addr.getOsSockLen()) catch {};
                         self.recv_bound = true;
                     }
                 }
@@ -1058,11 +1060,11 @@ fn handleMessage(msg_type_id: i32, data: []const u8, ctx: *anyopaque) void {
 const testing = std.testing;
 
 test "DriverConductor init and deinit" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
 
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
@@ -1072,11 +1074,11 @@ test "DriverConductor init and deinit" {
     var values_buf = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
 
-    const dummy_socket = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    defer std.posix.close(dummy_socket);
+    const dummy_socket = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer net.closeSocket(dummy_socket);
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{
         .socket = dummy_socket,
@@ -1096,11 +1098,11 @@ test "DriverConductor init and deinit" {
 }
 
 test "DriverConductor ADD_PUBLICATION creates entry and sends ready response" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
 
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
@@ -1110,11 +1112,11 @@ test "DriverConductor ADD_PUBLICATION creates entry and sends ready response" {
     var values_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
 
-    const dummy_socket = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    defer std.posix.close(dummy_socket);
+    const dummy_socket = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer net.closeSocket(dummy_socket);
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{
         .socket = dummy_socket,
@@ -1164,11 +1166,11 @@ test "DriverConductor ADD_PUBLICATION creates entry and sends ready response" {
 }
 
 test "DriverConductor ADD_SUBSCRIPTION creates entry and sends ready response" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
 
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
@@ -1178,10 +1180,10 @@ test "DriverConductor ADD_SUBSCRIPTION creates entry and sends ready response" {
     var values_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
 
-    const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
+    const dummy_socket: net.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{
         .socket = dummy_socket,
@@ -1231,11 +1233,11 @@ test "DriverConductor ADD_SUBSCRIPTION creates entry and sends ready response" {
 }
 
 test "DriverConductor REMOVE_PUBLICATION cleans up entry" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
 
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
@@ -1245,10 +1247,10 @@ test "DriverConductor REMOVE_PUBLICATION cleans up entry" {
     var values_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
 
-    const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
+    const dummy_socket: net.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{
         .socket = dummy_socket,
@@ -1300,21 +1302,21 @@ fn makeTestConductor(
 }
 
 test "DriverConductor client keepalive registers and updates client" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
     var meta_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var values_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
-    const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
+    const dummy_socket: net.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{ .socket = dummy_socket };
     var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &cm, null);
@@ -1343,21 +1345,21 @@ test "DriverConductor client keepalive registers and updates client" {
 }
 
 test "DriverConductor checkClientLiveness evicts stale clients" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
     var meta_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var values_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
-    const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
+    const dummy_socket: net.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{ .socket = dummy_socket };
     var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &cm, null);
@@ -1390,21 +1392,21 @@ test "DriverConductor checkClientLiveness evicts stale clients" {
 }
 
 test "DriverConductor REMOVE_SUBSCRIPTION closes associated image" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
     var meta_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var values_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
-    const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
+    const dummy_socket: net.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{ .socket = dummy_socket };
     var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &cm, null);
@@ -1431,7 +1433,7 @@ test "DriverConductor REMOVE_SUBSCRIPTION closes associated image" {
     const hwm_handle = cm.allocate(counters.RECEIVER_HWM, "hwm");
     const sub_pos_handle = cm.allocate(counters.SUBSCRIBER_POSITION, "sub-pos");
     const image = try allocator.create(Image);
-    image.* = Image.init(42, stream_id, 64 * 1024, 1408, 0, 0, lb, hwm_handle, sub_pos_handle, std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0));
+    image.* = Image.init(42, stream_id, 64 * 1024, 1408, 0, 0, lb, hwm_handle, sub_pos_handle, net.Address.initIp4(.{ 127, 0, 0, 1 }, 0));
     try receiver.images.append(allocator, image);
 
     try testing.expectEqual(@as(usize, 1), receiver.images.items.len);
@@ -1448,21 +1450,21 @@ test "DriverConductor REMOVE_SUBSCRIPTION closes associated image" {
 }
 
 test "DriverConductor REMOVE_SUBSCRIPTION sends ON_OPERATION_SUCCESS" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
     var meta_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var values_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
-    const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
+    const dummy_socket: net.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{ .socket = dummy_socket };
     var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &cm, null);
@@ -1522,21 +1524,21 @@ test "DriverConductor IPC event IDs match upstream control protocol" {
 }
 
 test "DriverConductor TERMINATE_DRIVER stops signal" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
     var meta_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var values_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
-    const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
+    const dummy_socket: net.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{ .socket = dummy_socket };
     var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &cm, null);
@@ -1558,21 +1560,21 @@ test "DriverConductor TERMINATE_DRIVER stops signal" {
 }
 
 test "DriverConductor IPC Multi-destination: subscription matches later publication" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
     var meta_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var values_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
-    const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
+    const dummy_socket: net.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{ .socket = dummy_socket };
     var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &cm, null);
@@ -1626,21 +1628,21 @@ test "DriverConductor IPC Multi-destination: subscription matches later publicat
 }
 
 test "DriverConductor IPC Multi-destination: multiple subscribers match single publication" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ring_buf: [4096]u8 = undefined;
+    var ring_buf: [4096]u8 align(8) = undefined;
     var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
     var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
     defer bcast.deinit(allocator);
     var meta_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var values_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
     var cm = counters.CountersMap.init(&meta_buf, &values_buf);
-    const dummy_socket: std.posix.socket_t = INVALID_SOCKET;
+    const dummy_socket: net.socket_t = INVALID_SOCKET;
     var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
         .socket = dummy_socket,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{ .socket = dummy_socket };
     var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &cm, null);

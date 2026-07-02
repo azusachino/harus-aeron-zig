@@ -2,6 +2,37 @@
 
 Unit tests verify individual components in isolation. The integration test proves the complete round-trip: a message written through `ExclusivePublication.offer` arrives at a `Subscription.poll` handler in the same process. This chapter walks through the test infrastructure and the test itself.
 
+!!! abstract "What you'll build"
+    An end-to-end test that verifies the data path from publisher to subscriber:
+
+    - The `TestHarness`: an embedded driver fixture for in-process testing
+    - Publication and subscription setup without network I/O
+    - The `doWorkLoop` pattern: polling until messages arrive or timeout
+    - Fragment handler patterns: context passing, signal counting
+    - Writing property-based and boundary-case tests
+
+```mermaid
+sequenceDiagram
+    participant Test as Test Code
+    participant Pub as ExclusivePublication
+    participant Buf as LogBuffer
+    participant Sub as Subscription
+    participant Img as Image
+    participant Hand as Handler
+
+    Test->>Pub: offer("hello")
+    Pub->>Buf: write frame
+    Buf->>Buf: advance tail
+    Note over Pub,Buf: Same process, same buffer
+
+    Test->>Sub: poll(handler)
+    Sub->>Img: poll(handler)
+    Img->>Buf: TermReader.read
+    Buf->>Hand: invoke handler
+    Hand->>Hand: increment count
+    Img->>Img: advance position
+```
+
 ## What the test proves
 
 `test/integration_test.zig` exercises the full client-library data path without a real network:
@@ -83,7 +114,8 @@ const harness = @import("harness.zig");
 test "round-trip 1 message" {
 ```
 
-Zig test blocks are anonymous declarations. `std.testing` provides the assertion functions. The test runner collects all `test` blocks in files referenced from `build.zig`.
+!!! info "Zig concept: test blocks"
+    Zig test blocks are anonymous declarations. `std.testing` provides the assertion functions. The test runner collects all `test` blocks in files referenced from `build.zig`.
 
 ```zig
     const allocator = testing.allocator;
@@ -91,7 +123,8 @@ Zig test blocks are anonymous declarations. `std.testing` provides the assertion
     defer h.deinit();
 ```
 
-`testing.allocator` is a `std.heap.GeneralPurposeAllocator` wrapped to detect leaks. At the end of each test it reports any allocation that was not freed — no valgrind needed. `defer` runs `deinit` whether the test passes or returns an error.
+!!! note "Zig 0.16: allocator changes"
+    `testing.allocator` is a `std.heap.DebugAllocator` wrapped to detect leaks. At the end of each test it reports any allocation that was not freed — no valgrind needed. `defer` runs `deinit` whether the test passes or returns an error.
 
 ```zig
     const stream_id: i32 = 1001;
@@ -120,7 +153,8 @@ Both the publication and subscription share the same in-memory log buffer create
     }.handle;
 ```
 
-The fragment handler is defined as a comptime-anonymous struct with a single `fn`. This is the Zig pattern for a named function that has no global name — `handler` holds a function pointer, not a closure. The `ctx` cast is the standard `*anyopaque` → `*i32` pattern.
+!!! tip "Zig pattern: comptime anonymous function"
+    The fragment handler is defined as a comptime-anonymous struct with a single `fn`. This is the Zig pattern for a named function that has no global name — `handler` holds a function pointer, not a closure. The `ctx` cast is the standard `*anyopaque` → `*i32` pattern.
 
 ```zig
     const msg = "hello";
@@ -128,7 +162,8 @@ The fragment handler is defined as a comptime-anonymous struct with a single `fn
     try testing.expect(result == .ok);
 ```
 
-`testing.expect` is the equivalent of `assert`. It returns `error.TestUnexpectedResult` on failure, which the `try` propagates to the test runner. The `.ok` comparison on a tagged union works because Zig generates equality for tag-only comparison — it does not compare the payload here, only the active tag.
+!!! info "Zig concept: testing.expect"
+    `testing.expect` is the equivalent of `assert`. It returns `error.TestUnexpectedResult` on failure, which the `try` propagates to the test runner. The `.ok` comparison on a tagged union works because Zig generates equality for tag-only comparison — it does not compare the payload here, only the active tag.
 
 ```zig
     try h.doWorkLoop(&sub, &received_count, handler, 1, 1000);
@@ -148,41 +183,38 @@ The fragment handler is defined as a comptime-anonymous struct with a single `fn
 | `testing.expectEqualSlices(T, a, b)` | Assert slice contents |
 | `testing.expectError(e, expr)` | Assert an expression returns a specific error |
 
-## Adding more tests
+!!! question "Exercise: Expand the test suite"
+    Try adding the following test cases. If any fail, use the patterns above to debug.
 
-### Boundary cases
+    **Boundary cases:**
+    - [ ] Offer a message exactly at the term boundary (offset = term_length - frame_alignment).
+    - [ ] Set `publisher_limit = 0` and confirm `offer` returns `.back_pressure`.
+    - [ ] Call `close()` then `offer()` and confirm `.closed`.
 
-- Offer a message exactly at the term boundary (offset = term_length - frame_alignment).
-- Set `publisher_limit = 0` and confirm `offer` returns `.back_pressure`.
-- Call `close()` then `offer()` and confirm `.closed`.
+    **Property-based patterns:**
+    Zig does not have a built-in property testing library, but you can loop over generated inputs:
 
-### Property-based patterns
-
-Zig does not have a built-in property testing library, but you can loop over generated inputs:
-
-```zig
-test "offer accepts any payload up to MTU" {
-    var rng = std.Random.DefaultPrng.init(0);
-    for (0..100) |_| {
-        const len = rng.random().intRangeLessThan(usize, 1, 1408);
-        var buf: [1408]u8 = undefined;
-        rng.random().bytes(buf[0..len]);
-        // ... offer and verify
+    ```zig
+    test "offer accepts any payload up to MTU" {
+        var rng = std.Random.DefaultPrng.init(0);
+        for (0..100) |_| {
+            const len = rng.random().intRangeLessThan(usize, 1, 1408);
+            var buf: [1408]u8 = undefined;
+            rng.random().bytes(buf[0..len]);
+            // ... offer and verify
+        }
     }
-}
-```
+    ```
 
-### Multi-message sequencing
+    **Multi-message sequencing:**
+    - [ ] Add a second `offer` call and assert `received_count == 2`. Verify that the second message's position equals the first position plus the aligned frame length.
 
-Add a second `offer` call and assert `received_count == 2`. Verify that the second message's position equals the first position plus the aligned frame length.
+!!! success "Next: Wire compatibility testing"
+    The setup in `docs/guides/setup.md` describes a Docker-based approach for testing against real Java Aeron:
 
-## Wire compatibility testing against real Java Aeron
+    1. Pull the official `aeronmd` Docker image.
+    2. Start it with a shared `aeron_dir` volume mounted at `/dev/shm/aeron`.
+    3. Run the Zig media driver against the same `aeron_dir`.
+    4. Use the Java `AeronStat` or `BasicPublisher` / `BasicSubscriber` samples to send/receive.
 
-The setup in `docs/guides/setup.md` describes a Docker-based approach:
-
-1. Pull the official `aeronmd` Docker image.
-2. Start it with a shared `aeron_dir` volume mounted at `/dev/shm/aeron`.
-3. Run the Zig media driver against the same `aeron_dir`.
-4. Use the Java `AeronStat` or `BasicPublisher` / `BasicSubscriber` samples to send/receive.
-
-The test passes when a message published from Java is received by the Zig subscription handler, and vice versa. This verifies frame encoding, flow-control counter placement, and log buffer metadata layout against the reference implementation. Run this before any `v1.0` release tag per the release rules.
+    The test passes when a message published from Java is received by the Zig subscription handler, and vice versa. This verifies frame encoding, flow-control counter placement, and log buffer metadata layout against the reference implementation. Run this before any `v1.0` release tag per the release rules.

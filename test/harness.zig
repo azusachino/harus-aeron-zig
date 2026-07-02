@@ -19,8 +19,8 @@ pub const TestHarness = struct {
         return .{
             .allocator = allocator,
             .driver = md,
-            .log_buffers = std.ArrayList(*LogBuffer){},
-            .images = std.ArrayList(*Image){},
+            .log_buffers = std.ArrayList(*LogBuffer).empty,
+            .images = std.ArrayList(*Image).empty,
         };
     }
 
@@ -88,20 +88,21 @@ pub const TestHarness = struct {
 
     pub fn doWorkLoop(self: *TestHarness, sub: *Subscription, ctx: *anyopaque, handler: FragmentHandler, expected: i32, timeout_ms: u64) !void {
         _ = self;
-        var timer = try std.time.Timer.start();
-        const timeout_ns = timeout_ms * std.time.ns_per_ms;
+        const start_ns = aeron.time.nanoTimestamp();
+        const timeout_ns: i128 = @intCast(timeout_ms * std.time.ns_per_ms);
 
         const received_ptr = @as(*i32, @ptrCast(@alignCast(ctx)));
 
         while (received_ptr.* < expected) {
-            if (timer.read() > timeout_ns) {
+            if (aeron.time.nanoTimestamp() - start_ns > timeout_ns) {
                 return error.Timeout;
             }
 
             const fragments = sub.poll(handler, ctx, 10);
 
             if (fragments == 0) {
-                std.Thread.sleep(1 * std.time.ns_per_ms);
+                var ts: std.c.timespec = .{ .sec = 0, .nsec = 1 * std.time.ns_per_ms };
+                _ = std.c.nanosleep(&ts, null);
             }
         }
     }

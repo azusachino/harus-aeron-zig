@@ -190,7 +190,10 @@ pub fn alignedLength(data_length: usize) usize {
 }
 
 /// Returns the maximum payload bytes that fit in a single DATA frame given mtu.
+/// Saturates to 0 when mtu <= DataHeader.LENGTH: mtu may come from an untrusted
+/// wire SETUP frame, so a degenerate value must not underflow.
 pub fn computeMaxPayload(mtu: usize) usize {
+    if (mtu <= DataHeader.LENGTH) return 0;
     return mtu - DataHeader.LENGTH;
 }
 
@@ -265,7 +268,7 @@ pub fn decode(buf: []const u8) DecodeError!DecodedFrame {
     if (@as(usize, @intCast(frame_len)) > buf.len) return DecodeError.InvalidFrameLength;
     if (hdr.version != VERSION) return DecodeError.InvalidVersion;
 
-    const frame_type = std.meta.intToEnum(FrameType, hdr.type) catch
+    const frame_type = std.enums.fromInt(FrameType, hdr.type) orelse
         return DecodeError.UnknownFrameType;
 
     switch (frame_type) {

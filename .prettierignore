@@ -1,6 +1,5 @@
 node_modules/
 .zig-cache/
 zig-out/
-.agents/
 .claude/
 *.md

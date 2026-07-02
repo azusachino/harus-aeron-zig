@@ -1,6 +1,7 @@
 // Aeron unified entry point — runs media driver, archive, cluster, or CLI tools
 // Reference: https://github.com/aeron-io/aeron
 const std = @import("std");
+const io_mod = @import("io.zig");
 const media_driver = @import("driver/media_driver.zig");
 const archive_mod = @import("archive/archive.zig");
 const cluster_mod = @import("cluster/cluster.zig");
@@ -15,13 +16,25 @@ const tools_streams = @import("tools/streams.zig");
 const tools_events = @import("tools/events.zig");
 const tools_cluster = @import("tools/cluster_tool.zig");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+fn getenv(comptime name: [:0]const u8) ?[]const u8 {
+    const ptr = std.c.getenv(name) orelse return null;
+    return std.mem.span(ptr);
+}
+
+fn makeDir(path: []const u8) !void {
+    std.Io.Dir.cwd().createDir(io_mod.io(), path, .default_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return error.CreateDirFailed,
+    };
+}
+
+pub fn main(init: std.process.Init) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    const args = try init.minimal.args.toSlice(allocator);
+    defer allocator.free(args);
 
     const opts = cli.parse(args);
 
@@ -63,17 +76,14 @@ pub fn main() !void {
         .cluster_tool => tools_cluster.run(opts.aeron_dir),
         .help => {
             var stdout_buf: [4096]u8 = undefined;
-            var stdout = std.fs.File.stdout().writer(&stdout_buf);
+            var stdout = std.Io.File.stdout().writer(io_mod.io(), &stdout_buf);
             cli.printUsage(&stdout.interface) catch {};
         },
     }
 }
 
 fn ensureAeronDir(aeron_dir: []const u8) void {
-    std.fs.makeDirAbsolute(aeron_dir) catch |err| switch (err) {
-        error.PathAlreadyExists => {},
-        else => std.log.warn("Could not create aeron_dir={s}: {}", .{ aeron_dir, err }),
-    };
+    makeDir(aeron_dir) catch |err| std.log.warn("Could not create aeron_dir={s}: {}", .{ aeron_dir, err });
 }
 
 fn runDriver(allocator: std.mem.Allocator, ctx: media_driver.MediaDriverContext) !void {
@@ -101,10 +111,10 @@ fn runDriver(allocator: std.mem.Allocator, ctx: media_driver.MediaDriverContext)
 fn runArchive(allocator: std.mem.Allocator) !void {
     std.log.info("Aeron Archive starting...", .{});
     signal.install();
-    ensureAeronDir(std.posix.getenv("AERON_DIR") orelse "/dev/shm/aeron");
+    ensureAeronDir(getenv("AERON_DIR") orelse "/dev/shm/aeron");
 
-    const archive_dir = std.posix.getenv("ARCHIVE_DIR") orelse "/tmp/aeron-archive";
-    const control_channel = std.posix.getenv("ARCHIVE_CONTROL_CHANNEL") orelse "aeron:udp?endpoint=0.0.0.0:8010";
+    const archive_dir = getenv("ARCHIVE_DIR") orelse "/tmp/aeron-archive";
+    const control_channel = getenv("ARCHIVE_CONTROL_CHANNEL") orelse "aeron:udp?endpoint=0.0.0.0:8010";
 
     const ctx = archive_mod.ArchiveContext{
         .archive_dir = archive_dir,
@@ -121,7 +131,8 @@ fn runArchive(allocator: std.mem.Allocator) !void {
         _ = archive.doWork() catch |err| {
             std.log.err("Archive doWork error: {}", .{err});
         };
-        std.Thread.sleep(1 * std.time.ns_per_ms);
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 1 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
     }
     std.log.info("Archive shutting down.", .{});
 }
@@ -129,10 +140,10 @@ fn runArchive(allocator: std.mem.Allocator) !void {
 fn runCluster(allocator: std.mem.Allocator) !void {
     std.log.info("Aeron Cluster node starting...", .{});
     signal.install();
-    ensureAeronDir(std.posix.getenv("AERON_DIR") orelse "/dev/shm/aeron");
+    ensureAeronDir(getenv("AERON_DIR") orelse "/dev/shm/aeron");
 
     const member_id = blk: {
-        if (std.posix.getenv("POD_NAME")) |pod_name| {
+        if (getenv("POD_NAME")) |pod_name| {
             if (std.mem.lastIndexOfScalar(u8, pod_name, '-')) |dash_pos| {
                 break :blk std.fmt.parseInt(i32, pod_name[dash_pos + 1 ..], 10) catch 0;
             }
@@ -140,9 +151,9 @@ fn runCluster(allocator: std.mem.Allocator) !void {
         break :blk @as(i32, 0);
     };
 
-    const ingress_channel = std.posix.getenv("INGRESS_CHANNEL") orelse "aeron:udp?endpoint=0.0.0.0:9010";
-    const log_channel = std.posix.getenv("LOG_CHANNEL") orelse "aeron:udp?endpoint=0.0.0.0:9020";
-    const consensus_channel = std.posix.getenv("CONSENSUS_CHANNEL") orelse "aeron:udp?endpoint=0.0.0.0:9030";
+    const ingress_channel = getenv("INGRESS_CHANNEL") orelse "aeron:udp?endpoint=0.0.0.0:9010";
+    const log_channel = getenv("LOG_CHANNEL") orelse "aeron:udp?endpoint=0.0.0.0:9020";
+    const consensus_channel = getenv("CONSENSUS_CHANNEL") orelse "aeron:udp?endpoint=0.0.0.0:9030";
 
     const ctx = cluster_mod.ClusterContext{
         .member_id = member_id,
@@ -174,7 +185,8 @@ fn runCluster(allocator: std.mem.Allocator) !void {
         _ = module.doWork(now_ns) catch |err| {
             std.log.err("Cluster doWork error: {}", .{err});
         };
-        std.Thread.sleep(10 * std.time.ns_per_ms);
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+        _ = std.c.nanosleep(&ts, null);
     }
     std.log.info("Cluster node shutting down.", .{});
 }

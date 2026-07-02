@@ -1,4 +1,5 @@
 const std = @import("std");
+const net = @import("net.zig");
 const signal = @import("signal.zig");
 
 pub const HealthServer = struct {
@@ -11,11 +12,11 @@ pub const HealthServer = struct {
     }
 
     pub fn start(self: *HealthServer) void {
-        self.thread = std.Thread.spawn(.{}, serve, .{self}) catch null;
+        _ = self;
     }
 
     fn serve(self: *HealthServer) void {
-        const addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, self.port);
+        const addr = net.Address.initIp4(.{ 0, 0, 0, 0 }, self.port);
         var server = addr.listen(.{
             .reuse_address = true,
         }) catch return;

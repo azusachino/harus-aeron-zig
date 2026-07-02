@@ -306,7 +306,7 @@ test "broadcast descriptor layout matches upstream" {
 }
 
 test "broadcast transmitter initializes upstream capacity and max message length" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -319,7 +319,7 @@ test "broadcast transmitter initializes upstream capacity and max message length
 }
 
 test "broadcast transmitter writes upstream trailer counters and record layout" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -337,7 +337,7 @@ test "broadcast transmitter writes upstream trailer counters and record layout" 
 }
 
 test "broadcast transmitter inserts padding record before wrapping" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -360,7 +360,7 @@ test "broadcast transmitter inserts padding record before wrapping" {
 }
 
 test "broadcast receiver late joins at latest counter and marks lapped" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -392,7 +392,7 @@ test "broadcast receiver late joins at latest counter and marks lapped" {
 }
 
 test "broadcast receiver skips padding and reads wrapped record" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -438,7 +438,7 @@ test "broadcast receiver skips padding and reads wrapped record" {
 }
 
 test "broadcast receiver validate fails after overwrite" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -462,7 +462,7 @@ test "broadcast receiver validate fails after overwrite" {
 }
 
 test "broadcast: sendOperationSuccess" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
