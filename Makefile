@@ -12,18 +12,24 @@ ZIG_UPSTREAM_DIR ?= vendor/zig
 INTEROP_ZIG_BUILD_ENV_IMAGE ?= harus-aeron-zig-build-env:latest
 DOCS_PORT ?= 8000
 
+.DEFAULT_GOAL := help
+
 ifeq ($(origin CONTAINER_ENGINE), undefined)
 CONTAINER_ENGINE := $(shell if command -v docker >/dev/null 2>&1; then printf '%s' 'docker'; \
 	elif command -v podman >/dev/null 2>&1; then printf '%s' 'podman'; \
 	else printf '%s' 'docker'; fi)
 endif
 
-.PHONY: fmt fmt-check build test lint check clean run tutorial-check lesson-lint \
+.PHONY: help fmt fmt-check build test lint check clean run tutorial-check lesson-lint \
        docs docs-serve docs-build \
        fuzz bench stress \
        nix-image k8s-up k8s-down k8s-status k8s-logs colima-up colima-down \
        setup setup-interop setup-interop-base setup-upstream-aeron setup-upstream-zig \
        interop interop-smoke interop-status interop-preflight test-protocol test-driver test-archive test-cluster test-scenarios examples status
+
+help:  ## Show this help
+	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\n"} \
+		/^[a-zA-Z0-9_-]+:.*?##/ {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 fmt:
 	$(NIX_RUN) zig fmt src/ build.zig
