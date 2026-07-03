@@ -212,26 +212,74 @@ pub const ManyToOneRingBuffer = struct {
         return current + 1;
     }
 
-    /// Scan for a blocked record at the head and unblock it by converting to padding.
-    /// Returns true if a record was unblocked.
+    /// Rewrite the record at `index` as a padding record of `length` bytes so the
+    /// reader can skip it. Type is written first, then length with release ordering
+    /// (the reader acquires length; once it observes a positive value, type@4 is visible).
+    fn writePadding(self: *ManyToOneRingBuffer, index: usize, length: i32) void {
+        const msg_type_ptr: *i32 = @ptrCast(@alignCast(&self.buffer[index + 4]));
+        msg_type_ptr.* = PADDING_MSG_TYPE_ID;
+        const length_ptr: *i32 = @ptrCast(@alignCast(&self.buffer[index]));
+        @atomicStore(i32, length_ptr, length, .release);
+    }
+
+    /// Confirm every slot in [limit, from) is still zeroed. Guards against a slow
+    /// writer that filled the gap while we scanned forward — if so, leave it alone.
+    fn scanBackConfirmZeroed(self: *const ManyToOneRingBuffer, from: usize, limit: usize) bool {
+        var i = from;
+        while (i > limit) {
+            i -= RecordDescriptor.ALIGNMENT;
+            const p: *const i32 = @ptrCast(@alignCast(&self.buffer[i]));
+            if (@atomicLoad(i32, p, .acquire) != 0) return false;
+        }
+        return true;
+    }
+
+    /// Recover a ring buffer stalled by a writer that claimed the head slot but never
+    /// committed it. Returns true if a record was unblocked. Two cases, matching
+    /// Agrona's ManyToOneRingBuffer.unblock():
+    ///   1. length < 0 — writer wrote the in-progress sentinel, then stalled. Convert
+    ///      the claimed slot straight to padding.
+    ///   2. length == 0 — writer CAS-claimed the tail but died before writing the
+    ///      sentinel, leaving a zeroed gap. Scan forward to the next written record and
+    ///      bridge the gap with a padding record (only if the gap is confirmed zeroed).
+    /// Callers must gate this on confirmed writer death (e.g. client-liveness timeout);
+    /// unblocking a live in-flight write would corrupt it.
     pub fn unblock(self: *ManyToOneRingBuffer) bool {
         const head = self.loadHead();
         const tail = self.loadTail();
 
+        // Positions are monotonic and non-negative by construction; a negative value
+        // means corrupt/uninitialized metadata (untrusted mapped buffer) — never
+        // @intCast-panic below.
+        if (head < 0 or tail < 0) return false;
         if (head == tail) return false;
 
-        const index = @as(usize, @intCast(head)) % self.capacity;
-        const length_ptr: *i32 = @ptrCast(@alignCast(&self.buffer[index]));
+        const consumer_index = @as(usize, @intCast(head)) % self.capacity;
+        const producer_index = @as(usize, @intCast(tail)) % self.capacity;
+        // Equal indices with head != tail means the buffer is exactly full — the head
+        // record is a committed record, nothing to unblock.
+        if (consumer_index == producer_index) return false;
+
+        const length_ptr: *i32 = @ptrCast(@alignCast(&self.buffer[consumer_index]));
         const record_length = @atomicLoad(i32, length_ptr, .acquire);
 
         if (record_length < 0) {
-            // Found a blocked record at the head.
-            // Rewrite as a padding record so the reader can skip it.
-            const padding_length = -record_length;
-            const msg_type_ptr: *i32 = @ptrCast(@alignCast(&self.buffer[index + 4]));
-            msg_type_ptr.* = PADDING_MSG_TYPE_ID;
-            @atomicStore(i32, length_ptr, padding_length, .release);
+            self.writePadding(consumer_index, -record_length);
             return true;
+        }
+
+        if (record_length == 0 and producer_index > consumer_index) {
+            var i = consumer_index + RecordDescriptor.ALIGNMENT;
+            while (i < producer_index) : (i += RecordDescriptor.ALIGNMENT) {
+                const scan_ptr: *const i32 = @ptrCast(@alignCast(&self.buffer[i]));
+                if (@atomicLoad(i32, scan_ptr, .acquire) != 0) {
+                    if (self.scanBackConfirmZeroed(i, consumer_index)) {
+                        self.writePadding(consumer_index, @intCast(i - consumer_index));
+                        return true;
+                    }
+                    break;
+                }
+            }
         }
         return false;
     }
@@ -264,6 +312,58 @@ test "unblock recovers from stalled writer" {
     try std.testing.expectEqual(record_length, new_record_length);
     const msg_type_ptr: *i32 = @ptrCast(@alignCast(&buf[record_index + 4]));
     try std.testing.expectEqual(PADDING_MSG_TYPE_ID, msg_type_ptr.*);
+}
+
+test "unblock bridges a zeroed gap left by a writer that died before the sentinel" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
+    @memset(buf, 0);
+
+    var rb = ManyToOneRingBuffer.init(buf);
+
+    // Writer CAS-claimed [0, 32) (tail advanced) but died before writing the sentinel
+    // at index 0, so the head slot is left zeroed. A completed record sits at index 16.
+    rb.storeHead(0);
+    rb.storeTail(32);
+    const rec_len_ptr: *i32 = @ptrCast(@alignCast(&buf[16]));
+    @atomicStore(i32, rec_len_ptr, 16, .release);
+    const rec_type_ptr: *i32 = @ptrCast(@alignCast(&buf[20]));
+    rec_type_ptr.* = 5;
+
+    try std.testing.expect(rb.unblock());
+
+    // The gap [0, 16) is now a padding record so the reader can skip to index 16.
+    try std.testing.expectEqual(@as(i32, 16), @atomicLoad(i32, @as(*i32, @ptrCast(@alignCast(&buf[0]))), .acquire));
+    try std.testing.expectEqual(PADDING_MSG_TYPE_ID, @as(*i32, @ptrCast(@alignCast(&buf[4]))).*);
+}
+
+test "unblock is a no-op when the head slot is a committed record" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
+    @memset(buf, 0);
+
+    var rb = ManyToOneRingBuffer.init(buf);
+    try std.testing.expect(rb.write(0x04, "abc"));
+
+    // Head slot holds a valid positive-length record — nothing is blocked.
+    try std.testing.expect(!rb.unblock());
+}
+
+test "unblock refuses corrupt (negative) head/tail metadata" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
+    @memset(buf, 0);
+
+    var rb = ManyToOneRingBuffer.init(buf);
+    rb.storeHead(-1);
+    rb.storeTail(32);
+    try std.testing.expect(!rb.unblock());
 }
 
 test "record alignment" {
