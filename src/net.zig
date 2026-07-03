@@ -67,6 +67,15 @@ pub fn bindSocket(fd: socket_t, address: *const std.posix.sockaddr, address_len:
     if (std.posix.errno(std.posix.system.bind(fd, address, address_len)) != .SUCCESS) return error.BindFailed;
 }
 
+/// Read back the socket's locally-bound address. After binding an ephemeral
+/// port (e.g. `endpoint=host:0`), this resolves the concrete port the OS assigned.
+pub fn getSockName(fd: socket_t) !Address {
+    var addr: Address = undefined;
+    var addrlen: std.posix.socklen_t = @sizeOf(Address);
+    if (std.posix.errno(std.posix.system.getsockname(fd, &addr.any, &addrlen)) != .SUCCESS) return error.GetSockNameFailed;
+    return addr;
+}
+
 pub fn setSockOpt(fd: socket_t, level: anytype, optname: anytype, value: []const u8) !void {
     std.posix.setsockopt(fd, @intCast(asCUint(level)), asCUint(optname), value) catch return error.SetSockOptFailed;
 }
