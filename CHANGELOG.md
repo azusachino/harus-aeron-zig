@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-07-03
+
+### Changed
+- Migrated the codebase to Zig 0.16 (`ArrayList` `.empty`, `alignedAlloc(.@"8", …)`, `DebugAllocator`, local `time` module).
+
+### Added
+- Extracted the IPC primitives into a standalone `lib/agrona` module (ring buffer, broadcast, idle strategy, counters) with a `root.zig` entry point.
+- Real UDP `SETUP` frame parsing in the receiver, plus connected ring-buffer → conductor → broadcast round-trip tests (`test/driver/{setup_frame_parse,conductor_ipc,subscription_lifecycle,publication_lifecycle}_test.zig`).
+
+### Fixed
+- Interop: closed the keepalive-timeout blocker — `make interop-smoke` now passes end-to-end against the Java `aeron@1.50.2` client (`ADD_SUBSCRIPTION` → `ON_SUBSCRIPTION_READY` round-trip, SETUP/DATA/STATUS, reconnect).
+- Cluster: completed the Zig 0.16 migration of `src/cluster/conductor.zig`, restoring a green build on `main`.
+
 ## [1.0.0-rc2] - 2026-04-14
 
 ### Added
