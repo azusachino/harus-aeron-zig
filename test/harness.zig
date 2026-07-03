@@ -45,9 +45,28 @@ pub const TestHarness = struct {
         }
     }
 
-    // Inject a synthetic SETUP frame directly into the receiver's pending_setups queue
+    // Inject a SETUP frame by parsing through processDatagram (exercises the real parsing path)
     pub fn injectSetupFrame(self: *TestHarness, sig: @import("aeron").driver.receiver.SetupSignal) !void {
-        try self.driver.receiver_agent.pending_setups.append(self.allocator, sig);
+        const protocol = @import("aeron").protocol;
+        var buf: [40]u8 = undefined;
+
+        // Build a raw SETUP frame from the sig fields
+        var header: protocol.SetupHeader = undefined;
+        header.frame_length = 40;
+        header.version = 0;
+        header.flags = 0;
+        header.type = @intFromEnum(protocol.FrameType.setup);
+        header.term_offset = 0;
+        header.session_id = sig.session_id;
+        header.stream_id = sig.stream_id;
+        header.initial_term_id = sig.initial_term_id;
+        header.active_term_id = sig.active_term_id;
+        header.term_length = sig.term_length;
+        header.mtu = sig.mtu;
+        header.ttl = 0;
+
+        @memcpy(&buf, std.mem.asBytes(&header));
+        _ = self.driver.receiver_agent.processDatagram(&buf, sig.source_address);
     }
 
     pub fn createPublication(self: *TestHarness, stream_id: i32, channel: []const u8) !ExclusivePublication {

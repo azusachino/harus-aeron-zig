@@ -88,27 +88,30 @@
 }
 {
   "layer": "ipc",
-  "our_file": "src/ipc/broadcast.zig",
+  "our_file": "lib/agrona/broadcast.zig",
   "upstream_class": "BroadcastTransmitterTest",
   "upstream_path": "aeron-client/src/test/c/concurrent/aeron_broadcast_transmitter_test.cpp",
   "aeron_version": "1.50.2",
-  "status": "done"
+  "status": "done",
+  "note": "Moved from src/ipc/ to lib/agrona/. java-compat byte-layout tests added 2026-04-17."
 }
 {
   "layer": "ipc",
-  "our_file": "src/ipc/broadcast.zig",
+  "our_file": "lib/agrona/broadcast.zig",
   "upstream_class": "BroadcastReceiverTest",
   "upstream_path": "aeron-client/src/test/c/concurrent/aeron_broadcast_receiver_test.cpp",
   "aeron_version": "1.50.2",
-  "status": "done"
+  "status": "done",
+  "note": "Moved from src/ipc/ to lib/agrona/. java-compat byte-layout tests added 2026-04-17."
 }
 {
   "layer": "ipc",
-  "our_file": "src/ipc/ring_buffer.zig",
+  "our_file": "lib/agrona/ring_buffer.zig",
   "upstream_class": "ManyToOneRingBufferTest",
   "upstream_path": "agrona/src/test/java/org/agrona/concurrent/ringbuffer/",
   "aeron_version": "1.50.2",
-  "status": "done"
+  "status": "done",
+  "note": "Moved from src/ipc/ to lib/agrona/. java-compat byte-layout tests added 2026-04-17."
 }
 {
   "layer": "driver",
@@ -132,7 +135,8 @@
   "upstream_class": "DriverConductorTest",
   "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/",
   "aeron_version": "1.50.2",
-  "status": "done"
+  "status": "done",
+  "note": "ADD_PUBLICATION and REMOVE_PUBLICATION via rb.write -> doWork -> broadcast, verified at byte level."
 }
 {
   "layer": "driver",
@@ -140,7 +144,8 @@
   "upstream_class": "DriverConductorTest",
   "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/",
   "aeron_version": "1.50.2",
-  "status": "done"
+  "status": "done",
+  "note": "ADD_SUBSCRIPTION and REMOVE_SUBSCRIPTION via rb.write -> doWork -> broadcast, full lifecycle tested."
 }
 {
   "layer": "driver",
@@ -148,7 +153,17 @@
   "upstream_class": "DriverConductorTest",
   "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/",
   "aeron_version": "1.50.2",
-  "status": "done"
+  "status": "done",
+  "note": "Tests ADD_SUBSCRIPTION end-to-end: rb.write -> doWork -> broadcast ON_SUBSCRIPTION_READY."
+}
+{
+  "layer": "driver",
+  "our_file": "test/driver/setup_frame_parse_test.zig",
+  "upstream_class": "ReceiverTest / aeron_receive_channel_endpoint_handle_setup",
+  "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/",
+  "aeron_version": "1.50.2",
+  "status": "done",
+  "note": "Tests processDatagram() with raw SETUP frame bytes; harness.zig updated to use real parser."
 }
 {
   "layer": "driver",

@@ -10,10 +10,11 @@ const builtin = @import("builtin");
 pub const conductor = @import("conductor.zig");
 pub const sender = @import("sender.zig");
 pub const receiver = @import("receiver.zig");
-const ring_buffer = @import("../ipc/ring_buffer.zig");
-const broadcast = @import("../ipc/broadcast.zig");
-const counters = @import("../ipc/counters.zig");
-const idle_strategy = @import("../ipc/idle_strategy.zig");
+const agrona = @import("agrona");
+const ring_buffer = agrona.ring_buffer;
+const broadcast = agrona.broadcast;
+const counters = agrona.counters;
+const idle_strategy = agrona.idle_strategy;
 const loss_report_mod = @import("../loss_report.zig");
 const event_log_mod = @import("../event_log.zig");
 

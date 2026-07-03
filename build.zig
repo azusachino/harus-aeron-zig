@@ -4,11 +4,21 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Agrona module (shared IPC primitives)
+    const agrona_mod = b.addModule("agrona", .{
+        .root_source_file = b.path("lib/agrona/root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Aeron module (client + logbuffer + ipc + protocol)
     const aeron_mod = b.createModule(.{
         .root_source_file = b.path("src/aeron.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "agrona", .module = agrona_mod },
+        },
     });
 
     // Media driver binary
@@ -20,6 +30,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "aeron", .module = aeron_mod },
+                .{ .name = "agrona", .module = agrona_mod },
             },
         }),
     });
@@ -37,6 +48,9 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/aeron.zig"),
             .target = target,
             .optimize = optimize,
+            .imports = &.{
+                .{ .name = "agrona", .module = agrona_mod },
+            },
         }),
     });
     unit_tests.root_module.link_libc = true;
@@ -52,6 +66,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "aeron", .module = aeron_mod },
+                .{ .name = "agrona", .module = agrona_mod },
             },
         }),
     });
@@ -68,6 +83,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "aeron", .module = aeron_mod },
+                .{ .name = "agrona", .module = agrona_mod },
             },
         }),
     });
@@ -84,6 +100,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "aeron", .module = aeron_mod },
+                .{ .name = "agrona", .module = agrona_mod },
             },
         }),
     });
@@ -92,12 +109,26 @@ pub fn build(b: *std.Build) void {
     const test_ipc_step = b.step("test-ipc", "Run IPC scenario tests");
     test_ipc_step.dependOn(&run_test_ipc.step);
 
+    // Agrona primitive tests
+    const test_agrona = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("lib/agrona/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    test_agrona.root_module.link_libc = true;
+    const run_test_agrona = b.addRunArtifact(test_agrona);
+    const test_agrona_step = b.step("test-agrona", "Run Agrona primitive tests");
+    test_agrona_step.dependOn(&run_test_agrona.step);
+
     // Default test step runs all
     const test_step = b.step("test", "Run all tests");
     test_step.dependOn(unit_test_step);
     test_step.dependOn(integration_test_step);
     test_step.dependOn(test_logbuffer_step);
     test_step.dependOn(test_ipc_step);
+    test_step.dependOn(test_agrona_step);
 
     // Scenario tests — protocol layer
     const test_protocol = b.addTest(.{
@@ -107,6 +138,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "aeron", .module = aeron_mod },
+                .{ .name = "agrona", .module = agrona_mod },
             },
         }),
     });
@@ -123,13 +155,79 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "aeron", .module = aeron_mod },
+                .{ .name = "agrona", .module = agrona_mod },
             },
         }),
     });
     test_driver.root_module.link_libc = true;
     const run_test_driver = b.addRunArtifact(test_driver);
+
+    // IPC command dispatch tests — driver layer
+    const test_driver_ipc = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/driver/conductor_ipc_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+                .{ .name = "agrona", .module = agrona_mod },
+            },
+        }),
+    });
+    test_driver_ipc.root_module.link_libc = true;
+    const run_test_driver_ipc = b.addRunArtifact(test_driver_ipc);
+
+    // SETUP frame parsing tests — driver layer
+    const test_setup_parse = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/driver/setup_frame_parse_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+                .{ .name = "agrona", .module = agrona_mod },
+            },
+        }),
+    });
+    test_setup_parse.root_module.link_libc = true;
+    const run_test_setup_parse = b.addRunArtifact(test_setup_parse);
+
+    // Publication lifecycle tests — driver layer
+    const test_pub_lifecycle = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/driver/publication_lifecycle_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+                .{ .name = "agrona", .module = agrona_mod },
+            },
+        }),
+    });
+    test_pub_lifecycle.root_module.link_libc = true;
+    const run_test_pub_lifecycle = b.addRunArtifact(test_pub_lifecycle);
+
+    // Subscription lifecycle tests — driver layer
+    const test_sub_lifecycle = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/driver/subscription_lifecycle_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+                .{ .name = "agrona", .module = agrona_mod },
+            },
+        }),
+    });
+    test_sub_lifecycle.root_module.link_libc = true;
+    const run_test_sub_lifecycle = b.addRunArtifact(test_sub_lifecycle);
+
     const test_driver_step = b.step("test-driver", "Run driver scenario tests");
     test_driver_step.dependOn(&run_test_driver.step);
+    test_driver_step.dependOn(&run_test_driver_ipc.step);
+    test_driver_step.dependOn(&run_test_setup_parse.step);
+    test_driver_step.dependOn(&run_test_pub_lifecycle.step);
+    test_driver_step.dependOn(&run_test_sub_lifecycle.step);
 
     // Scenario tests — archive layer
     const test_archive = b.addTest(.{
@@ -139,6 +237,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "aeron", .module = aeron_mod },
+                .{ .name = "agrona", .module = agrona_mod },
             },
         }),
     });
@@ -155,6 +254,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "aeron", .module = aeron_mod },
+                .{ .name = "agrona", .module = agrona_mod },
             },
         }),
     });
@@ -199,6 +299,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .imports = &.{
                     .{ .name = "aeron", .module = aeron_mod },
+                    .{ .name = "agrona", .module = agrona_mod },
                 },
             }),
         });
@@ -227,6 +328,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
                 .imports = &.{
                     .{ .name = "aeron", .module = aeron_mod },
+                    .{ .name = "agrona", .module = agrona_mod },
                 },
             }),
         });
@@ -242,6 +344,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "aeron", .module = aeron_mod },
+                .{ .name = "agrona", .module = agrona_mod },
             },
         }),
     });
@@ -266,6 +369,7 @@ pub fn build(b: *std.Build) void {
                 .optimize = .ReleaseFast,
                 .imports = &.{
                     .{ .name = "aeron", .module = aeron_mod },
+                    .{ .name = "agrona", .module = agrona_mod },
                 },
             }),
         });

@@ -3,7 +3,8 @@ const logbuffer = @import("logbuffer/log_buffer.zig");
 const term_appender = @import("logbuffer/term_appender.zig");
 const frame = @import("protocol/frame.zig");
 const metadata = @import("logbuffer/metadata.zig");
-const counters = @import("ipc/counters.zig");
+const agrona = @import("agrona");
+const counters = agrona.counters;
 
 // LESSON(publications): Tagged union result type encodes expected operational states (back_pressure, not_connected) as values, not error codes. See docs/tutorial/04-client/01-publications.md
 pub const OfferResult = union(enum) {

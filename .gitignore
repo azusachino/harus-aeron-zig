@@ -29,8 +29,14 @@ site/
 # Agent state (session-volatile, machine-local)
 .asobi/
 asobi.toml
+.agents/CURRENT_TASK.md
+.agents/MEMORY.md
+.agents/*.log
+.agents/session_summary.txt
+.agents/sessions/
 .gemini/
 .cache/
+.claude/worktrees/
 
 # Generated WASM/web tutorial assets (built separately)
 docs/*.html

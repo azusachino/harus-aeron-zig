@@ -1,7 +1,8 @@
 // Counters reporting — reads CountersMap and formats as human-readable text table.
 // Reference: https://github.com/aeron-io/aeron
 const std = @import("std");
-const counters = @import("ipc/counters.zig");
+const agrona = @import("agrona");
+const counters = agrona.counters;
 const CountersMap = counters.CountersMap;
 
 pub const CounterInfo = struct {

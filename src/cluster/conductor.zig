@@ -6,6 +6,7 @@ const QueryMemberList = protocol_mod.QueryMemberList;
 
 const std = @import("std");
 const log_mod = @import("log.zig");
+const time = @import("../time.zig");
 
 // =============================================================================
 // Role Enum
@@ -247,9 +248,9 @@ pub const ClusterConductor = struct {
     /// Captured conductor state at snapshot begin; null when no snapshot in progress.
     pending_snapshot: ?ClusterConductorState = null,
     /// Known active peers (voting members except self). Populated from config at init or via addPeer.
-    peers: std.ArrayList(ActiveMember) = .{},
+    peers: std.ArrayList(ActiveMember) = .empty,
     /// Known passive peers (non-voting members). Populated via add_passive_member commands.
-    passive_peers: std.ArrayList(ActiveMember) = .{},
+    passive_peers: std.ArrayList(ActiveMember) = .empty,
 
     /// Initialize a new ClusterConductor.
     pub fn init(allocator: std.mem.Allocator, member_id: i32) ClusterConductor {
@@ -510,7 +511,7 @@ pub const ClusterConductor = struct {
         const peer = ActiveMember{
             .leadership_term_id = self.leader_ship_term_id,
             .log_position = self.commit_position,
-            .time_of_last_append_ns = @truncate(std.time.nanoTimestamp()),
+            .time_of_last_append_ns = @truncate(time.nanoTimestamp()),
             .member_id = cmd.member_id,
             .ingress_endpoint = try self.allocator.dupe(u8, ingress),
             .consensus_endpoint = try self.allocator.dupe(u8, consensus),
@@ -533,7 +534,7 @@ pub const ClusterConductor = struct {
     /// Returns a ClusterMembersResponse matching SBE ClusterMembersExtendedResponse (id=43).
     /// Passive members are included as per SBE spec.
     pub fn handleQueryMemberList(self: *ClusterConductor, cmd: QueryMemberList) !void {
-        const now_ns: i64 = @truncate(std.time.nanoTimestamp());
+        const now_ns: i64 = @truncate(time.nanoTimestamp());
         // self + all known peers
         const count = 1 + self.peers.items.len;
         var active = try self.allocator.alloc(ActiveMember, count);
