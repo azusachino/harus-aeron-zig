@@ -275,7 +275,7 @@ test "ClusterContext has sensible defaults" {
 }
 
 test "ConsensusModule init and deinit" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -289,7 +289,7 @@ test "ConsensusModule init and deinit" {
 }
 
 test "ConsensusModule start and stop" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -307,7 +307,7 @@ test "ConsensusModule start and stop" {
 }
 
 test "ConsensusModule doWork returns 0 when not running" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -320,7 +320,7 @@ test "ConsensusModule doWork returns 0 when not running" {
 }
 
 test "ConsensusModule election drives role transition" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -358,7 +358,7 @@ test "ConsensusModule election drives role transition" {
 }
 
 test "ConsensusModule follower role on new leadership term" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -378,7 +378,7 @@ test "ConsensusModule follower role on new leadership term" {
 }
 
 test "ConsensusModule follower heartbeat timeout triggers failover election" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -452,7 +452,7 @@ test "ConsensusModule follower heartbeat timeout triggers failover election" {
 }
 
 test "ConsensusModule end-to-end: election, connect, message" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -518,7 +518,7 @@ test "ConsensusModule end-to-end: election, connect, message" {
 }
 
 test "ConsensusModule follower catch up preserves progress through failover" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -628,7 +628,7 @@ test "ConsensusModule follower catch up preserves progress through failover" {
 }
 
 test "ConsensusModule dynamic member discovery" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -648,7 +648,7 @@ test "ConsensusModule dynamic member discovery" {
 }
 
 test "ConsensusModule state round trip survives restart" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

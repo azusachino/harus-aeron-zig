@@ -147,8 +147,14 @@ pub const DriverConductor = struct {
             .recv_endpoint = recv_ep,
             .recv_bound = recv_bound,
             .allocator = allocator,
-            .publications = std.ArrayList(PublicationEntry).init(allocator),
-            .subscriptions = std.ArrayList(SubscriptionEntry).init(allocator),
+            .publications = .{
+                .items = &.{},
+                .capacity = 0,
+            },
+            .subscriptions = .{
+                .items = &.{},
+                .capacity = 0,
+            },
             .next_session_id = 1,
         };
     }
@@ -157,12 +163,12 @@ pub const DriverConductor = struct {
         for (self.publications.items) |pub_entry| {
             self.allocator.free(pub_entry.channel);
         }
-        self.publications.deinit();
+        self.publications.deinit(self.allocator);
 
         for (self.subscriptions.items) |sub_entry| {
             self.allocator.free(sub_entry.channel);
         }
-        self.subscriptions.deinit();
+        self.subscriptions.deinit(self.allocator);
     }
 
     pub fn doWork(self: *DriverConductor) i32 {

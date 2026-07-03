@@ -12,12 +12,8 @@ const AppendResult = aeron.logbuffer.AppendResult;
 const LogBuffer = aeron.logbuffer.LogBuffer;
 
 fn getSoakIterations() usize {
-    if (std.process.getEnvVarOwned(std.testing.allocator, "SOAK_ITERS")) |env| {
-        defer std.testing.allocator.free(env);
-        return std.fmt.parseInt(usize, env, 10) catch 1000;
-    } else |_| {
-        return 1000;
-    }
+    const ptr = std.c.getenv("SOAK_ITERS") orelse return 1000;
+    return std.fmt.parseInt(usize, std.mem.span(ptr), 10) catch 1000;
 }
 
 test "term_appender_soak: append N frames with varying sizes" {

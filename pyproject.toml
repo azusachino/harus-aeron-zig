@@ -1,0 +1,11 @@
+[project]
+name = "harus-aeron-zig-docs"
+version = "0.1.0"
+description = "Documentation preview tooling for harus-aeron-zig"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+  "mkdocs-git-revision-date-localized-plugin>=1.4.7",
+  "mkdocs-material>=9.6.20,<10",
+  "mkdocs-minify-plugin>=0.8.0",
+  "mkdocs-redirects>=1.2.2",
+]

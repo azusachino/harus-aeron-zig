@@ -1,6 +1,5 @@
 .git
 .github
-.agents
 .claude
 .zig-cache
 .zig-global-cache

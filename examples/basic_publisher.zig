@@ -6,9 +6,9 @@ const Aeron = aeron.Aeron;
 const MediaDriver = aeron.driver.MediaDriver;
 
 pub fn main() !void {
-    // ZIG: GeneralPurposeAllocator tracks memory allocations and detects leaks on deinit.
+    // ZIG: DebugAllocator tracks memory allocations and detects leaks on deinit.
     // AERON: Clients need an allocator for CnC.dat mapping and internal Publication/Subscription handles.
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

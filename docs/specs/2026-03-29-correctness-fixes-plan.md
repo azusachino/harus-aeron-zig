@@ -6,7 +6,7 @@
 
 **Architecture:** Surgical fixes to existing modules — no new subsystems. Each task is a standalone commit touching 1-2 files.
 
-**Tech Stack:** Zig 0.15.2, `make check` for verification.
+**Tech Stack:** Zig 0.16.0, `make check` for verification.
 
 ---
 

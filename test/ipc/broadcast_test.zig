@@ -7,7 +7,7 @@ const BroadcastReceiver = broadcast.BroadcastReceiver;
 const PADDING_MSG_TYPE_ID = broadcast.PADDING_MSG_TYPE_ID;
 
 test "broadcast: transmit and receive single message" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -25,7 +25,7 @@ test "broadcast: transmit and receive single message" {
 }
 
 test "broadcast: transmit 3 messages and receive all in order" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -51,7 +51,7 @@ test "broadcast: transmit 3 messages and receive all in order" {
 }
 
 test "broadcast: lapping detection when transmitter overwrites receiver" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -74,7 +74,7 @@ test "broadcast: lapping detection when transmitter overwrites receiver" {
 }
 
 test "broadcast: receiver recovers after lapping by repositioning to latest" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -104,7 +104,7 @@ test "broadcast: receiver recovers after lapping by repositioning to latest" {
 }
 
 test "broadcast: typeId() returns correct message type after receiveNext()" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -120,7 +120,7 @@ test "broadcast: typeId() returns correct message type after receiveNext()" {
 }
 
 test "broadcast: buffer() returns correct payload after receiveNext()" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -136,7 +136,7 @@ test "broadcast: buffer() returns correct payload after receiveNext()" {
 }
 
 test "broadcast: PADDING_MSG_TYPE_ID records are skipped" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -159,7 +159,7 @@ test "broadcast: PADDING_MSG_TYPE_ID records are skipped" {
 }
 
 test "broadcast: transmitter initializes with correct capacity and metadata" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -172,7 +172,7 @@ test "broadcast: transmitter initializes with correct capacity and metadata" {
 }
 
 test "broadcast: receiver late joins and detects lapping" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -193,7 +193,7 @@ test "broadcast: receiver late joins and detects lapping" {
 }
 
 test "broadcast: sendOperationSuccess encodes correlation_id" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -212,7 +212,7 @@ test "broadcast: sendOperationSuccess encodes correlation_id" {
 }
 
 test "broadcast: wrap() initializes from existing buffer" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -227,7 +227,7 @@ test "broadcast: wrap() initializes from existing buffer" {
 }
 
 test "broadcast: receiver wrap() initializes from existing buffer" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -245,7 +245,7 @@ test "broadcast: receiver wrap() initializes from existing buffer" {
 }
 
 test "broadcast: length() returns correct payload length" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -261,7 +261,7 @@ test "broadcast: length() returns correct payload length" {
 }
 
 test "broadcast: offset() returns correct data offset" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -279,7 +279,7 @@ test "broadcast: offset() returns correct data offset" {
 }
 
 test "broadcast: transmit empty message" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -294,7 +294,7 @@ test "broadcast: transmit empty message" {
 }
 
 test "broadcast: transmit with invalid message type fails" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -306,7 +306,7 @@ test "broadcast: transmit with invalid message type fails" {
 }
 
 test "broadcast: transmit with invalid capacity fails" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -315,7 +315,7 @@ test "broadcast: transmit with invalid capacity fails" {
 }
 
 test "broadcast: transmit message too long fails" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -331,7 +331,7 @@ test "broadcast: transmit message too long fails" {
 }
 
 test "broadcast: validate() returns false after significant overwrite" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

@@ -70,7 +70,8 @@ pub const SleepingIdleStrategy = struct {
 
     pub fn idle(self: *SleepingIdleStrategy, work_count: i32) void {
         if (work_count > 0) return;
-        std.Thread.sleep(self.sleep_ns);
+        var ts: std.c.timespec = .{ .sec = 0, .nsec = @intCast(self.sleep_ns) };
+        _ = std.c.nanosleep(&ts, null);
     }
 
     pub fn reset(_: *SleepingIdleStrategy) void {}
@@ -129,13 +130,15 @@ pub const BackoffIdleStrategy = struct {
                 if (self.yields > self.max_yields) {
                     self.state = .parking;
                     self.park_ns = self.min_park_ns;
-                    std.Thread.sleep(self.park_ns);
+                    var ts: std.c.timespec = .{ .sec = 0, .nsec = @intCast(self.park_ns) };
+                    _ = std.c.nanosleep(&ts, null);
                 } else {
                     std.Thread.yield() catch {};
                 }
             },
             .parking => {
-                std.Thread.sleep(self.park_ns);
+                var ts: std.c.timespec = .{ .sec = 0, .nsec = @intCast(self.park_ns) };
+                _ = std.c.nanosleep(&ts, null);
                 self.park_ns = @min(self.park_ns * 2, self.max_park_ns);
             },
         }

@@ -3,6 +3,8 @@
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-archive/src/main/java/io/aeron/archive/Archive.java
 
 const std = @import("std");
+const time = @import("../time.zig");
+const io_mod = @import("../io.zig");
 const catalog_mod = @import("catalog.zig");
 const protocol = @import("protocol.zig");
 
@@ -26,7 +28,7 @@ pub const RecordingWriter = struct {
     recording_id: i64,
     archive_dir: []const u8,
     path: []u8,
-    file: ?std.fs.File,
+    file: ?std.Io.File,
     /// Position of first byte in this recording (from media context)
     start_position: i64,
     /// Current write position (start_position + bytes_written_across_all_segments)
@@ -71,12 +73,12 @@ pub const RecordingWriter = struct {
         segment_file_length: i64,
         archive_dir: []const u8,
     ) !RecordingWriter {
-        try std.fs.cwd().makePath(archive_dir);
+        try std.Io.Dir.cwd().createDirPath(io_mod.io(), archive_dir);
 
         const path = try segmentFilePath(allocator, archive_dir, recording_id, start_position);
         errdefer allocator.free(path);
 
-        const file = try std.fs.cwd().createFile(path, .{ .truncate = true });
+        const file = try std.Io.Dir.cwd().createFile(io_mod.io(), path, .{ .truncate = true });
 
         return RecordingWriter{
             .allocator = allocator,
@@ -88,13 +90,13 @@ pub const RecordingWriter = struct {
             .stop_position = start_position,
             .current_segment_base = start_position,
             .segment_file_length = segment_file_length,
-            .buffer = .{},
+            .buffer = .empty,
         };
     }
 
     /// Free recording writer resources.
     pub fn deinit(self: *RecordingWriter) void {
-        if (self.file) |file| file.close();
+        if (self.file) |file| file.close(io_mod.io());
         self.allocator.free(self.path);
         self.buffer.deinit(self.allocator);
     }
@@ -107,7 +109,7 @@ pub const RecordingWriter = struct {
     pub fn write(self: *RecordingWriter, data: []const u8) !void {
         try self.buffer.appendSlice(self.allocator, data);
         if (self.file) |*file| {
-            try file.writeAll(data);
+            try file.writeStreamingAll(io_mod.io(), data);
         }
         self.stop_position += @as(i64, @intCast(data.len));
 
@@ -122,8 +124,8 @@ pub const RecordingWriter = struct {
     /// Close current segment and open a new one starting at `stop_position`.
     fn rotateSegment(self: *RecordingWriter) !void {
         if (self.file) |f| {
-            try f.sync();
-            f.close();
+            try f.sync(io_mod.io());
+            f.close(io_mod.io());
             self.file = null;
         }
         self.buffer.clearRetainingCapacity();
@@ -132,15 +134,19 @@ pub const RecordingWriter = struct {
         self.allocator.free(self.path);
         self.path = try segmentFilePath(self.allocator, self.archive_dir, self.recording_id, self.current_segment_base);
 
-        self.file = try std.fs.cwd().createFile(self.path, .{ .truncate = true });
+        self.file = try std.Io.Dir.cwd().createFile(io_mod.io(), self.path, .{ .truncate = true });
     }
 
     /// Read the current segment file from disk.
     pub fn readAll(self: *RecordingWriter, allocator: std.mem.Allocator) ![]u8 {
-        const file = try std.fs.cwd().openFile(self.path, .{});
-        defer file.close();
+        const file = try std.Io.Dir.cwd().openFile(io_mod.io(), self.path, .{});
+        defer file.close(io_mod.io());
 
-        return file.readToEndAlloc(allocator, 256 * 1024 * 1024);
+        const file_size = @as(usize, @intCast(try file.length(io_mod.io())));
+        const bytes = try allocator.alloc(u8, file_size);
+        errdefer allocator.free(bytes);
+        const n = try file.readPositionalAll(io_mod.io(), bytes, 0);
+        return bytes[0..n];
     }
 
     /// Read and concatenate all segment files for this recording from disk.
@@ -174,7 +180,7 @@ pub const RecordingWriter = struct {
     /// Flush buffered data to disk.
     pub fn flush(self: *RecordingWriter) !void {
         if (self.file) |*file| {
-            try file.sync();
+            try file.sync(io_mod.io());
         }
     }
 };
@@ -189,7 +195,7 @@ pub fn readAllSegmentsFromDisk(
     stop_position: i64,
     segment_file_length: i64,
 ) ![]u8 {
-    var result: std.ArrayListUnmanaged(u8) = .{};
+    var result: std.ArrayListUnmanaged(u8) = .empty;
     errdefer result.deinit(allocator);
 
     if (stop_position <= start_position) {
@@ -203,20 +209,20 @@ pub fn readAllSegmentsFromDisk(
         const seg_path = try RecordingWriter.segmentFilePath(allocator, archive_dir, recording_id, base);
         defer allocator.free(seg_path);
 
-        const file = std.fs.cwd().openFile(seg_path, .{}) catch |err| switch (err) {
+        const file = std.Io.Dir.cwd().openFile(io_mod.io(), seg_path, .{}) catch |err| switch (err) {
             error.FileNotFound => break,
             else => return err,
         };
-        defer file.close();
+        defer file.close(io_mod.io());
 
-        const file_size = (try file.stat()).size;
+        const file_size = @as(i64, @intCast(try file.length(io_mod.io())));
         const remaining = end_position - base;
         const bytes_to_read = @min(file_size, remaining);
         if (bytes_to_read > 0) {
             const old_len = result.items.len;
             const read_len: usize = @as(usize, @intCast(bytes_to_read));
             try result.resize(allocator, old_len + read_len);
-            const actual = try file.readAll(result.items[old_len .. old_len + read_len]);
+            const actual = try file.readPositionalAll(io_mod.io(), result.items[old_len .. old_len + read_len], 0);
             if (actual < read_len) {
                 try result.resize(allocator, old_len + actual);
             }
@@ -345,7 +351,7 @@ pub const Recorder = struct {
         return Recorder{
             .allocator = allocator,
             .archive_dir = archive_dir,
-            .sessions = .{},
+            .sessions = .empty,
             .catalog = cat,
         };
     }
@@ -471,7 +477,7 @@ pub const Recorder = struct {
 // ============================================================================
 
 test "RecordingWriter tracks positions correctly" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -493,7 +499,7 @@ test "RecordingWriter tracks positions correctly" {
 }
 
 test "RecordingSession writes fragments and tracks state" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -519,7 +525,7 @@ test "RecordingSession writes fragments and tracks state" {
 }
 
 test "Recorder start recording persists descriptor metadata" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -554,7 +560,7 @@ test "Recorder start recording persists descriptor metadata" {
 }
 
 test "Recorder onStartRecording creates session and catalog entry" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -591,7 +597,7 @@ test "Recorder onStartRecording creates session and catalog entry" {
 }
 
 test "RecordingWriter persists payload to disk" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -609,7 +615,7 @@ test "RecordingWriter persists payload to disk" {
 }
 
 test "Recorder onStopRecording closes session and updates catalog" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -646,7 +652,7 @@ test "Recorder onStopRecording closes session and updates catalog" {
 }
 
 test "Recorder onExtendRecording reactivates stopped session" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -687,7 +693,7 @@ test "Recorder onExtendRecording reactivates stopped session" {
 }
 
 test "Recorder doWork returns active session count" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -721,13 +727,13 @@ test "Recorder doWork returns active session count" {
 }
 
 test "RecordingWriter rotates to new segment when full" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/harus-seg-rotate-{d}", .{std.time.nanoTimestamp()});
+    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/harus-seg-rotate-{d}", .{time.nanoTimestamp()});
     defer allocator.free(archive_dir);
-    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), archive_dir) catch {};
 
     // Small segment size of 10 bytes to force rotation
     var writer = try RecordingWriter.initWithSegment(allocator, 42, 0, 10, archive_dir);
@@ -746,26 +752,26 @@ test "RecordingWriter rotates to new segment when full" {
     // Segment 0 file should exist with 10 bytes
     const seg0_path = try RecordingWriter.segmentFilePath(allocator, archive_dir, 42, 0);
     defer allocator.free(seg0_path);
-    const seg0_file = try std.fs.cwd().openFile(seg0_path, .{});
-    defer seg0_file.close();
-    try std.testing.expectEqual(@as(u64, 10), (try seg0_file.stat()).size);
+    const seg0_file = try std.Io.Dir.cwd().openFile(io_mod.io(), seg0_path, .{});
+    defer seg0_file.close(io_mod.io());
+    try std.testing.expectEqual(@as(u64, 10), try seg0_file.length(io_mod.io()));
 
     // Segment 1 file should exist with 5 bytes
     const seg1_path = try RecordingWriter.segmentFilePath(allocator, archive_dir, 42, 10);
     defer allocator.free(seg1_path);
-    const seg1_file = try std.fs.cwd().openFile(seg1_path, .{});
-    defer seg1_file.close();
-    try std.testing.expectEqual(@as(u64, 5), (try seg1_file.stat()).size);
+    const seg1_file = try std.Io.Dir.cwd().openFile(io_mod.io(), seg1_path, .{});
+    defer seg1_file.close(io_mod.io());
+    try std.testing.expectEqual(@as(u64, 5), try seg1_file.length(io_mod.io()));
 }
 
 test "readAllSegmentsFromDisk reads across multiple segments" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/harus-seg-all-{d}", .{std.time.nanoTimestamp()});
+    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/harus-seg-all-{d}", .{time.nanoTimestamp()});
     defer allocator.free(archive_dir);
-    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), archive_dir) catch {};
 
     // Write 25 bytes across segments of size 10
     var writer = try RecordingWriter.initWithSegment(allocator, 99, 0, 10, archive_dir);
@@ -787,13 +793,13 @@ test "readAllSegmentsFromDisk reads across multiple segments" {
 }
 
 test "readAllSegmentsFromDisk truncates final segment at stop_position" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/harus-seg-trunc-{d}", .{std.time.nanoTimestamp()});
+    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/harus-seg-trunc-{d}", .{time.nanoTimestamp()});
     defer allocator.free(archive_dir);
-    defer std.fs.cwd().deleteTree(archive_dir) catch {};
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), archive_dir) catch {};
 
     var writer = try RecordingWriter.initWithSegment(allocator, 77, 0, 10, archive_dir);
     defer writer.deinit();
@@ -812,7 +818,7 @@ test "readAllSegmentsFromDisk truncates final segment at stop_position" {
 }
 
 test "Recorder findSession returns correct session" {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

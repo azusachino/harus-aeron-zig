@@ -2,16 +2,17 @@
 // Upstream reference: aeron-driver/src/test/java/io/aeron/driver/ImageSessionTest.java
 const std = @import("std");
 const aeron = @import("aeron");
+const net = aeron.net;
 
 test "Receiver: SETUP signal injection and Image creation" {
     const allocator = std.testing.allocator;
 
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    defer std.posix.close(sock);
+    const sock = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer net.closeSocket(sock);
 
     var recv_ep = aeron.transport.ReceiveChannelEndpoint{
         .socket = sock,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     const dummy_send: std.posix.socket_t = 0;
     var send_endpoint = aeron.transport.SendChannelEndpoint{ .socket = dummy_send };
@@ -28,7 +29,7 @@ test "Receiver: SETUP signal injection and Image creation" {
     defer receiver.deinit();
 
     // Inject a SETUP signal
-    const source_addr = std.net.Address.initIp4(.{ 192, 168, 1, 1 }, 20001);
+    const source_addr = net.Address.initIp4(.{ 192, 168, 1, 1 }, 20001);
     const setup_signal = aeron.driver.receiver.SetupSignal{
         .session_id = 100,
         .stream_id = 1,
@@ -55,12 +56,12 @@ test "Receiver: SETUP signal injection and Image creation" {
 test "Receiver: duplicate SETUP signals can be injected and drained" {
     const allocator = std.testing.allocator;
 
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    defer std.posix.close(sock);
+    const sock = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer net.closeSocket(sock);
 
     var recv_ep = aeron.transport.ReceiveChannelEndpoint{
         .socket = sock,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     const dummy_send: std.posix.socket_t = 0;
     var send_endpoint = aeron.transport.SendChannelEndpoint{ .socket = dummy_send };
@@ -76,7 +77,7 @@ test "Receiver: duplicate SETUP signals can be injected and drained" {
     var receiver = try aeron.driver.Receiver.init(allocator, &recv_ep, &send_endpoint, &cm, null);
     defer receiver.deinit();
 
-    const source_addr = std.net.Address.initIp4(.{ 192, 168, 1, 1 }, 20001);
+    const source_addr = net.Address.initIp4(.{ 192, 168, 1, 1 }, 20001);
     const setup_signal = aeron.driver.receiver.SetupSignal{
         .session_id = 100,
         .stream_id = 1,
@@ -106,12 +107,12 @@ test "Receiver: duplicate SETUP signals can be injected and drained" {
 test "Receiver: SETUP signal holds stream metadata" {
     const allocator = std.testing.allocator;
 
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    defer std.posix.close(sock);
+    const sock = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer net.closeSocket(sock);
 
     var recv_ep = aeron.transport.ReceiveChannelEndpoint{
         .socket = sock,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     const dummy_send: std.posix.socket_t = 0;
     var send_endpoint = aeron.transport.SendChannelEndpoint{ .socket = dummy_send };
@@ -127,7 +128,7 @@ test "Receiver: SETUP signal holds stream metadata" {
     var receiver = try aeron.driver.Receiver.init(allocator, &recv_ep, &send_endpoint, &cm, null);
     defer receiver.deinit();
 
-    const source_addr = std.net.Address.initIp4(.{ 192, 168, 1, 1 }, 20001);
+    const source_addr = net.Address.initIp4(.{ 192, 168, 1, 1 }, 20001);
     const setup_signal = aeron.driver.receiver.SetupSignal{
         .session_id = 42,
         .stream_id = 2,

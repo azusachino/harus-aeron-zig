@@ -3,10 +3,10 @@
 ### DO
 
 - Use `make <target>` for all task execution — never run tools directly
-- At session start: load MCP entities if available (`search_nodes` in tools); skip `CURRENT_TASK.md` when MCP active
-- At session end: write state to `harus-aeron-zig:session` MCP entity
+- At session start: load state from the project-local asobi graph (`asobi show harus-aeron-zig harus-aeron-zig:session`)
+- At session end: write state to the `harus-aeron-zig:session` asobi entity
 - Dispatch sub-agents for independent tasks — parallelize where possible
-- Update `.agents/CONTEXT.md` when architecture or conventions change
+- Record architecture/convention changes on the `harus-aeron-zig` asobi project entity
 - Stage files explicitly: `git add <specific files>` only
 - Use `extern struct` for all wire-protocol types; add comptime size assertions
 - Verify frame layouts against https://github.com/aeron-io/aeron before implementing

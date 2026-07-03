@@ -3,6 +3,7 @@
 const std = @import("std");
 const cnc_mod = @import("../cnc.zig");
 const counters_mod = @import("../ipc/counters.zig");
+const io_mod = @import("../io.zig");
 
 const StreamPositions = struct {
     session_id: i32,
@@ -20,8 +21,8 @@ const StreamKey = struct {
 
 pub fn run(aeron_dir: []const u8) void {
     var stdout_buf: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&stdout_buf);
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var stdout = std.Io.File.stdout().writer(io_mod.io(), &stdout_buf);
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -32,7 +33,7 @@ pub fn run(aeron_dir: []const u8) void {
     };
     defer mapped.deinit();
 
-    var streams = std.ArrayList(StreamPositions){};
+    var streams = std.ArrayList(StreamPositions).empty;
     defer streams.deinit(allocator);
 
     stdout.interface.print("Stream Positions\n", .{}) catch return;

@@ -8,18 +8,19 @@ The **conductor** is the central dispatcher of a cluster node. It manages three 
 
 Think of it as a switchboard that routes inbound messages (from clients, from other nodes) through the consensus log and out to the service.
 
-## What You'll Build
+!!! abstract "What you'll build"
+    A complete client session manager with role-aware routing:
 
-By the end of this chapter, you'll understand:
-- Client session lifecycle: connect → SessionConnectRequest → SessionEvent(ok) → messages → disconnect
-- How cluster session messages wrap application messages (SessionMessageHeader)
-- The redirect flow (when client connects to a follower, gets redirected to leader)
-- How the service interface is invoked (function pointer callbacks)
-- The difference between leader and follower conductors
+    - Client session lifecycle: connect → SessionConnectRequest → SessionEvent(ok) → messages → disconnect
+    - How cluster session messages wrap application messages (SessionMessageHeader)
+    - The redirect flow (when client connects to a follower, gets redirected to leader)
+    - How the service interface is invoked (function pointer callbacks)
+    - The difference between leader and follower conductors
 
 ## Why It Works This Way (Aeron Concept)
 
-In a cluster, **there is one leader and many followers**. The conductor handles this asymmetry:
+!!! info "Aeron concept: role-based client routing"
+    In a cluster, **there is one leader and many followers**. The conductor handles this asymmetry:
 
 **On the Leader**:
 - Accepts `SessionConnectRequest` from clients on the ingress channel
@@ -120,7 +121,8 @@ pub const ClusterConductor = struct {
 
 ## Zig Concept: `comptime` Function Pointer for Service Callbacks
 
-How do we invoke the service without tight coupling? We use **function pointers**.
+!!! info "Zig concept: zero-cost service abstraction via function pointers"
+    How do we invoke the service without tight coupling? We use **function pointers**.
 
 ### Standalone Example
 
@@ -338,34 +340,32 @@ Notice:
 
 ## Exercise
 
-**Implement `onSessionConnect`: validate request, create session, send SessionEvent(ok).**
+!!! question "Exercise: Implement onSessionConnect with role-aware routing"
+    Implement `onSessionConnect`: validate request, create session, send SessionEvent(ok).
 
-Open `tutorial/cluster/conductor.zig` and implement:
+    Open `tutorial/cluster/conductor.zig` and implement:
 
-```zig
-/// Handle a client connection request.
-/// If leader: create session and send SessionEvent(ok).
-/// If follower: send SessionEvent(redirect).
-pub fn onSessionConnect(
-    self: *ClusterConductor,
-    correlation_id: i64,
-    response_stream_id: i32,
-    response_channel: []const u8,
-) !void {
-    // TODO: implement
-    @panic("TODO: onSessionConnect");
-}
-```
+    ```zig
+    /// Handle a client connection request.
+    /// If leader: create session and send SessionEvent(ok).
+    /// If follower: send SessionEvent(redirect).
+    pub fn onSessionConnect(
+        self: *ClusterConductor,
+        correlation_id: i64,
+        response_stream_id: i32,
+        response_channel: []const u8,
+    ) !void {
+        // TODO: implement
+        @panic("TODO: onSessionConnect");
+    }
+    ```
 
-**Acceptance criteria:**
-1. If `role == .follower`, return early (don't process)
-2. If `role == .leader`:
-   - Allocate a new `cluster_session_id` (increment `next_session_id`)
-   - Create a `SessionState` with the response channel
-   - Store in `sessions` map
-3. Write a test: create a leader conductor, connect a session, verify the session exists
+    - [ ] If `role == .follower`, return early (don't process)
+    - [ ] If `role == .leader`: allocate a new `cluster_session_id` (increment `next_session_id`)
+    - [ ] Create a `SessionState` with the response channel and store in `sessions` map
+    - [ ] Write a test: create a leader conductor, connect a session, verify the session exists
 
-Compare against `src/cluster/conductor.zig`.
+    Compare against `src/cluster/conductor.zig`.
 
 ## Check Your Work
 
@@ -376,12 +376,11 @@ make test-unit
 
 Look for tests named `test_conductor_*` or `test_session_*`.
 
-## Key Takeaways
-
-1. **Conductor is the switchboard**: routes client ingress, monitors replication, delivers to service.
-2. **Leaders and followers differ**: only leaders accept client connections; followers redirect.
-3. **Sessions are stateful**: each client gets a unique `cluster_session_id` and a response channel.
-4. **Service callbacks use function pointers**: no tight coupling, no overhead.
-5. **Committed entries are safe to process**: if a service crashes and restarts, it replays from the committed log, recovering its state deterministically.
+!!! success "Key takeaways"
+    1. **Conductor is the switchboard**: routes client ingress, monitors replication, delivers to service.
+    2. **Leaders and followers differ**: only leaders accept client connections; followers redirect.
+    3. **Sessions are stateful**: each client gets a unique `cluster_session_id` and a response channel.
+    4. **Service callbacks use function pointers**: no tight coupling, no overhead.
+    5. **Committed entries are safe to process**: if a service crashes and restarts, it replays from the committed log, recovering its state deterministically.
 
 Next, we'll see how all these pieces fit together in the ConsensusModule.

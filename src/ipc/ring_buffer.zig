@@ -31,10 +31,10 @@ pub const RecordDescriptor = struct {
 pub const MessageHandler = *const fn (msg_type_id: i32, data: []const u8, ctx: *anyopaque) void;
 
 pub const ManyToOneRingBuffer = struct {
-    buffer: []u8,
+    buffer: []align(8) u8,
     capacity: usize,
 
-    pub fn init(buf: []u8) ManyToOneRingBuffer {
+    pub fn init(buf: []align(8) u8) ManyToOneRingBuffer {
         return .{
             .buffer = buf,
             .capacity = buf.len - METADATA_LENGTH,
@@ -45,7 +45,7 @@ pub const ManyToOneRingBuffer = struct {
         return self.capacity + offset;
     }
 
-    fn loadTail(self: *const ManyToOneRingBuffer) i64 {
+    pub fn loadTail(self: *const ManyToOneRingBuffer) i64 {
         const addr = self.buffer.ptr + self.metadataOffset(TAIL_POSITION_OFFSET);
         return @atomicLoad(i64, @as(*i64, @ptrCast(@alignCast(addr))), .acquire);
     }
@@ -63,7 +63,7 @@ pub const ManyToOneRingBuffer = struct {
         return result == null;
     }
 
-    fn loadHead(self: *const ManyToOneRingBuffer) i64 {
+    pub fn loadHead(self: *const ManyToOneRingBuffer) i64 {
         const addr = self.buffer.ptr + self.metadataOffset(HEAD_POSITION_OFFSET);
         return @atomicLoad(i64, @as(*i64, @ptrCast(@alignCast(addr))), .acquire);
     }
@@ -89,11 +89,17 @@ pub const ManyToOneRingBuffer = struct {
         var tail = self.loadTail();
         var head_cache = self.loadHeadCache();
 
+        // Positions are monotonic and non-negative by construction; a negative
+        // value means the backing metadata is corrupt or uninitialized (e.g. an
+        // untrusted mapped buffer). Refuse the write rather than @intCast-panic below.
+        if (tail < 0 or head_cache < 0) return false;
+
         // Check if we have capacity
         var available = @as(i64, @intCast(self.capacity)) - (tail - head_cache);
         if (available < @as(i64, @intCast(aligned_length))) {
             // Reload head and update cache
             const head = self.loadHead();
+            if (head < 0) return false;
             self.storeHeadCache(head);
             head_cache = head;
             available = @as(i64, @intCast(self.capacity)) - (tail - head_cache);
@@ -235,7 +241,7 @@ test "unblock recovers from stalled writer" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -281,7 +287,7 @@ test "single write and read roundtrip" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -307,7 +313,7 @@ test "write stores agrona record header as length then type" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -324,7 +330,7 @@ test "write until full returns false" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -345,7 +351,7 @@ test "nextCorrelationId monotonically increases" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -363,7 +369,7 @@ test "wrap-around with padding" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);
@@ -401,7 +407,7 @@ test "wrap-around encodes padding record with length then padding type" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
 
-    const buf = try arena.allocator().alloc(u8, 1024);
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
     @memset(buf, 0);
 
     var rb = ManyToOneRingBuffer.init(buf);

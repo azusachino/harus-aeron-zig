@@ -2,45 +2,39 @@
 
 Once the archive starts recording, it needs to remember what it recorded — where each stream's bytes live on disk, what channel and stream ID it used, when it started and stopped. The Catalog is a persistent flat-file index that answers these questions in O(1) time.
 
-## What You'll Build
+!!! abstract "What you'll build"
+    A flat binary file where each recording gets a fixed-size entry (1024 bytes):
 
-A flat binary file where each recording gets a fixed-size entry (1024 bytes). Recording IDs are sequential: recording #1 lives at byte offset 1024, recording #2 at offset 2048, etc. You'll implement fast lookup, atomic updates to stop position, and recovery from a corrupted catalog by scanning the archive directory.
+    - Recording IDs are sequential: recording #1 lives at byte offset 1024, recording #2 at offset 2048
+    - Fast O(1) lookup by recording_id using simple arithmetic (no B-tree, no scanning)
+    - Atomic updates to stop position and stop timestamp in a single persist call
+    - Catalog recovery by scanning the archive directory for segment files when the catalog is corrupted or missing
 
-## Why It Works This Way (Aeron Concept)
+!!! info "Aeron concept: Flat-file indexing for durability"
+    Real Aeron archives (Java and C++) use a catalog file to persist recording metadata across restarts.
+    The design trades a small amount of wasted space (unused fields in each 1024-byte entry) for
+    predictable O(1) lookup and no index data structure.
 
-Real Aeron archives (Java and C++) use a catalog file to persist recording metadata across restarts. The design trades a small amount of wasted space (unused fields in each 1024-byte entry) for predictable O(1) lookup and no index data structure.
+    When a client asks "what's in recording #42?", the archive seeks to byte offset `42 * 1024` and reads
+    exactly one entry. No B-tree, no scan. For an archive that might hold millions of recordings, this is
+    a critical performance choice.
 
-When a client asks "what's in recording #42?", the archive seeks to byte offset `42 * 1024` and reads exactly one entry. No B-tree, no scan. For an archive that might hold millions of recordings, this is a critical performance choice.
-
-### Catalog Persistence
-
-```
-┌─ File: archive/catalog.dat
-│
-├─ Recording #1: [1024 bytes]
-│  ├─ recording_id: 1
-│  ├─ start_position: 0
-│  ├─ stop_position: 50000
-│  ├─ channel_length: 30
-│  ├─ channel: "aeron:udp?endpoint=localhost:40123"
-│  └─ [padding to 1024 bytes]
-│
-├─ Recording #2: [1024 bytes]
-│  ├─ recording_id: 2
-│  ├─ start_position: 50000
-│  ├─ stop_position: 120000
-│  └─ ...
-│
-└─ ... more entries ...
+```mermaid
+flowchart TD
+    A["Lookup recording_id = N"] --> B["Seek to offset N * 1024"]
+    B --> C["Read 1024-byte entry"]
+    C --> D["Return metadata"]
+    
+    E["Catalog.dat missing?"] --> F["Scan archive/ for segment files"]
+    F --> G["Parse names: recording_id-base_position.dat"]
+    G --> H["Fold segments per recording_id"]
+    H --> I["Reconstruct RecordingDescriptorEntry"]
+    I --> J["Persist reconstructed catalog"]
 ```
 
-When the archive restarts and the catalog file is missing or corrupted, it scans the archive directory for segment files named `<recording_id>-<base_position>.dat` and reconstructs the catalog from them.
-
-## Zig Concept: Flat Binary Files and Seek Arithmetic
-
-Instead of a B-tree or a hash table, Zig's flat-file approach uses simple arithmetic to map a key to a file offset.
-
-### The Struct
+!!! info "Zig concept: Flat binary files and seek arithmetic"
+    Instead of a B-tree or a hash table, Zig's flat-file approach uses simple arithmetic to map a key
+    to a file offset. Fixed-size entries enable predictable seeking.
 
 ```zig
 pub const RecordingDescriptorEntry = extern struct {
@@ -72,17 +66,19 @@ The comptime assertion catches any size mismatches at compile time. If you add a
 ### Load and Persist
 
 ```zig
+const io_mod = @import("../io.zig");
+
 pub const Catalog = struct {
     entries: std.ArrayList(RecordingDescriptorEntry),
     next_recording_id: i64,
 
     /// Load catalog from disk: read all 1024-byte entries
-    fn loadFromDisk(self: *Catalog) !void {
-        const file = try std.fs.cwd().openFile("archive/catalog.dat", .{});
-        defer file.close();
+    fn loadFromDisk(self: *Catalog, path: []const u8) !void {
+        const file = try std.Io.Dir.cwd().openFile(io_mod.io(), path, .{});
+        defer file.close(io_mod.io());
 
         var buf: [1024]u8 = undefined;
-        while (file.read(&buf) > 0) {
+        while ((try file.read(io_mod.io(), &buf)) > 0) {
             var entry: RecordingDescriptorEntry = undefined;
             @memcpy(std.mem.asBytes(&entry), &buf);
             try self.entries.append(self.allocator, entry);
@@ -90,15 +86,18 @@ pub const Catalog = struct {
     }
 
     /// Persist catalog: write all entries as sequential 1024-byte chunks
-    fn persist(self: *Catalog) !void {
-        const file = try std.fs.cwd().createFile("archive/catalog.dat", .{ .truncate = true });
-        defer file.close();
-        try file.writeAll(std.mem.sliceAsBytes(self.entries.items));
+    fn persist(self: *Catalog, path: []const u8) !void {
+        const file = try std.Io.Dir.cwd().createFile(io_mod.io(), path, .{ .truncate = true });
+        defer file.close(io_mod.io());
+        try file.writeStreamingAll(io_mod.io(), std.mem.sliceAsBytes(self.entries.items));
     }
 };
 ```
 
-No serialization library, no index structure. Just read and write byte arrays.
+!!! note "Zig 0.16 file I/O"
+    In Zig 0.16, file operations thread an `std.Io` through all operations. The project hands it out via
+    `io_mod.io()`, making it convenient to pass to file methods like `openFile()`, `createFile()`, `close()`,
+    `read()`, and `writeStreamingAll()`.
 
 ## The Code
 
@@ -179,22 +178,19 @@ When the catalog.dat file is missing or corrupted, the `reconstructFromSegments(
 
 The file naming scheme encodes the recording ID and base position: `<recording_id>-<base_position>.dat`. A parser extracts both and reconstructs entries without relying on the catalog file.
 
-## Exercise
+!!! question "Exercise"
+    Implement `recordingDescriptor` and `updateStopState` in `tutorial/archive/catalog.zig`.
 
-**Implement `recordingDescriptor` and `updateStopState` in `tutorial/archive/catalog.zig`.**
+    Your task:
+    1. Implement `recordingDescriptor(recording_id)` — iterate through entries and return the one matching the ID, or null if not found.
+    2. Implement `updateStopState(recording_id, stop_position, stop_timestamp)` — find the entry, atomically update both fields, then persist.
 
-Your task:
-1. Implement `recordingDescriptor(recording_id)` — iterate through entries and return the one matching the ID, or null if not found.
-2. Implement `updateStopState(recording_id, stop_position, stop_timestamp)` — find the entry, atomically update both fields, then persist.
+    Acceptance criteria:
+    - [ ] `recordingDescriptor` returns the entry or null
+    - [ ] `updateStopState` finds the matching entry and updates both fields in one persist call
+    - [ ] After calling `updateStopState`, a fresh Catalog loaded from the same path sees the updated values
 
-**Acceptance criteria:**
-- `recordingDescriptor` returns the entry or null.
-- `updateStopState` finds the matching entry and updates both fields in one persist call.
-- After calling `updateStopState`, a fresh Catalog loaded from the same path sees the updated values.
-
-**Hint:** The `persist()` function already writes all entries to disk; just find the entry, update it, and call persist.
-
-## Check Your Work
+    Hint: The `persist()` function already writes all entries to disk; just find the entry, update it, and call persist.
 
 ```bash
 cd /Users/azusachino/Projects/project-github/harus-aeron-zig
@@ -203,10 +199,9 @@ make test-unit
 
 Then compare your code against `src/archive/catalog.zig`.
 
-## Key Takeaways
-
-1. **Flat files beat hash tables for durability**: no index structure to rebuild, no garbage collection.
-2. **Fixed-size entries enable O(1) lookup**: byte offset = recording_id * entry_size.
-3. **Comptime assertions catch layout bugs**: `@sizeOf` is checked at compile time, not runtime.
-4. **Catalog recovery**: if the index is lost, scan the directory for segment files and rebuild.
-5. **Atomicity**: update both stop_position and stop_timestamp in one persist call, never leaving a partial state on disk.
+!!! success "Key takeaways"
+    - **Flat files beat hash tables for durability**: no index structure to rebuild, no garbage collection.
+    - **Fixed-size entries enable O(1) lookup**: byte offset = recording_id * entry_size.
+    - **Comptime assertions catch layout bugs**: `@sizeOf` is checked at compile time, not runtime.
+    - **Catalog recovery**: if the index is lost, scan the directory for segment files and rebuild.
+    - **Atomicity**: update both stop_position and stop_timestamp in one persist call, never leaving a partial state on disk.

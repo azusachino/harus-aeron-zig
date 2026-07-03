@@ -1,4 +1,5 @@
 const std = @import("std");
+const net = @import("../net.zig");
 const UdpChannel = @import("udp_channel.zig").UdpChannel;
 
 // LESSON(udp-transport): Endpoints abstract send/receive channel pairs. Media driver assigns one endpoint per port to reduce syscall overhead. See docs/tutorial/02-data-path/03-udp-transport.md
@@ -44,21 +45,21 @@ const IPV6_MULTICAST_HOPS: u32 = switch (builtin.os.tag) {
 // an atomic socket + nonblock setup. On macOS it still requires FIONBIO — Zig's std.posix
 // handles this transparently via the SOCK.NONBLOCK flag. See docs/tutorial/02-data-path/03-udp-transport.md
 pub const SendChannelEndpoint = struct {
-    socket: std.posix.socket_t,
+    socket: net.socket_t,
 
     pub fn open(channel: *const UdpChannel) !SendChannelEndpoint {
         const family: u32 = if (channel.endpoint) |ep| ep.any.family else std.posix.AF.INET;
-        const sock = try std.posix.socket(
+        const sock = try net.openSocket(
             family,
             std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK,
             std.posix.IPPROTO.UDP,
         );
-        errdefer std.posix.close(sock);
+        errdefer net.closeSocket(sock);
 
         // Apply socket buffer options if specified
         if (channel.so_sndbuf) |sndbuf| {
             const val: i32 = @intCast(sndbuf);
-            try std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, &std.mem.toBytes(val));
+            try net.setSockOpt(sock, std.posix.SOL.SOCKET, std.posix.SO.SNDBUF, &std.mem.toBytes(val));
         }
 
         // Apply multicast TTL if specified and destination is multicast
@@ -66,10 +67,10 @@ pub const SendChannelEndpoint = struct {
             if (channel.is_multicast) {
                 if (family == std.posix.AF.INET) {
                     const ttl_i32: i32 = @intCast(ttl_val);
-                    try std.posix.setsockopt(sock, std.posix.IPPROTO.IP, IP_MULTICAST_TTL, &std.mem.toBytes(ttl_i32));
+                    try net.setSockOpt(sock, std.posix.IPPROTO.IP, IP_MULTICAST_TTL, &std.mem.toBytes(ttl_i32));
                 } else if (family == std.posix.AF.INET6) {
                     const ttl_i32: i32 = @intCast(ttl_val);
-                    try std.posix.setsockopt(sock, std.posix.IPPROTO.IPV6, IPV6_MULTICAST_HOPS, &std.mem.toBytes(ttl_i32));
+                    try net.setSockOpt(sock, std.posix.IPPROTO.IPV6, IPV6_MULTICAST_HOPS, &std.mem.toBytes(ttl_i32));
                 }
             }
         }
@@ -78,11 +79,11 @@ pub const SendChannelEndpoint = struct {
         if (channel.local_address) |addr| {
             if (channel.is_multicast) {
                 if (family == std.posix.AF.INET) {
-                    try std.posix.setsockopt(sock, std.posix.IPPROTO.IP, IP_MULTICAST_IF, &std.mem.toBytes(addr.in.sa.addr));
+                    try net.setSockOpt(sock, std.posix.IPPROTO.IP, IP_MULTICAST_IF, &std.mem.toBytes(addr.in.addr));
                 }
             } else {
                 // Bind to interface for unicast
-                try std.posix.bind(sock, &addr.any, addr.getOsSockLen());
+                try net.bindSocket(sock, &addr.any, addr.getOsSockLen());
             }
         }
 
@@ -93,55 +94,63 @@ pub const SendChannelEndpoint = struct {
     // and multicast (one-to-many). The same SendChannelEndpoint handles both — multicast is just
     // sendto() with a group address. The receiver joins the multicast group via setsockopt
     // IP_ADD_MEMBERSHIP so the OS delivers those packets. See docs/tutorial/02-data-path/03-udp-transport.md
-    pub fn send(self: *SendChannelEndpoint, dest: std.net.Address, data: []const u8) !usize {
-        return std.posix.sendto(self.socket, data, 0, &dest.any, dest.getOsSockLen());
+    pub fn send(self: *SendChannelEndpoint, dest: net.Address, data: []const u8) (error{WouldBlock} || error{SendFailed})!usize {
+        const n = std.c.sendto(self.socket, data.ptr, data.len, 0, &dest.any, dest.getOsSockLen());
+        if (n >= 0) return @intCast(n);
+
+        // Check errno to distinguish WouldBlock from other errors
+        const err = std.posix.errno(n);
+        return switch (err) {
+            .AGAIN => error.WouldBlock,
+            else => error.SendFailed,
+        };
     }
 
     pub fn close(self: *SendChannelEndpoint) void {
-        std.posix.close(self.socket);
+        net.closeSocket(self.socket);
     }
 };
 
 pub const ReceiveChannelEndpoint = struct {
-    socket: std.posix.socket_t,
-    bound_address: std.net.Address,
+    socket: net.socket_t,
+    bound_address: net.Address,
 
     pub fn open(channel: *const UdpChannel) !ReceiveChannelEndpoint {
         const family: u32 = if (channel.endpoint) |ep| ep.any.family else std.posix.AF.INET;
-        const sock = try std.posix.socket(
+        const sock = try net.openSocket(
             family,
             std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK,
             std.posix.IPPROTO.UDP,
         );
-        errdefer std.posix.close(sock);
+        errdefer net.closeSocket(sock);
 
         if (channel.is_multicast) {
             // LESSON(udp-transport): SO_REUSEPORT allows multiple sockets to bind to the same mcast group; needed for multi-subscriber scenarios. See docs/tutorial/02-data-path/03-udp-transport.md
-            try std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEPORT, &std.mem.toBytes(@as(i32, 1)));
+            try net.setSockOpt(sock, std.posix.SOL.SOCKET, std.posix.SO.REUSEPORT, &std.mem.toBytes(@as(i32, 1)));
         }
 
         // Apply socket buffer options if specified
         if (channel.so_rcvbuf) |rcvbuf| {
             const val: i32 = @intCast(rcvbuf);
-            try std.posix.setsockopt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, &std.mem.toBytes(val));
+            try net.setSockOpt(sock, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, &std.mem.toBytes(val));
         }
 
-        var bound_address: std.net.Address = undefined;
+        var bound_address: net.Address = undefined;
         if (channel.endpoint) |ep| {
             if (channel.is_multicast) {
                 // For multicast, we bind to the group port on all interfaces (or group address depending on OS)
                 // Binding to 0.0.0.0:port is generally portable for receiving multicast.
                 if (family == std.posix.AF.INET) {
-                    bound_address = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, ep.getPort());
+                    bound_address = net.Address.initIp4(.{ 0, 0, 0, 0 }, ep.getPort());
                 } else {
-                    bound_address = std.net.Address.initIp6(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, ep.getPort(), 0, 0);
+                    bound_address = net.Address.initIp6(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 }, ep.getPort(), 0, 0);
                 }
             } else {
                 bound_address = ep;
             }
         } else {
             // Default bind for non-UDP channels
-            bound_address = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, 0);
+            bound_address = net.Address.initIp4(.{ 0, 0, 0, 0 }, 0);
         }
 
         return ReceiveChannelEndpoint{
@@ -151,32 +160,32 @@ pub const ReceiveChannelEndpoint = struct {
     }
 
     pub fn bind(self: *ReceiveChannelEndpoint) !void {
-        try std.posix.bind(self.socket, &self.bound_address.any, self.bound_address.getOsSockLen());
+        try net.bindSocket(self.socket, &self.bound_address.any, self.bound_address.getOsSockLen());
     }
 
-    pub fn joinMulticast(self: *ReceiveChannelEndpoint, group: std.net.Address, interface_addr: std.net.Address) !void {
+    pub fn joinMulticast(self: *ReceiveChannelEndpoint, group: net.Address, interface_addr: net.Address) !void {
         if (group.any.family == std.posix.AF.INET) {
             const mreq = IpMreq{
-                .imr_multiaddr = group.in.sa.addr,
-                .imr_interface = interface_addr.in.sa.addr,
+                .imr_multiaddr = group.in.addr,
+                .imr_interface = interface_addr.in.addr,
             };
-            try std.posix.setsockopt(self.socket, std.posix.IPPROTO.IP, IP_ADD_MEMBERSHIP, &std.mem.toBytes(mreq));
+            try net.setSockOpt(self.socket, std.posix.IPPROTO.IP, IP_ADD_MEMBERSHIP, &std.mem.toBytes(mreq));
         } else if (group.any.family == std.posix.AF.INET6) {
             const mreq = Ipv6Mreq{
-                .ipv6mr_multiaddr = group.in6.sa.addr,
+                .ipv6mr_multiaddr = group.in6.addr,
                 .ipv6mr_interface = 0,
             };
-            try std.posix.setsockopt(self.socket, std.posix.IPPROTO.IPV6, IPV6_JOIN_GROUP, &std.mem.toBytes(mreq));
+            try net.setSockOpt(self.socket, std.posix.IPPROTO.IPV6, IPV6_JOIN_GROUP, &std.mem.toBytes(mreq));
         }
     }
 
-    pub fn recv(self: *ReceiveChannelEndpoint, buf: []u8, src: *std.net.Address) !usize {
+    pub fn recv(self: *ReceiveChannelEndpoint, buf: []u8, src: *net.Address) !usize {
         var addrlen: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.storage);
-        return std.posix.recvfrom(self.socket, buf, 0, &src.any, &addrlen);
+        return net.recvFrom(self.socket, buf, 0, &src.any, &addrlen);
     }
 
     pub fn close(self: *ReceiveChannelEndpoint) void {
-        std.posix.close(self.socket);
+        net.closeSocket(self.socket);
     }
 };
 

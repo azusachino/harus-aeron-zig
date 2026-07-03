@@ -9,7 +9,7 @@
 ## Getting Started
 
 ```bash
-# Enter dev shell (provides zig 0.15.2, zls, prettier, skopeo)
+# Enter dev shell (provides zig 0.16.0, zls, prettier, skopeo)
 nix develop
 
 # Build
@@ -35,7 +35,7 @@ zig-out/bin/aeron-driver
 
 ## Zig Version
 
-Zig 0.15.2 is provided via `nixpkgs.legacyPackages.${system}.zig` in `flake.nix`.
+Zig 0.16.0 is provided via `nixpkgs.legacyPackages.${system}.zig` in `flake.nix`.
 No `zig-overlay` or mise needed — just `nix develop`.
 Build artifacts explicitly link libc in `build.zig` because the media driver writes
 its PID into `cnc.dat` via `getpid()`. This matches local macOS development while
@@ -46,9 +46,9 @@ For API/source reference, prefer a local upstream checkout in `vendor/zig`:
 make setup-upstream-zig
 ```
 
-This clones the Zig `0.15.2` tag into `vendor/zig`. Keep using `vendor/zig-std`
+This clones the Zig `0.16.0` tag into `vendor/zig`. Keep using `vendor/zig-std`
 for the exact stdlib path from the active toolchain, and use `vendor/zig` when
-you need the upstream compiler/runtime sources or want to confirm 0.15.2 APIs.
+you need the upstream compiler/runtime sources or want to confirm 0.16.0 APIs.
 
 ---
 

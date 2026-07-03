@@ -109,10 +109,10 @@ test "formatTable produces readable output" {
     const report = CountersReport.init(&cm);
 
     var buf: [4096]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try report.formatTable(fbs.writer());
+    var writer = std.Io.Writer.fixed(&buf);
+    try report.formatTable(&writer);
 
-    const output = fbs.getWritten();
+    const output = writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, output, "pub-limit") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "sender-pos") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "12345") != null);

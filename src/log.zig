@@ -1,4 +1,11 @@
 const std = @import("std");
+const io_mod = @import("io.zig");
+const time = @import("time.zig");
+
+fn getenv(comptime name: [:0]const u8) ?[]const u8 {
+    const ptr = std.c.getenv(name) orelse return null;
+    return std.mem.span(ptr);
+}
 
 pub const Level = enum(u8) {
     trace = 0,
@@ -57,17 +64,15 @@ pub const Logger = struct {
         if (@intFromEnum(level) < @intFromEnum(self.level)) return;
 
         var buf: [4096]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buf);
-        const writer = fbs.writer();
+        var writer = std.Io.Writer.fixed(&buf);
 
         const ts = std.time.timestamp();
-        const ns = std.time.nanoTimestamp();
+        const ns = time.nanoTimestamp();
         const ms: i64 = (ns % 1_000_000_000) / 1_000_000;
 
         // Format ISO8601 timestamp with milliseconds
         var ts_buf: [30]u8 = undefined;
-        var ts_fbs = std.io.fixedBufferStream(&ts_buf);
-        const ts_writer = ts_fbs.writer();
+        var ts_writer = std.Io.Writer.fixed(&ts_buf);
 
         const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(ts) };
         const day_seconds = epoch.getDaySeconds();
@@ -84,7 +89,7 @@ pub const Logger = struct {
             @as(i64, @intCast(ms)),
         }) catch return;
 
-        const ts_str = ts_fbs.getWritten();
+        const ts_str = ts_writer.buffered();
 
         switch (self.format) {
             .json => {
@@ -101,13 +106,13 @@ pub const Logger = struct {
             },
         }
 
-        const output = fbs.getWritten();
-        _ = std.fs.File.stderr().writeAll(output) catch return;
+        const output = writer.buffered();
+        std.Io.File.stderr().writeStreamingAll(io_mod.io(), output) catch return;
     }
 };
 
 fn levelFromEnv() Level {
-    const val = std.posix.getenv("AERON_LOG_LEVEL") orelse return .info;
+    const val = getenv("AERON_LOG_LEVEL") orelse return .info;
     if (std.mem.eql(u8, val, "trace")) return .trace;
     if (std.mem.eql(u8, val, "debug")) return .debug;
     if (std.mem.eql(u8, val, "info")) return .info;
@@ -117,7 +122,7 @@ fn levelFromEnv() Level {
 }
 
 fn formatFromEnv() Format {
-    const val = std.posix.getenv("AERON_LOG_FORMAT") orelse return .json;
+    const val = getenv("AERON_LOG_FORMAT") orelse return .json;
     if (std.mem.eql(u8, val, "text")) return .text;
     return .json;
 }
@@ -130,7 +135,7 @@ const testing = std.testing;
 
 test "levelFromEnv defaults to info" {
     // Clear env if set
-    _ = std.posix.getenv("AERON_LOG_LEVEL");
+    _ = getenv("AERON_LOG_LEVEL");
     const level = levelFromEnv();
     try testing.expectEqual(Level.info, level);
 }

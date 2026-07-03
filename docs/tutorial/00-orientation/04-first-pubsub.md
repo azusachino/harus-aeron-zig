@@ -4,6 +4,14 @@ This chapter walks through a concrete pub/sub exchange — not just the API, but
 happens at every layer from the function call to the UDP socket. By the end you will
 have a map you can cross-reference as you implement each component in later chapters.
 
+!!! abstract "What you'll build"
+    A complete mental map of the pub/sub exchange:
+
+    - The exact steps that happen inside `offer()` and `poll()`
+    - How the log buffer changes as frames are written and sent
+    - The zero-copy handoff from kernel to subscriber
+    - How to navigate git tags for reference solutions
+
 ## Running the Demo
 
 Start the media driver in one terminal:
@@ -29,7 +37,45 @@ You should see throughput metrics printed every second.
 Assume the channel and stream have already been negotiated with the driver and the
 `Publication` object holds a memory-mapped view of the log buffer.
 
-### Step 1 — Claim space in the term
+!!! info "Five-step journey from offer() to poll()"
+
+    ```mermaid
+    sequenceDiagram
+        participant Pub as Publisher
+        participant TA as TermAppender
+        participant LogBuf as Log Buffer<br/>term[active]
+        participant Sender as Sender Thread
+        participant UDP as UDP Network
+        participant Receiver as Receiver Thread
+        participant ImageBuf as Image Buffer
+        participant TR as TermReader
+        participant Sub as Subscriber
+
+        Pub->>TA: 1. offer(msg)
+        TA->>LogBuf: atomic tail increment<br/>claims N bytes
+        TA->>LogBuf: write header fields
+        TA->>LogBuf: write payload
+        TA->>LogBuf: write frame_length<br/>release store
+        
+        Sender->>LogBuf: 2. scan from last-sent to tail
+        LogBuf->>Sender: frame_length > 0<br/>frame is complete
+        Sender->>UDP: 3. sendmsg() zero-copy<br/>kernel reads shared memory
+        
+        UDP->>Receiver: 4. recvmsg() datagram
+        Receiver->>Receiver: validate header
+        Receiver->>ImageBuf: write frame at offset
+        Receiver->>ImageBuf: update position counter
+        
+        Sub->>TR: 5. poll(handler, limit)
+        TR->>ImageBuf: read from current position
+        ImageBuf->>TR: frame data
+        TR->>Sub: call handler(buffer, offset, length)
+        TR->>ImageBuf: advance position
+    ```
+
+### Step-by-step breakdown
+
+**Step 1 — Claim space in the term**
 
 ```zig
 // Inside Publication.offer()
@@ -41,7 +87,7 @@ const result = try self.term_appender.appendFrame(self.term_buffer, msg);
 claimed. If the offset would exceed the term length, the publisher wraps to the next
 term and returns `ADMIN_ACTION`.
 
-### Step 2 — Write the frame
+**Step 2 — Write the frame**
 
 The header is written first (`term_offset`, `session_id`, `stream_id`, `term_id`,
 `flags`). Then the payload is copied into the term at `offset + DataHeader.LENGTH`.
@@ -62,7 +108,7 @@ offset →  ┌─────────────────────�
           └──────────────────────────────────────┘
 ```
 
-### Step 3 — Sender transmits
+**Step 3 — Sender transmits**
 
 On the Sender's next duty cycle, it scans the active term from the last-sent position
 to the current tail. For each frame where `frame_length > 0` (meaning the publisher
@@ -70,14 +116,14 @@ finished writing it), the Sender calls `sendmsg()` with the log buffer memory di
 as the scatter-gather I/O vector. This is the zero-copy path: the kernel reads from
 shared memory without an intermediate copy.
 
-### Step 4 — Receiver writes to the image
+**Step 4 — Receiver writes to the image**
 
 The remote Receiver's `recvmsg()` call returns the frame. The Receiver validates the
 header (version, frame type, checksum), looks up the matching `Image` by session ID,
 and writes the frame into the image's log buffer at the term offset indicated by the
 DATA frame header. It then advances the receiver position counter.
 
-### Step 5 — poll() delivers the message
+**Step 5 — poll() delivers the message**
 
 ```zig
 // Inside Subscription.poll()
@@ -111,47 +157,45 @@ is still being written. The publisher writes it last, with a release store. The 
 reads it with an acquire load. This is the only synchronization point between publisher
 and Sender on the hot path.
 
-## How to Use the Chapter Checkpoints
+!!! tip "How to Use the Chapter Checkpoints"
+    Each chapter in Parts 1–4 has a corresponding git tag:
 
-Each chapter in Parts 1–4 has a corresponding git tag:
+    ```
+    chapter-1.1-frame-codec
+    chapter-1.2-ring-buffer
+    ...
+    chapter-4.3-integration-tests
+    ```
 
-```
-chapter-1.1-frame-codec
-chapter-1.2-ring-buffer
-...
-chapter-4.3-integration-tests
-```
+    If you are stuck on an implementation, check out the reference solution:
 
-If you are stuck on an implementation, check out the reference solution:
+    ```bash
+    git diff chapter-1.1-frame-codec -- src/protocol/frame.zig
+    ```
 
-```bash
-git diff chapter-1.1-frame-codec -- src/protocol/frame.zig
-```
+    This shows the difference between your current working tree and the reference for that
+    chapter's target file. You can check out the full reference solution with:
 
-This shows the difference between your current working tree and the reference for that
-chapter's target file. You can check out the full reference solution with:
+    ```bash
+    git checkout chapter-1.1-frame-codec -- src/protocol/frame.zig
+    ```
 
-```bash
-git checkout chapter-1.1-frame-codec -- src/protocol/frame.zig
-```
+    Reset to your own working state with:
 
-Reset to your own working state with:
+    ```bash
+    git checkout HEAD -- src/protocol/frame.zig
+    ```
 
-```bash
-git checkout HEAD -- src/protocol/frame.zig
-```
+!!! abstract "What You Will Build, Part by Part"
+    | Part | What you build | Milestone |
+    |------|---------------|-----------|
+    | 0 | Orientation (this) | Mental model |
+    | 1 | Frame codec, ring buffer, broadcast, counters, log buffer | All primitives pass tests |
+    | 2 | TermAppender, TermReader, fragment assembly | Messages flow through log buffer |
+    | 3 | Sender, Receiver, Conductor, MediaDriver | Driver boots and sends real UDP |
+    | 4 | Publication, Subscription, Aeron client | Full pub/sub in Zig, wire-compatible with Java Aeron |
 
-## What You Will Build, Part by Part
-
-| Part | What you build | Milestone |
-|------|---------------|-----------|
-| 0 | Orientation (this) | Mental model |
-| 1 | Frame codec, ring buffer, broadcast, counters, log buffer | All primitives pass tests |
-| 2 | TermAppender, TermReader, fragment assembly | Messages flow through log buffer |
-| 3 | Sender, Receiver, Conductor, MediaDriver | Driver boots and sends real UDP |
-| 4 | Publication, Subscription, Aeron client | Full pub/sub in Zig, wire-compatible with Java Aeron |
-
-At the end of Part 4, your implementation will exchange messages with an unmodified
-Java Aeron client over UDP. That is the definition of "done" for Phase 1.
+    At the end of Part 4, your implementation will exchange messages with an unmodified
+    Java Aeron client over UDP. That is the definition of "done" for Phase 1.
 
 Continue to Part 1, Chapter 1: [Frame Codec](../01-foundations/01-frame-codec.md).
