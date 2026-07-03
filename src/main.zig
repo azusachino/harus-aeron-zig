@@ -45,7 +45,8 @@ pub fn main(init: std.process.Init) !void {
             if (opts.term_buffer_length) |v| ctx.term_buffer_length = v;
             if (opts.mtu_length) |v| ctx.mtu_length = v;
 
-            const idle_mod = @import("ipc/idle_strategy.zig");
+            const agrona = @import("agrona");
+            const idle_mod = agrona.idle_strategy;
             if (std.mem.eql(u8, opts.idle_strategy, "busy")) {
                 ctx.conductor_idle_strategy = idle_mod.IdleStrategy.initBusySpin();
                 ctx.sender_idle_strategy = idle_mod.IdleStrategy.initBusySpin();

@@ -478,3 +478,51 @@ test "broadcast: sendOperationSuccess" {
     try std.testing.expectEqual(@as(i32, 8), rx.length());
     try std.testing.expectEqual(correlation_id, std.mem.readInt(i64, rx.buffer()[0..8], .little));
 }
+
+test "java-compat: transmit record header byte layout" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var tx = try BroadcastTransmitter.init(allocator, 256);
+    defer tx.deinit(allocator);
+
+    const payload = [_]u8{ 0x01, 0x02, 0x03, 0x04 };
+    try tx.transmit(0x0F07, &payload);
+
+    const rec_len = std.mem.readInt(i32, tx.full_buffer[0..4], .little);
+    const rec_type = std.mem.readInt(i32, tx.full_buffer[4..8], .little);
+    try std.testing.expectEqual(@as(i32, @intCast(RecordDescriptor.HEADER_LENGTH + payload.len)), rec_len);
+    try std.testing.expectEqual(@as(i32, 0x0F07), rec_type);
+    try std.testing.expectEqualSlices(u8, &payload, tx.full_buffer[8..12]);
+}
+
+test "java-compat: ON_SUBSCRIPTION_READY payload layout" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var tx = try BroadcastTransmitter.init(allocator, 256);
+    defer tx.deinit(allocator);
+
+    var payload = [_]u8{0} ** 12;
+    const test_corr_id: u64 = 0xDEADBEEFCAFEBABE;
+    std.mem.writeInt(u64, payload[0..8], test_corr_id, .little);
+    std.mem.writeInt(i32, payload[8..12], 42, .little);
+    try tx.transmit(0x0F07, &payload);
+
+    const corr_id = std.mem.readInt(u64, tx.full_buffer[8..16], .little);
+    const ch_status = std.mem.readInt(i32, tx.full_buffer[16..20], .little);
+    try std.testing.expectEqual(test_corr_id, corr_id);
+    try std.testing.expectEqual(@as(i32, 42), ch_status);
+}
+
+test "java-compat: TRAILER_LENGTH is 128 bytes" {
+    try std.testing.expectEqual(@as(usize, 128), TRAILER_LENGTH);
+}
+
+test "java-compat: broadcast descriptor field offsets" {
+    try std.testing.expectEqual(@as(usize, 0), TAIL_INTENT_COUNTER_OFFSET);
+    try std.testing.expectEqual(@as(usize, 8), TAIL_COUNTER_OFFSET);
+    try std.testing.expectEqual(@as(usize, 16), LATEST_COUNTER_OFFSET);
+}

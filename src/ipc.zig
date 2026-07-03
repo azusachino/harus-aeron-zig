@@ -2,7 +2,9 @@
 // - ring_buffer: client→driver commands
 // - broadcast: driver→client notifications
 
-pub const ring_buffer = @import("ipc/ring_buffer.zig");
-pub const broadcast = @import("ipc/broadcast.zig");
-pub const counters = @import("ipc/counters.zig");
-pub const idle_strategy = @import("ipc/idle_strategy.zig");
+const agrona = @import("agrona");
+
+pub const ring_buffer = agrona.ring_buffer;
+pub const broadcast = agrona.broadcast;
+pub const counters = agrona.counters;
+pub const idle_strategy = agrona.idle_strategy;

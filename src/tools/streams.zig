@@ -2,7 +2,8 @@
 // Shows pub limit, sender position, receiver HWM, and subscriber position grouped by stream.
 const std = @import("std");
 const cnc_mod = @import("../cnc.zig");
-const counters_mod = @import("../ipc/counters.zig");
+const agrona = @import("agrona");
+const counters_mod = agrona.counters;
 const io_mod = @import("../io.zig");
 
 const StreamPositions = struct {

@@ -437,3 +437,46 @@ test "wrap-around encodes padding record with length then padding type" {
     try std.testing.expectEqual(@as(i32, 2), std.mem.readInt(i32, buf[4..8], .little));
     try std.testing.expectEqualSlices(u8, "012345678", buf[8..17]);
 }
+
+test "java-compat: ADD_SUBSCRIPTION record byte layout" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
+    @memset(buf, 0);
+
+    var rb = ManyToOneRingBuffer.init(buf);
+    const payload = [_]u8{ 0xAA, 0xBB, 0xCC, 0xDD };
+    try std.testing.expect(rb.write(0x04, &payload));
+
+    const expected_len: i32 = @intCast(RecordDescriptor.HEADER_LENGTH + payload.len);
+    const actual_len = std.mem.readInt(i32, buf[0..4], .little);
+    try std.testing.expectEqual(expected_len, actual_len);
+
+    const actual_type = std.mem.readInt(i32, buf[4..8], .little);
+    try std.testing.expectEqual(@as(i32, 0x04), actual_type);
+
+    try std.testing.expectEqualSlices(u8, &payload, buf[8..12]);
+}
+
+test "java-compat: metadata offsets match Agrona trailer layout" {
+    try std.testing.expectEqual(@as(usize, 0), TAIL_POSITION_OFFSET);
+    try std.testing.expectEqual(@as(usize, 128), HEAD_CACHE_POSITION_OFFSET);
+    try std.testing.expectEqual(@as(usize, 256), HEAD_POSITION_OFFSET);
+    try std.testing.expectEqual(@as(usize, 384), CORRELATION_COUNTER_OFFSET);
+    try std.testing.expectEqual(@as(usize, 640), CONSUMER_HEARTBEAT_OFFSET);
+    try std.testing.expectEqual(@as(usize, 768), METADATA_LENGTH);
+}
+
+test "java-compat: tail advances by aligned record length after write" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const buf = try arena.allocator().alignedAlloc(u8, .@"8", 1024);
+    @memset(buf, 0);
+
+    var rb = ManyToOneRingBuffer.init(buf);
+    try std.testing.expect(rb.write(1, "abcd"));
+    const tail = std.mem.readInt(i64, buf[rb.capacity + TAIL_POSITION_OFFSET ..][0..8], .little);
+    try std.testing.expectEqual(@as(i64, 16), tail);
+}

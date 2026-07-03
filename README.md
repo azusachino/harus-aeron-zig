@@ -9,11 +9,11 @@ Aeron is a high-performance messaging system built on UDP. It delivers reliable,
 unicast and multicast transport via memory-mapped log buffers and NAK-based retransmission —
 no brokers, no overhead, just bytes and math.
 
-## Project Status: v0.1.0 (Work in Progress)
+## Project Status: v1.0.0-rc1
 
-`harus-aeron-zig` is a **work-in-progress Zig reimplementation of the Aeron messaging protocol**, targeting wire compatibility with [aeron-io/aeron](https://github.com/aeron-io/aeron).
+`harus-aeron-zig` is a **Zig reimplementation of the Aeron messaging protocol**, targeting wire compatibility with [aeron-io/aeron](https://github.com/aeron-io/aeron).
 Current parity: protocol frames (100%), archive protocol (100%), IPC (95%), cluster (90%), URI parser (95%).
-Not yet production-ready — gaps remain before claiming full upstream compatibility.
+269 tests pass. Release candidate — interop smoke validation ongoing before final 1.0.0 tag.
 
 - **Phase 1-4**: Media Driver (Conductor, Sender, Receiver agents) + Client API (Publication/Subscription)
 - **Phase 5**: Archive (recording, replay, catalog persistence)
@@ -37,7 +37,7 @@ Two things at once:
 - **Client Library**: Publication and Subscription APIs with zero-copy data path.
 - **Archive**: Record and replay Aeron streams with persistent catalogs.
 - **Cluster**: Raft-based consensus for fault-tolerant state machine replication.
-- **Interoperability**: Interop test infrastructure included (`make interop`) — wire compatibility is a work in progress.
+- **Interoperability**: Interop test infrastructure included (`make interop`) — interop smoke validation ongoing for v1.0.0 final.
 
 ## Course Roadmap
 

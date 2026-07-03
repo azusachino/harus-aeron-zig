@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.0.0-rc2] - 2026-04-14
+
+### Added
+- **Cluster**: Implemented passive members tracking and dynamic membership updates via `AddPassiveMember` (SBE id=70).
+- **Cluster**: Implemented parsing of static cluster configuration string `clusterMemberEndpoints`.
+- **Cluster**: Updated `handleQueryMemberList` to populate `ClusterMembersExtendedResponse` (id=43) with both active and passive members.
+- **Stress**: Added Receiver invalid-packet soak tests to verify guard constraints.
+- **Stress**: Added Pub/sub churn soak tests to verify clean additions and removals.
+
+### Fixed
+- **Cluster**: Fixed memory leaks during conductor deinit involving `passive_peers` strings.
+
 ## [1.0.0] - 2026-04-11 — Test completeness and release gate
 
 ### Added

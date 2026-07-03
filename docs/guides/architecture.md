@@ -168,6 +168,7 @@ Frame types: DATA(0x01), SETUP(0x03), STATUS(0x04), NAK(0x05), RTT(0x0B)
 
 ## Phase History
 
-- **v0.1.0 (2026-03-25)**: Media Driver, Archive, and Cluster implemented. Tutorial course complete (31 chapters). Upstream parity ongoing — not yet production-ready.
-- **v0.5.0**: Initial preview. Basic IPC pub/sub working.
+- **v1.0.0-rc1 (2026-04-11)**: Release candidate. 269 tests pass (protocol, IPC, log buffer, driver, archive, cluster, soak). Protocol frames 100%, archive 100%, IPC 95%, cluster 90%, URI parser 95%. Release audit in `docs/audits/1.0.0-release-audit.md`.
+- **v0.2.0 (2026-03-25)**: Upstream test parity and CI. Scenario testing framework, GitHub Actions matrix, interop smoke gate, wire protocol compliance fixes.
+- **v0.1.0**: Initial implementation. Media Driver, Archive, and Cluster implemented. Tutorial course complete (31 chapters).
 

@@ -3,7 +3,8 @@
 // Reference: https://github.com/aeron-io/aeron
 const std = @import("std");
 const io_mod = @import("io.zig");
-const counters_mod = @import("ipc/counters.zig");
+const agrona = @import("agrona");
+const counters_mod = agrona.counters;
 const driver_cnc = @import("driver/cnc.zig");
 
 /// Metadata read from the CnC file header.
