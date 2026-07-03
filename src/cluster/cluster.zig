@@ -170,6 +170,37 @@ pub const ConsensusModule = struct {
         try self.election.onDiscoveryMessage(member_id);
     }
 
+    /// Ingest a member-list response returned by the leader (or a peer) during
+    /// startup discovery. Any previously unknown member is added to both the
+    /// election roster (for quorum) and the conductor's peer table with its
+    /// endpoints (for networking). This is how a node started without static
+    /// cluster config joins an existing cluster.
+    /// Reference: io.aeron.cluster.ClusterMember and Election member canvassing.
+    pub fn onMemberListResponse(self: *ConsensusModule, response: *const conductor_mod.ClusterMembersResponse) !void {
+        try self.ingestMembers(response.active_members);
+        try self.ingestMembers(response.passive_members);
+    }
+
+    /// Add each non-self member from a discovered list to the election roster
+    /// and the conductor peer table (duplicating the borrowed endpoint strings).
+    fn ingestMembers(self: *ConsensusModule, members: []const conductor_mod.ActiveMember) !void {
+        for (members) |member| {
+            if (member.member_id == self.ctx.member_id) continue;
+            try self.election.onDiscoveryMessage(member.member_id);
+            try self.conductor.addPeer(.{
+                .leadership_term_id = member.leadership_term_id,
+                .log_position = member.log_position,
+                .time_of_last_append_ns = member.time_of_last_append_ns,
+                .member_id = member.member_id,
+                .ingress_endpoint = try self.allocator.dupe(u8, member.ingress_endpoint),
+                .consensus_endpoint = try self.allocator.dupe(u8, member.consensus_endpoint),
+                .log_endpoint = try self.allocator.dupe(u8, member.log_endpoint),
+                .catchup_endpoint = try self.allocator.dupe(u8, member.catchup_endpoint),
+                .archive_endpoint = try self.allocator.dupe(u8, member.archive_endpoint),
+            });
+        }
+    }
+
     /// Refresh follower state from the current leader without changing local member identity.
     pub fn catchUpFromLeader(self: *ConsensusModule, leader: *const ConsensusModule, now_ns: i64) !void {
         self.election.onLeaderHeartbeat(
@@ -645,6 +676,105 @@ test "ConsensusModule dynamic member discovery" {
     try std.testing.expectEqual(@as(usize, 3), module.election.cluster_members.items.len);
     try std.testing.expectEqual(@as(i32, 1), module.election.cluster_members.items[1].member_id);
     try std.testing.expectEqual(@as(i32, 2), module.election.cluster_members.items[2].member_id);
+}
+
+test "ConsensusModule onMemberListResponse discovers peers with endpoints" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // A node (member 3) started without static cluster config.
+    var joiner = try ConsensusModule.init(allocator, .{ .member_id = 3 });
+    defer joiner.deinit();
+    try std.testing.expectEqual(@as(usize, 0), joiner.conductor.peers.items.len);
+
+    // A member-list response as the leader would return it: members 0, 1, 2.
+    var active = try allocator.alloc(conductor_mod.ActiveMember, 3);
+    for (0..3) |i| {
+        active[i] = .{
+            .leadership_term_id = 2,
+            .log_position = 100,
+            .time_of_last_append_ns = 0,
+            .member_id = @intCast(i),
+            .ingress_endpoint = try std.fmt.allocPrint(allocator, "host{d}:9010", .{i}),
+            .consensus_endpoint = try std.fmt.allocPrint(allocator, "host{d}:9020", .{i}),
+            .log_endpoint = try std.fmt.allocPrint(allocator, "host{d}:9030", .{i}),
+            .catchup_endpoint = try std.fmt.allocPrint(allocator, "host{d}:9040", .{i}),
+            .archive_endpoint = try std.fmt.allocPrint(allocator, "host{d}:9050", .{i}),
+        };
+    }
+    var response = conductor_mod.ClusterMembersResponse{
+        .correlation_id = 1,
+        .current_time_ns = 0,
+        .leader_member_id = 0,
+        .member_id = 0,
+        .active_members = active,
+        .passive_members = try allocator.alloc(conductor_mod.ActiveMember, 0),
+    };
+    defer response.deinit(allocator);
+
+    try joiner.onMemberListResponse(&response);
+
+    // All three peers registered with their endpoints; election roster grew.
+    try std.testing.expectEqual(@as(usize, 3), joiner.conductor.peers.items.len);
+    try std.testing.expectEqual(@as(usize, 3), joiner.election.cluster_members.items.len);
+
+    var consensus_1: ?[]const u8 = null;
+    for (joiner.conductor.peers.items) |peer| {
+        if (peer.member_id == 1) consensus_1 = peer.consensus_endpoint;
+    }
+    try std.testing.expect(consensus_1 != null);
+    try std.testing.expectEqualSlices(u8, "host1:9020", consensus_1.?);
+}
+
+test "ConsensusModule onMemberListResponse skips self and is idempotent" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var joiner = try ConsensusModule.init(allocator, .{ .member_id = 1 });
+    defer joiner.deinit();
+
+    var active = try allocator.alloc(conductor_mod.ActiveMember, 2);
+    active[0] = .{
+        .leadership_term_id = 0,
+        .log_position = 0,
+        .time_of_last_append_ns = 0,
+        .member_id = 0,
+        .ingress_endpoint = try allocator.dupe(u8, "host0:9010"),
+        .consensus_endpoint = try allocator.dupe(u8, "host0:9020"),
+        .log_endpoint = try allocator.dupe(u8, "host0:9030"),
+        .catchup_endpoint = try allocator.dupe(u8, "host0:9040"),
+        .archive_endpoint = try allocator.dupe(u8, "host0:9050"),
+    };
+    // Self entry must be ignored.
+    active[1] = .{
+        .leadership_term_id = 0,
+        .log_position = 0,
+        .time_of_last_append_ns = 0,
+        .member_id = 1,
+        .ingress_endpoint = try allocator.dupe(u8, "host1:9010"),
+        .consensus_endpoint = try allocator.dupe(u8, "host1:9020"),
+        .log_endpoint = try allocator.dupe(u8, "host1:9030"),
+        .catchup_endpoint = try allocator.dupe(u8, "host1:9040"),
+        .archive_endpoint = try allocator.dupe(u8, "host1:9050"),
+    };
+    var response = conductor_mod.ClusterMembersResponse{
+        .correlation_id = 1,
+        .current_time_ns = 0,
+        .leader_member_id = 0,
+        .member_id = 0,
+        .active_members = active,
+        .passive_members = try allocator.alloc(conductor_mod.ActiveMember, 0),
+    };
+    defer response.deinit(allocator);
+
+    // Applying twice must not duplicate peer 0 or add self.
+    try joiner.onMemberListResponse(&response);
+    try joiner.onMemberListResponse(&response);
+
+    try std.testing.expectEqual(@as(usize, 1), joiner.conductor.peers.items.len);
+    try std.testing.expectEqual(@as(i32, 0), joiner.conductor.peers.items[0].member_id);
 }
 
 test "ConsensusModule state round trip survives restart" {

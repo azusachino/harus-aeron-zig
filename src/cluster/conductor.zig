@@ -134,6 +134,7 @@ pub const Command = union(enum) {
     snapshot_begin: SnapshotBeginCmd,
     snapshot_end: SnapshotEndCmd,
     add_passive_member: AddPassiveMemberCmd,
+    query_member_list: QueryMemberList,
     admin_catchup: struct {
         leader_state: *const ClusterConductor,
     },
@@ -373,6 +374,9 @@ pub const ClusterConductor = struct {
             },
             .add_passive_member => |add_passive_cmd| {
                 try self.handleAddPassiveMember(add_passive_cmd);
+            },
+            .query_member_list => |query_cmd| {
+                try self.handleQueryMemberList(query_cmd);
             },
             .admin_catchup => |catchup_cmd| {
                 try self.catchUpFromLeader(catchup_cmd.leader_state);
@@ -1528,6 +1532,30 @@ test "handleQueryMemberList returns self in single-node cluster" {
     }.handle);
     try std.testing.expectEqual(@as(usize, 1), Capture.active_count);
     try std.testing.expectEqual(@as(i32, 0), Capture.first_member_id);
+}
+
+test "query_member_list command dispatches through doWork" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var conductor = ClusterConductor.init(allocator, 0);
+    defer conductor.deinit();
+    conductor.becomeLeader(1);
+
+    try conductor.enqueueCommand(.{ .query_member_list = .{ .correlation_id = 7, .member_id = 0, ._padding = 0 } });
+    try std.testing.expectEqual(@as(i32, 1), try conductor.doWork());
+
+    const Capture = struct {
+        pub var count: usize = 0;
+    };
+    Capture.count = 0;
+    _ = conductor.pollResponses(&struct {
+        pub fn handle(resp: *const Response) void {
+            if (resp.* == .member_list) Capture.count = resp.member_list.active_members.len;
+        }
+    }.handle);
+    try std.testing.expectEqual(@as(usize, 1), Capture.count);
 }
 
 test "handleQueryMemberList returns all members in 3-node cluster" {
