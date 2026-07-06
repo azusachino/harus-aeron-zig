@@ -169,6 +169,7 @@ nav:
   - Architecture:
       - Overview: guides/architecture.md
       - Setup: guides/setup.md
+      - User Guide: guides/user-guide.md
   - Reference:
       - Plan: plan.md
       - Course Gap Report: course/lesson-gap-report.md
