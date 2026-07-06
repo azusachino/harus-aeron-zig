@@ -290,32 +290,25 @@ Notice:
 - `doWork()` runs the agents sequentially: election → conductor → replication
 - `getSnapshot()` captures state for testing and crash recovery
 
-## Exercise (Prose)
+## Exercise
 
-!!! question "Exercise: Trace a 3-node cluster leader failover"
-    Describe what happens during a 3-node cluster leader failover, step by step.
+!!! question "Exercise: Implement ConsensusModule.doWork"
+    Implement `doWork` to drive the election state machine and update the conductor's role.
 
-    Scenario:
-    - 3-node cluster: A (leader, term=5), B (follower, term=5), C (follower, term=5)
-    - A crashes at time T=0
-    - B's election timeout is 1.1 seconds; C's is 1.5 seconds
-    - All nodes have identical log state (position=100, all committed)
+    Open `tutorial/cluster/cluster.zig` and implement:
 
-    Write out the sequence of events:
+    ```zig
+    /// Run one duty cycle of the consensus module.
+    /// Drives election, then conductor. Returns total work count.
+    pub fn doWork(self: *ConsensusModule, now_ns: i64) !i32 {
+        // TODO: implement
+        @panic("TODO: implement ConsensusModule.doWork");
+    }
+    ```
 
-    1. **T=0**: A crashes. B and C don't know yet; they're still in `follower_ready`.
-    2. **T=1.1s**: B's election timer fires. B transitions to `canvass`, then immediately to `candidate_ballot`.
-    3. B increments its candidate term to 6 and sends `RequestVote` to A and C.
-    4. C hasn't crashed; it receives B's `RequestVote(term=6)`. C's term is 5, so it votes for B.
-    5. A doesn't respond (it's down).
-    6. B gets 2 votes (itself + C). Quorum reached. B transitions to `leader_ready`.
-    7. **T=1.5s**: C's timer fires. But C has already seen B's `NewLeadershipTerm(term=6, leader_id=B)`, so it goes to `follower_ready`.
-    8. New leader is B. Clients reconnect to B.
-
-    - [ ] Timeline includes all 8 steps (or similar)
-    - [ ] Explains why the cluster recovers automatically (quorum election)
-    - [ ] Explains why data isn't lost (B already had the committed entries)
-    - [ ] Notes that A restarting will receive `NewLeadershipTerm` and catch up via log replication
+    - [ ] `doWork` method is implemented.
+    - [ ] Stub panics with `TODO` until implemented.
+    - [ ] `make tutorial-check` compile-checks successfully.
 
 ## Check Your Work
 

@@ -185,22 +185,18 @@ The conductor owns the Catalog, Recorder, and Replayer. It is responsible for:
 4. Enqueueing responses matched by correlation_id.
 
 !!! question "Exercise"
-    Implement the `handleStartRecording` dispatch path in `tutorial/archive/conductor.zig`.
+    Implement the `onStartRecording` helper in `tutorial/archive/conductor.zig`.
 
     Your task:
-    1. Extract parameters from `StartRecordingCmd` (session_id, stream_id, channel, source_identity).
-    2. Call `self.catalog.addNewRecording()` with those parameters. Capture the returned `recording_id`.
-    3. Call `self.recorder.startRecording()` to create a recording session.
-    4. Enqueue a `RecordingStarted` response with the correlation_id and recording_id.
+    1. Implement the `onStartRecording(self: *ArchiveConductor, channel: []const u8, stream_id: i32) void` helper.
+    2. This method acts as the stub entry point for initiating a recording on the specified channel and stream ID.
 
     Acceptance criteria:
-    - [ ] The catalog entry is created before the recorder session
-    - [ ] The recording_id from the catalog is passed to the recorder and echoed back in the response
-    - [ ] If anything fails, an error response is sent instead
-    - [ ] The response is enqueued, not directly published
+    - [ ] `onStartRecording` accepts a channel and stream_id.
+    - [ ] Calling it panics with the `TODO: implement` message until solved.
+    - [ ] `make tutorial-check` compile-checks successfully.
 
-    Hint: Use `self.catalog.addNewRecording()` to create the entry, then `self.recorder.startRecording()` to
-    subscribe. Both operations must succeed before enqueueing the success response.
+    Hint: In this exercise, the function signature is simplified to focus on how the conductor transitions to initiating a recording.
 
 ```bash
 cd /Users/azusachino/Projects/project-github/harus-aeron-zig

@@ -340,32 +340,22 @@ Notice:
 
 ## Exercise
 
-!!! question "Exercise: Implement onSessionConnect with role-aware routing"
-    Implement `onSessionConnect`: validate request, create session, send SessionEvent(ok).
+!!! question "Exercise: Implement ClusterConductor.serializeState"
+    Implement `serializeState`: serialize cluster sessions, terms, IDs, and committed log entries into a snapshot.
 
     Open `tutorial/cluster/conductor.zig` and implement:
 
     ```zig
-    /// Handle a client connection request.
-    /// If leader: create session and send SessionEvent(ok).
-    /// If follower: send SessionEvent(redirect).
-    pub fn onSessionConnect(
-        self: *ClusterConductor,
-        correlation_id: i64,
-        response_stream_id: i32,
-        response_channel: []const u8,
-    ) !void {
+    /// Serialize durable recovery state (role, term/session ids, sessions, log) into a snapshot blob.
+    pub fn serializeState(self: *const ClusterConductor, allocator: std.mem.Allocator) ![]u8 {
         // TODO: implement
-        @panic("TODO: onSessionConnect");
+        @panic("TODO: implement ClusterConductor.serializeState");
     }
     ```
 
-    - [ ] If `role == .follower`, return early (don't process)
-    - [ ] If `role == .leader`: allocate a new `cluster_session_id` (increment `next_session_id`)
-    - [ ] Create a `SessionState` with the response channel and store in `sessions` map
-    - [ ] Write a test: create a leader conductor, connect a session, verify the session exists
-
-    Compare against `src/cluster/conductor.zig`.
+    - [ ] `serializeState` encodes the current leadership term, session IDs, and commits.
+    - [ ] Stub panics with `TODO` until implemented.
+    - [ ] `make tutorial-check` compile-checks successfully.
 
 ## Check Your Work
 

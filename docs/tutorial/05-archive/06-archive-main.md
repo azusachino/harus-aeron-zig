@@ -198,19 +198,17 @@ Let's walk through what happens when you start the archive:
 
 The entire system is driven by `doWork()` calls in a loop. No threads (unless you add them), no callbacks (except subscription.poll handlers). Just a simple duty cycle.
 
-!!! question "Exercise (Prose)"
-    Describe the startup sequence for the archive when a client sends:
-    1. `StartRecordingRequest(channel="aeron:udp?endpoint=localhost:40123", stream_id=1, correlation_id=100)`
-    2. Later, `ReplayRequest(recording_id=1, position=0, length=100000, replay_stream_id=2, correlation_id=101)`
+!!! question "Exercise"
+    Implement `ArchiveProxy.startRecording` in `tutorial/archive/archive.zig`.
 
-    Your answer should cover:
-    - How the Conductor receives and decodes each request.
-    - What the Recorder and Replayer do in response.
-    - When and how responses are sent back.
-    - What files are created and where.
-    - How a subscriber to the replay stream would see the data.
+    Your task:
+    1. Implement the `startRecording(self: *ArchiveProxy, correlation_id: i64, stream_id: i32, channel: []const u8, source_identity: []const u8) !void` method.
+    2. Encode a start recording command and enqueue it toward the archive conductor.
 
-    Keep it to ~200 words. The goal is to verify you understand the entire system flow.
+    Acceptance criteria:
+    - [ ] `startRecording` method is implemented.
+    - [ ] Stub panics with `TODO` until implemented.
+    - [ ] `make tutorial-check` compile-checks successfully.
 
 ```bash
 cd /Users/azusachino/Projects/project-github/harus-aeron-zig
