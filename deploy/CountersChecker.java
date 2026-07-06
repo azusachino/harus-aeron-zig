@@ -17,6 +17,7 @@ import java.util.concurrent.TimeUnit;
 public final class CountersChecker
 {
     private static final long TIMEOUT_NS = TimeUnit.SECONDS.toNanos(5);
+    private static final int LOCAL_SOCKET_ADDRESS_STATUS_TYPE_ID = 14;
 
     static final class CounterSnapshot
     {
@@ -213,7 +214,8 @@ public final class CountersChecker
             typeId != AeronCounters.DRIVER_SUBSCRIBER_POSITION_TYPE_ID &&
             typeId != AeronCounters.DRIVER_RECEIVER_POS_TYPE_ID &&
             typeId != AeronCounters.DRIVER_SEND_CHANNEL_STATUS_TYPE_ID &&
-            typeId != AeronCounters.DRIVER_RECEIVE_CHANNEL_STATUS_TYPE_ID)
+            typeId != AeronCounters.DRIVER_RECEIVE_CHANNEL_STATUS_TYPE_ID &&
+            typeId != LOCAL_SOCKET_ADDRESS_STATUS_TYPE_ID)
         {
             throw new IllegalStateException(
                 "Unknown counter type: " + typeId + " for counter " + snap.counterId);

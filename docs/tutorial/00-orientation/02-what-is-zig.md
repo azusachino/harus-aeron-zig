@@ -11,18 +11,19 @@ models you already have.
 
 ## Zig's Core Philosophy
 
-!!! info "Three design rules"
-    Three rules govern almost every language decision:
-
-    1. **No hidden control flow.** There are no C++ constructors that run invisibly, no
-       implicit conversions that call user code, no exceptions that unwind the stack without
-       a visible `try`. If something might fail, the type says so.
-    2. **No hidden allocations.** A function that allocates heap memory must receive an
-       `Allocator` argument. If you call a function and it takes no allocator, it will not
-       allocate. This makes allocation visible and testable.
-    3. **Comptime over macros.** Instead of the C preprocessor or C++ templates, Zig has
-       `comptime` expressions and `comptime` function parameters. Types are values; generic
-       code is ordinary Zig code evaluated at compile time.
+> [!NOTE]
+> **Three design rules**
+> Three rules govern almost every language decision:
+>
+> 1. **No hidden control flow.** There are no C++ constructors that run invisibly, no
+>    implicit conversions that call user code, no exceptions that unwind the stack without
+>    a visible `try`. If something might fail, the type says so.
+> 2. **No hidden allocations.** A function that allocates heap memory must receive an
+>    `Allocator` argument. If you call a function and it takes no allocator, it will not
+>    allocate. This makes allocation visible and testable.
+> 3. **Comptime over macros.** Instead of the C preprocessor or C++ templates, Zig has
+>    `comptime` expressions and `comptime` function parameters. Types are values; generic
+>    code is ordinary Zig code evaluated at compile time.
 
 ## Comparing Zig to Your Language
 
@@ -105,32 +106,35 @@ flowchart TD
     D --> F["Code continues"]
 ```
 
-!!! info "Try-catch and error propagation"
-    Error unions (`!T` = `T` or error) are the foundation of Zig's error handling. A function
-    that might fail declares its return type as `!ReturnType`. Callers use `try` to propagate
-    errors up the stack, or `catch` to handle them locally. `errdefer` runs cleanup code only
-    if the current scope returns an error — critical for resource management.
+> [!NOTE]
+> **Try-catch and error propagation**
+> Error unions (`!T` = `T` or error) are the foundation of Zig's error handling. A function
+> that might fail declares its return type as `!ReturnType`. Callers use `try` to propagate
+> errors up the stack, or `catch` to handle them locally. `errdefer` runs cleanup code only
+> if the current scope returns an error — critical for resource management.
 
-!!! abstract "Key Zig Concepts Used in This Codebase"
-    | Concept | Where we use it |
-    |---------|----------------|
-    | `extern struct` | Every wire-protocol frame type |
-    | `comptime @sizeOf` assertions | Size verification of all frame structs |
-    | `std.atomic.Value(i64)` | Term tail counters |
-    | Error unions (`!T`) | All fallible functions |
-    | `errdefer` | Resource cleanup in driver init |
-    | `*anyopaque` + fn pointer | Fragment handler callbacks |
-    | `std.Thread` | Conductor, Sender, Receiver threads |
-    | `std.posix.mmap` | Log buffer and IPC region allocation |
+> [!NOTE]
+> **Key Zig Concepts Used in This Codebase**
+> | Concept | Where we use it |
+> |---------|----------------|
+> | `extern struct` | Every wire-protocol frame type |
+> | `comptime @sizeOf` assertions | Size verification of all frame structs |
+> | `std.atomic.Value(i64)` | Term tail counters |
+> | Error unions (`!T`) | All fallible functions |
+> | `errdefer` | Resource cleanup in driver init |
+> | `*anyopaque` + fn pointer | Fragment handler callbacks |
+> | `std.Thread` | Conductor, Sender, Receiver threads |
+> | `std.posix.mmap` | Log buffer and IPC region allocation |
 
-!!! warning "Common Gotchas"
-    - **`ArrayList.append` takes an allocator**: `list.append(allocator, item)` — not
-      `list.append(item)` as you might expect.
-    - **Integer overflow is safety-checked in debug, wrapping in release.** Use
-      `+%` / `-%` / `*%` for explicit wrapping arithmetic.
-    - **`@alignCast` is required when casting `*anyopaque` to a typed pointer.** Forgetting
-      it will compile but may panic at runtime in safe modes.
-    - **`std.mem.alignForward`** is the right way to pad a length to an alignment boundary.
-      Do not write `(n + align - 1) & ~(align - 1)` by hand.
-    - **`defer` runs at scope exit, even on early return.** `errdefer` runs only on error
-      return. Use `defer` for unconditional cleanup, `errdefer` for rollback on failure.
+> [!WARNING]
+> **Common Gotchas**
+> - **`ArrayList.append` takes an allocator**: `list.append(allocator, item)` — not
+>   `list.append(item)` as you might expect.
+> - **Integer overflow is safety-checked in debug, wrapping in release.** Use
+>   `+%` / `-%` / `*%` for explicit wrapping arithmetic.
+> - **`@alignCast` is required when casting `*anyopaque` to a typed pointer.** Forgetting
+>   it will compile but may panic at runtime in safe modes.
+> - **`std.mem.alignForward`** is the right way to pad a length to an alignment boundary.
+>   Do not write `(n + align - 1) & ~(align - 1)` by hand.
+> - **`defer` runs at scope exit, even on early return.** `errdefer` runs only on error
+>   return. Use `defer` for unconditional cleanup, `errdefer` for rollback on failure.

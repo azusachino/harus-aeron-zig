@@ -1,6 +1,19 @@
 :root {
   --md-text-font: "Inter";
   --md-code-font: "JetBrains Mono";
+  
+  /* Hatsune Miku Theme Colors */
+  --md-primary-fg-color: #39C5BB;
+  --md-primary-fg-color--light: #67d6cd;
+  --md-primary-fg-color--dark: #2c9a92;
+  --md-accent-fg-color: #ff5e97;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #39C5BB;
+  --md-primary-fg-color--light: #67d6cd;
+  --md-primary-fg-color--dark: #2c9a92;
+  --md-accent-fg-color: #ff5e97;
 }
 
 .md-typeset h1 {

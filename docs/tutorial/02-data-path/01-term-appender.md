@@ -2,13 +2,14 @@
 
 **Source:** `src/logbuffer/term_appender.zig`
 
-!!! abstract "What you'll build"
-    A solid mental model of lock-free, thread-safe publication to a shared term buffer using atomic Compare-And-Swap (CAS):
-
-    - The `raw_tail` packing scheme: how a single 64-bit atomic word encodes both `term_id` and `term_offset`
-    - The CAS loop in `appendData`: why CAS + retry beats locks, and how to handle `.acq_rel` ordering
-    - Frame write ordering: why payload and header go down *before* `frame_length`, written last with a store-release
-    - The `AppendResult` union: explicit outcomes at the call site (ok, tripped, admin_action, padding_applied)
+> [!NOTE]
+> **What you'll build**
+> A solid mental model of lock-free, thread-safe publication to a shared term buffer using atomic Compare-And-Swap (CAS):
+>
+> - The `raw_tail` packing scheme: how a single 64-bit atomic word encodes both `term_id` and `term_offset`
+> - The CAS loop in `appendData`: why CAS + retry beats locks, and how to handle `.acq_rel` ordering
+> - Frame write ordering: why payload and header go down *before* `frame_length`, written last with a store-release
+> - The `AppendResult` union: explicit outcomes at the call site (ok, tripped, admin_action, padding_applied)
 
 ## Role
 
@@ -38,12 +39,13 @@ pub fn rawTailVolatile(self: *const TermAppender) i64 {
 }
 ```
 
-!!! info "Zig concept: atomic primitives"
-    `@atomicLoad` with `.acquire` ordering ensures that any writes dependent on
-    the loaded value happen-after the atomic load. `@cmpxchgStrong` atomically
-    compares and exchanges; on success it returns `null`, on failure it returns
-    the observed value. The `.acq_rel` ordering pairs with the subscriber's
-    `.acquire` load to enforce payload visibility.
+> [!NOTE]
+> **Zig concept: atomic primitives**
+> `@atomicLoad` with `.acquire` ordering ensures that any writes dependent on
+> the loaded value happen-after the atomic load. `@cmpxchgStrong` atomically
+> compares and exchanges; on success it returns `null`, on failure it returns
+> the observed value. The `.acq_rel` ordering pairs with the subscriber's
+> `.acquire` load to enforce payload visibility.
 
 ## The CAS Loop in appendData
 
@@ -98,10 +100,11 @@ flowchart TD
     J --> K["Return .ok with term_offset"]
 ```
 
-!!! tip "Why write frame_length last?"
-    The reader polls `frame_length` to detect committed frames. By writing it last,
-    a reader sees either 0 (uncommitted) or the complete frame length (committed).
-    No partial writes are observable — this is the reader contract.
+> [!TIP]
+> **Why write frame_length last?**
+> The reader polls `frame_length` to detect committed frames. By writing it last,
+> a reader sees either 0 (uncommitted) or the complete frame length (committed).
+> No partial writes are observable — this is the reader contract.
 
 
 
@@ -143,18 +146,19 @@ pub fn appendPadding(self: *TermAppender, _length: i32) AppendResult
 
 This CAS-advances `raw_tail` to exactly `term_length` and writes a `FrameType.padding` header covering the remaining bytes. The reader uses this to know it has consumed the entire term and should advance to the next partition.
 
-!!! info "The AppendResult union"
-    `AppendResult` is a tagged union that makes every outcome explicit at the
-    call site:
-
-    ```zig
-    pub const AppendResult = union(enum) {
-        ok: i32,          // term_offset where data was written
-        tripped,          // term full — rotation needed
-        admin_action,     // CAS failure — retry immediately
-        padding_applied,  // padding written — retry in next term
-    };
-    ```
+> [!NOTE]
+> **The AppendResult union**
+> `AppendResult` is a tagged union that makes every outcome explicit at the
+> call site:
+>
+> ```zig
+> pub const AppendResult = union(enum) {
+>     ok: i32,          // term_offset where data was written
+>     tripped,          // term full — rotation needed
+>     admin_action,     // CAS failure — retry immediately
+>     padding_applied,  // padding written — retry in next term
+> };
+> ```
 
 ## Function Reference
 
@@ -166,11 +170,12 @@ This CAS-advances `raw_tail` to exactly `term_length` and writes a `FrameType.pa
 | `appendData(header, payload)` | Main CAS-and-write path; returns `AppendResult` |
 | `appendPadding(_length)` | Write end-of-term padding frame; triggers rotation |
 
-!!! success "Key takeaways"
-    - A single 64-bit atomic word (`raw_tail`) packs both `term_id` and `term_offset`, allowing one CAS to claim both at once.
-    - The CAS loop is wait-free: on collision, return `.admin_action` and let the caller retry, never blocking.
-    - Payload and header are written before `frame_length`; the reader sees `frame_length == 0` (pending) or positive (committed) — no partial writes.
-    - `.acq_rel` ordering on the CAS paired with `.acquire` on the reader load enforces the happens-before relationship.
+> [!IMPORTANT]
+> **Key takeaways**
+> - A single 64-bit atomic word (`raw_tail`) packs both `term_id` and `term_offset`, allowing one CAS to claim both at once.
+> - The CAS loop is wait-free: on collision, return `.admin_action` and let the caller retry, never blocking.
+> - Payload and header are written before `frame_length`; the reader sees `frame_length == 0` (pending) or positive (committed) — no partial writes.
+> - `.acq_rel` ordering on the CAS paired with `.acquire` on the reader load enforces the happens-before relationship.
 
 ## Next Step
 

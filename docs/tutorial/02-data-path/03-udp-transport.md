@@ -1,20 +1,22 @@
 # 2.3 UDP Transport
 
-!!! abstract "What you'll build"
-    Understanding of how Aeron layers reliability and ordering over unreliable UDP:
+> [!NOTE]
+> **What you'll build**
+> Understanding of how Aeron layers reliability and ordering over unreliable UDP:
+>
+> - Non-blocking socket fundamentals and why Aeron's media driver never blocks
+> - Multicast group join and the critical role of the `interface` parameter
+> - The SETUP/STATUS handshake that bootstraps sender-receiver agreement
+> - NAK-driven retransmission and flow control windows
+> - URI parsing and the distinction between unicast and multicast endpoints
 
-    - Non-blocking socket fundamentals and why Aeron's media driver never blocks
-    - Multicast group join and the critical role of the `interface` parameter
-    - The SETUP/STATUS handshake that bootstraps sender-receiver agreement
-    - NAK-driven retransmission and flow control windows
-    - URI parsing and the distinction between unicast and multicast endpoints
-
-!!! info "Aeron concept: reliability over UDP"
-    UDP is "fire and forget" — packets can be lost, reordered, or duplicated. Aeron
-    needs a way to turn this chaotic stream into a reliable, ordered sequence of
-    messages while maintaining the low-latency benefits of UDP. It does this through
-    sequence numbering (term IDs and offsets), flow control windows, and NAK-driven
-    retransmission.
+> [!NOTE]
+> **Aeron concept: reliability over UDP**
+> UDP is "fire and forget" — packets can be lost, reordered, or duplicated. Aeron
+> needs a way to turn this chaotic stream into a reliable, ordered sequence of
+> messages while maintaining the low-latency benefits of UDP. It does this through
+> sequence numbering (term IDs and offsets), flow control windows, and NAK-driven
+> retransmission.
 
 ## Zig Track: The `std.posix` Socket API
 
@@ -33,11 +35,12 @@ const sock = try std.posix.socket(
 );
 ```
 
-!!! tip "Non-blocking I/O by default"
-    On Linux, `SOCK_NONBLOCK` sets the flag atomically during socket creation. On
-    macOS, Zig's `std.posix` helper transparently handles the `FIONBIO` ioctl. When
-    a non-blocking `recvfrom` has no data, it returns `error.WouldBlock`, never
-    blocking the driver thread.
+> [!TIP]
+> **Non-blocking I/O by default**
+> On Linux, `SOCK_NONBLOCK` sets the flag atomically during socket creation. On
+> macOS, Zig's `std.posix` helper transparently handles the `FIONBIO` ioctl. When
+> a non-blocking `recvfrom` has no data, it returns `error.WouldBlock`, never
+> blocking the driver thread.
 
 ### Multicast Group Join
 
@@ -51,11 +54,12 @@ const mreq = IpMreq{
 try std.posix.setsockopt(self.socket, std.posix.IPPROTO.IP, IP_ADD_MEMBERSHIP, &std.mem.toBytes(mreq));
 ```
 
-!!! warning "The interface parameter is critical"
-    The `imr_interface` field tells the OS which physical network card to use for
-    the multicast group join. Without it or with the wrong address, packets will
-    not arrive. The `harus-aeron-zig` transport layer validates this at configuration
-    time to catch errors early.
+> [!WARNING]
+> **The interface parameter is critical**
+> The `imr_interface` field tells the OS which physical network card to use for
+> the multicast group join. Without it or with the wrong address, packets will
+> not arrive. The `harus-aeron-zig` transport layer validates this at configuration
+> time to catch errors early.
 
 Because these constants and structs vary by operating system, `harus-aeron-zig` defines them in `src/transport/endpoint.zig` to ensure cross-platform compatibility where `std.posix` might be missing them.
 
@@ -91,10 +95,11 @@ If the receiver detects a gap in the sequence numbers (term offsets), it doesn't
 
 If the gap persists, it sends a **NAK** (Negative Acknowledgement) frame. The sender, upon receiving a NAK, scans its log buffer and re-sends the missing range of data.
 
-!!! info "Flow control via receiver window"
-    The receiver window bounds the sender — it prevents the sender from flooding
-    the receiver with data faster than it can be consumed. The window is expressed
-    as a byte count and is updated in every STATUS frame as the receiver advances.
+> [!NOTE]
+> **Flow control via receiver window**
+> The receiver window bounds the sender — it prevents the sender from flooding
+> the receiver with data faster than it can be consumed. The window is expressed
+> as a byte count and is updated in every STATUS frame as the receiver advances.
 
 ### Unicast vs Multicast URIs
 
@@ -109,25 +114,28 @@ The driver automatically detects multicast by checking if the endpoint address i
 
 ## Implementation Walkthrough
 
-!!! info "Module breakdown"
-    - **`src/transport/uri.zig`**: Parses the `aeron:udp?...` string into key-value pairs.
-    - **`src/transport/udp_channel.zig`**: Resolves hostnames and determines if the channel is multicast.
-    - **`src/transport/endpoint.zig`**: Manages the lifecycle of the `std.posix` socket.
-    - **`src/transport/poller.zig`**: Uses `std.posix.poll` to multiplex many receive endpoints in a single duty cycle.
+> [!NOTE]
+> **Module breakdown**
+> - **`src/transport/uri.zig`**: Parses the `aeron:udp?...` string into key-value pairs.
+> - **`src/transport/udp_channel.zig`**: Resolves hostnames and determines if the channel is multicast.
+> - **`src/transport/endpoint.zig`**: Manages the lifecycle of the `std.posix` socket.
+> - **`src/transport/poller.zig`**: Uses `std.posix.poll` to multiplex many receive endpoints in a single duty cycle.
 
-!!! question "Exercise"
-    1. Open `src/transport/udp_channel.zig` and implement the `isMulticastAddress` helper to detect multicast addresses in the `224.0.0.0/4` range.
-    2. Verify with `make check`.
+> [!NOTE]
+> **Exercise**
+> 1. Open `src/transport/udp_channel.zig` and implement the `isMulticastAddress` helper to detect multicast addresses in the `224.0.0.0/4` range.
+> 2. Verify with `make check`.
+>
+> - [ ] Function detects multicast addresses correctly
+> - [ ] Unicast addresses (e.g., `192.168.1.10`) return false
+> - [ ] Multicast addresses (e.g., `224.0.1.1`) return true
 
-    - [ ] Function detects multicast addresses correctly
-    - [ ] Unicast addresses (e.g., `192.168.1.10`) return false
-    - [ ] Multicast addresses (e.g., `224.0.1.1`) return true
-
-!!! success "Key takeaways"
-    - Non-blocking sockets and `error.WouldBlock` handling let the media driver poll many endpoints in one pass without blocking.
-    - The SETUP/STATUS handshake establishes receiver state (Image) and receiver window bounds.
-    - NAK-driven retransmission closes gaps in the ordered sequence, turning UDP chaos into reliable delivery.
-    - Multicast requires careful configuration of the interface parameter; unicast is simpler but one-to-one.
+> [!IMPORTANT]
+> **Key takeaways**
+> - Non-blocking sockets and `error.WouldBlock` handling let the media driver poll many endpoints in one pass without blocking.
+> - The SETUP/STATUS handshake establishes receiver state (Image) and receiver window bounds.
+> - NAK-driven retransmission closes gaps in the ordered sequence, turning UDP chaos into reliable delivery.
+> - Multicast requires careful configuration of the interface parameter; unicast is simpler but one-to-one.
 
 ## Further Reading
 

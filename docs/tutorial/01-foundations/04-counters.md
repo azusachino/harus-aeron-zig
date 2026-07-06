@@ -4,14 +4,15 @@ Aeron's flow control does not use a traditional credit-based windowing protocol 
 
 Everything lives in `src/ipc/counters.zig`.
 
-!!! abstract "What you'll build"
-    A high-frequency position-tracking system for flow control and monitoring:
-
-    - Why shared memory beats system calls and socket messages for reads
-    - Cache-line alignment: each counter gets its own 64-byte slot to avoid false sharing
-    - Metadata layout: per-counter state, type, key, and label in separate buffers
-    - Atomic reads, writes, and conditional updates using acquire/release ordering
-    - Allocation and reclaim: reusing slots without losing historical metadata
+> [!NOTE]
+> **What you'll build**
+> A high-frequency position-tracking system for flow control and monitoring:
+>
+> - Why shared memory beats system calls and socket messages for reads
+> - Cache-line alignment: each counter gets its own 64-byte slot to avoid false sharing
+> - Metadata layout: per-counter state, type, key, and label in separate buffers
+> - Atomic reads, writes, and conditional updates using acquire/release ordering
+> - Allocation and reclaim: reusing slots without losing historical metadata
 
 ## Why Shared-Memory Counters
 
@@ -52,12 +53,13 @@ Five pre-defined counter type IDs are declared in `src/ipc/counters.zig`:
 
 ## Cache-Line Alignment
 
-!!! warning "False sharing kills performance"
-    Modern CPUs transfer memory in 64-byte cache lines. If two counters share a cache line, a write to one invalidates the other on every other core — even if they are logically independent. This is false sharing. Aeron eliminates it by giving each counter its own 64-byte slot:
-
-    ```zig
-    pub const COUNTER_LENGTH: usize = 64; // Cache line size
-    ```
+> [!WARNING]
+> **False sharing kills performance**
+> Modern CPUs transfer memory in 64-byte cache lines. If two counters share a cache line, a write to one invalidates the other on every other core — even if they are logically independent. This is false sharing. Aeron eliminates it by giving each counter its own 64-byte slot:
+>
+> ```zig
+> pub const COUNTER_LENGTH: usize = 64; // Cache line size
+> ```
 
 Every counter occupies exactly one cache line in the values buffer. The values buffer is laid out as a flat array of 64-byte slots, indexed by `counter_id`:
 
@@ -75,14 +77,15 @@ const offset = @as(usize, @intCast(counter_id)) * COUNTER_LENGTH;
 
 The first 8 bytes of each slot hold the `i64` counter value. The remaining 56 bytes are padding — never accessed, but essential to prevent any other data from sharing the cache line.
 
-!!! info "Explicit alignment in test code"
-    In test code, buffers are declared with explicit alignment:
-
-    ```zig
-    var values align(64) = [_]u8{0} ** (COUNTER_LENGTH * 4);
-    ```
-
-    `align(64)` ensures the first slot begins on a 64-byte boundary. Without it, a slot might straddle two cache lines and defeat the purpose.
+> [!NOTE]
+> **Explicit alignment in test code**
+> In test code, buffers are declared with explicit alignment:
+>
+> ```zig
+> var values align(64) = [_]u8{0} ** (COUNTER_LENGTH * 4);
+> ```
+>
+> `align(64)` ensures the first slot begins on a 64-byte boundary. Without it, a slot might straddle two cache lines and defeat the purpose.
 
 ## Metadata Layout
 
@@ -114,24 +117,25 @@ pub const CountersMap = struct {
 
 ## Atomic Reads and Writes
 
-!!! tip "Acquire/release ordering without full barriers"
-    Counter values are read and written with acquire/release ordering:
-
-    ```zig
-    pub fn get(self: *const CountersMap, counter_id: i32) i64 {
-        const offset = @as(usize, @intCast(counter_id)) * COUNTER_LENGTH;
-        const ptr: *i64 = @ptrCast(@alignCast(&self.values_buffer[offset]));
-        return @atomicLoad(i64, ptr, .acquire);
-    }
-
-    pub fn set(self: *CountersMap, counter_id: i32, value: i64) void {
-        const offset = @as(usize, @intCast(counter_id)) * COUNTER_LENGTH;
-        const ptr: *i64 = @ptrCast(@alignCast(&self.values_buffer[offset]));
-        @atomicStore(i64, ptr, value, .release);
-    }
-    ```
-
-    `.release` on a store ensures all prior writes are visible to any thread that subsequently does an `.acquire` load on the same address. This is the minimum ordering needed to safely communicate a position between a writer and a reader on different cores — no full barrier required.
+> [!TIP]
+> **Acquire/release ordering without full barriers**
+> Counter values are read and written with acquire/release ordering:
+>
+> ```zig
+> pub fn get(self: *const CountersMap, counter_id: i32) i64 {
+>     const offset = @as(usize, @intCast(counter_id)) * COUNTER_LENGTH;
+>     const ptr: *i64 = @ptrCast(@alignCast(&self.values_buffer[offset]));
+>     return @atomicLoad(i64, ptr, .acquire);
+> }
+>
+> pub fn set(self: *CountersMap, counter_id: i32, value: i64) void {
+>     const offset = @as(usize, @intCast(counter_id)) * COUNTER_LENGTH;
+>     const ptr: *i64 = @ptrCast(@alignCast(&self.values_buffer[offset]));
+>     @atomicStore(i64, ptr, value, .release);
+> }
+> ```
+>
+> `.release` on a store ensures all prior writes are visible to any thread that subsequently does an `.acquire` load on the same address. This is the minimum ordering needed to safely communicate a position between a writer and a reader on different cores — no full barrier required.
 
 For increment operations (e.g., advancing `SENDER_POSITION`), `addOrdered` uses a fetch-and-add:
 
@@ -145,16 +149,18 @@ For flow-control decisions that need a conditional update (e.g., the driver sett
 return @cmpxchgStrong(i64, ptr, expected, update, .acq_rel, .acquire) == null;
 ```
 
-!!! info "Allocation and reclaim"
-    `CountersMap.allocate` scans the metadata buffer for a slot in state `UNUSED` or `RECLAIMED`, initializes its metadata, then atomically sets state to `ALLOCATED`. The state transition uses an atomic store so readers see a consistent snapshot. `free` sets state to `RECLAIMED` and zeros the value, making the slot eligible for reuse after the deadline passes.
+> [!NOTE]
+> **Allocation and reclaim**
+> `CountersMap.allocate` scans the metadata buffer for a slot in state `UNUSED` or `RECLAIMED`, initializes its metadata, then atomically sets state to `ALLOCATED`. The state transition uses an atomic store so readers see a consistent snapshot. `free` sets state to `RECLAIMED` and zeros the value, making the slot eligible for reuse after the deadline passes.
 
 ## Key File
 
 `src/ipc/counters.zig` — `CountersMap`, `CounterHandle`, counter type constants, metadata offset constants, and tests for allocate/free/get/set/compareAndSet.
 
-!!! success "Key takeaways"
-    - Shared-memory counters beat syscalls by 100×; a read is just a cache-line load.
-    - Each counter occupies one 64-byte cache line to eliminate false sharing across cores.
-    - Acquire/release ordering ensures coherence between writer and reader without full barriers.
-    - Atomic fetch-and-add advances positions without CAS loops.
-    - Separate metadata and values buffers allow independent sizing and spare growth.
+> [!IMPORTANT]
+> **Key takeaways**
+> - Shared-memory counters beat syscalls by 100×; a read is just a cache-line load.
+> - Each counter occupies one 64-byte cache line to eliminate false sharing across cores.
+> - Acquire/release ordering ensures coherence between writer and reader without full barriers.
+> - Atomic fetch-and-add advances positions without CAS loops.
+> - Separate metadata and values buffers allow independent sizing and spare growth.

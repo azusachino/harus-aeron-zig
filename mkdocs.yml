@@ -6,6 +6,16 @@ repo_name: harus-aeron-zig
 docs_dir: docs
 site_dir: site
 
+exclude_docs: |
+  audits/1.0.0-rc2-audit.md
+  audits/2026-03-23-wire-compatibility.md
+  audits/2026-03-24-wire-compatibility-followup.md
+  audits/2026-04-17-parity-audit.md
+  guides/zig-module-system.md
+  investigations/**
+  plans/**
+  specs/**
+
 theme:
   name: material
   language: en
@@ -15,15 +25,15 @@ theme:
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: indigo
-      accent: teal
+      primary: teal
+      accent: pink
       toggle:
         icon: material/weather-night
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: indigo
-      accent: teal
+      primary: teal
+      accent: pink
       toggle:
         icon: material/weather-sunny
         name: Switch to light mode
@@ -159,7 +169,7 @@ nav:
   - Architecture:
       - Overview: guides/architecture.md
       - Setup: guides/setup.md
+      - User Guide: guides/user-guide.md
   - Reference:
       - Plan: plan.md
-      - Release Audit: audits/1.0.0-release-audit.md
       - Course Gap Report: course/lesson-gap-report.md

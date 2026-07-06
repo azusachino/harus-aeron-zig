@@ -1,10 +1,10 @@
 # Project Context — harus-aeron-zig
 
-Aeron protocol reimplementation in Zig 0.15.2 — wire-compatible UDP transport.
+Aeron protocol reimplementation in Zig 0.16.x — wire-compatible UDP transport.
 Reference: https://github.com/aeron-io/aeron
 
 ## Stack
-- Language: Zig 0.15.2 (nixpkgs unstable)
+- Language: Zig 0.16.x (nixpkgs unstable)
 - Task runner: `make check` (fmt-check + build + test), `make test`, `make build`
 - Dev shell: `nix develop` — never install tools globally
 
@@ -16,8 +16,8 @@ Reference: https://github.com/aeron-io/aeron
 - No `unreachable` in receive/decode paths — external data is untrusted
 - No mutex in hot paths — use CAS (`cmpxchgStrong`) or atomic fetch-add
 
-## Zig 0.15.2 API gotchas (common mistakes to avoid)
-- `allocator.alignedAlloc(u8, 4096, n)` — WRONG: `alignedAlloc` takes `?std.mem.Alignment` enum, not int. Just use `allocator.alloc(u8, n)` unless you truly need specific alignment
+## Zig 0.16.x API gotchas (common mistakes to avoid)
+- `allocator.alignedAlloc(u8, 4096, n)` — WRONG: in Zig 0.16.x, `alignedAlloc` takes standard `std.mem.Alignment` enum tag (like `.@\"8\"` or `.@\"64\"`), not an integer. Just use `allocator.alloc(u8, n)` unless you truly need specific alignment
 - `allocator.alignedFree(buf)` — does NOT exist. Use `allocator.free(buf)` always
 - `@mod(i32_val, usize_const)` — type mismatch. Use `@as(usize, @intCast(@abs(i32_val))) % usize_const`
 - Ring buffer record length: store actual `HEADER_LENGTH + data.len` in header, advance cursor by `aligned(data.len)` — these are different values

@@ -2,23 +2,25 @@
 
 Aeron is a fire-and-forget messaging system by default — messages live in shared-memory log buffers and are lost once they're overwritten. For applications that need a persistent audit trail (financial markets, event sourcing, state recovery), the Aeron Archive records published streams to disk and replays them on demand.
 
-!!! abstract "What you'll build"
-    A precise mental model of how clients and the archive communicate via binary protocol messages:
+> [!NOTE]
+> **What you'll build**
+> A precise mental model of how clients and the archive communicate via binary protocol messages:
+>
+> - Fixed-size binary request/response structs (StartRecordingRequest, ReplayRequest, ControlResponse)
+> - A pair of helper functions to encode/decode variable-length channel strings
+> - How correlation IDs enable asynchronous request/response matching
+> - The complete message family that controls recording, replay, and metadata queries
 
-    - Fixed-size binary request/response structs (StartRecordingRequest, ReplayRequest, ControlResponse)
-    - A pair of helper functions to encode/decode variable-length channel strings
-    - How correlation IDs enable asynchronous request/response matching
-    - The complete message family that controls recording, replay, and metadata queries
-
-!!! info "Aeron concept: Archive as a client service"
-    The Aeron Archive is not part of the media driver — it's a separate service that acts as an
-    Aeron **client**. To communicate with it, your application publishes control messages (like
-    `StartRecordingRequest` or `ReplayRequest`) on a well-known archive control channel. The archive
-    subscribes to that channel, decodes the messages, and publishes responses back on a client-specific
-    response channel, matched by `correlation_id`.
-
-    This design decouples the archive from the driver and lets you run multiple archives alongside
-    the same media driver, each serving different applications with different retention policies.
+> [!NOTE]
+> **Aeron concept: Archive as a client service**
+> The Aeron Archive is not part of the media driver — it's a separate service that acts as an
+> Aeron **client**. To communicate with it, your application publishes control messages (like
+> `StartRecordingRequest` or `ReplayRequest`) on a well-known archive control channel. The archive
+> subscribes to that channel, decodes the messages, and publishes responses back on a client-specific
+> response channel, matched by `correlation_id`.
+>
+> This design decouples the archive from the driver and lets you run multiple archives alongside
+> the same media driver, each serving different applications with different retention policies.
 
 ```mermaid
 sequenceDiagram
@@ -51,25 +53,26 @@ All archive control messages follow the same pattern: a fixed-size header (usual
 | `RecordingStarted` | 102 | Archive → Client | New recording created |
 | `RecordingDescriptor` | 104 | Archive → Client | Metadata for a recording |
 
-!!! info "Zig concept: `extern struct` with length-prefixed variable data"
-    Most Aeron protocols use `extern struct` to guarantee bit-exact C ABI layout. But how do you
-    encode variable-length fields (like a channel string) in a fixed-size struct? The answer is a
-    pattern borrowed from Simple Binary Encoding (SBE): a fixed header followed by a length prefix
-    and the variable data itself.
-
-    The struct is fixed-size (e.g., 16 bytes for `StartRecordingRequest`). The `channel_length` field
-    tells you how many bytes follow it in the buffer. This is similar to SBE, used by real Aeron.
-
-    **Why this pattern?**
-    - No padding overhead: strings can be any length; you only pay for what you use.
-    - Zero-copy reads: a slice into the buffer, not a separate allocation.
-    - Wire-compatible: clients and the archive can be in different languages.
-    - Atomicity: the struct + length + data form one logical message; no partial reads.
-
-    **Zig-specific details:**
-    - `@intCast(channel.len)` converts `usize` to `i32`; Zig does not auto-convert between int sizes.
-    - `std.mem.writeInt(..., .little)` specifies little-endian byte order, matching Aeron Java/C++.
-    - `@memcpy(dst, src)` is Zig's safe memory copy — the compiler verifies sizes match at comptime.
+> [!NOTE]
+> **Zig concept: `extern struct` with length-prefixed variable data**
+> Most Aeron protocols use `extern struct` to guarantee bit-exact C ABI layout. But how do you
+> encode variable-length fields (like a channel string) in a fixed-size struct? The answer is a
+> pattern borrowed from Simple Binary Encoding (SBE): a fixed header followed by a length prefix
+> and the variable data itself.
+>
+> The struct is fixed-size (e.g., 16 bytes for `StartRecordingRequest`). The `channel_length` field
+> tells you how many bytes follow it in the buffer. This is similar to SBE, used by real Aeron.
+>
+> **Why this pattern?**
+> - No padding overhead: strings can be any length; you only pay for what you use.
+> - Zero-copy reads: a slice into the buffer, not a separate allocation.
+> - Wire-compatible: clients and the archive can be in different languages.
+> - Atomicity: the struct + length + data form one logical message; no partial reads.
+>
+> **Zig-specific details:**
+> - `@intCast(channel.len)` converts `usize` to `i32`; Zig does not auto-convert between int sizes.
+> - `std.mem.writeInt(..., .little)` specifies little-endian byte order, matching Aeron Java/C++.
+> - `@memcpy(dst, src)` is Zig's safe memory copy — the compiler verifies sizes match at comptime.
 
 ### The Pattern
 
@@ -186,19 +189,20 @@ These two functions are the entire serialization story for the archive:
 
 The archive conductor (which we'll see in chapter 5.5) uses these same helpers to encode responses before publishing them.
 
-!!! question "Exercise"
-    Implement `encodeChannel` and `decodeChannel` in `tutorial/archive/protocol.zig`.
-
-    Your task:
-    1. Write a function that encodes a channel string into a buffer with a 4-byte length prefix (little-endian i32).
-    2. Write a function that decodes a channel string from a buffer, validating the length prefix.
-
-    Acceptance criteria:
-    - [ ] `encodeChannel` returns the total bytes written (length prefix + string)
-    - [ ] `decodeChannel` returns a slice into the buffer if valid, null if buffer is too small or length is negative
-    - [ ] Round-trip test: encode `"aeron:udp?endpoint=localhost:40123"`, decode it, and verify it matches
-
-    Hint: Use `std.mem.writeInt`, `std.mem.readInt`, and `@intCast` as shown above.
+> [!NOTE]
+> **Exercise**
+> Implement `encodeChannel` and `decodeChannel` in `tutorial/archive/protocol.zig`.
+>
+> Your task:
+> 1. Write a function that encodes a channel string into a buffer with a 4-byte length prefix (little-endian i32).
+> 2. Write a function that decodes a channel string from a buffer, validating the length prefix.
+>
+> Acceptance criteria:
+> - [ ] `encodeChannel` returns the total bytes written (length prefix + string)
+> - [ ] `decodeChannel` returns a slice into the buffer if valid, null if buffer is too small or length is negative
+> - [ ] Round-trip test: encode `"aeron:udp?endpoint=localhost:40123"`, decode it, and verify it matches
+>
+> Hint: Use `std.mem.writeInt`, `std.mem.readInt`, and `@intCast` as shown above.
 
 ```bash
 cd /Users/azusachino/Projects/project-github/harus-aeron-zig
@@ -207,9 +211,10 @@ make test-unit  # Run protocol tests
 
 Compare your implementation against `src/archive/protocol.zig`.
 
-!!! success "Key takeaways"
-    - **Archive is a client**: it communicates with your application via standard Aeron Publications/Subscriptions, not shared-memory rings.
-    - **Fixed headers + variable data**: struct size is comptime-constant; string length is runtime data. `channel_length` tells you how many bytes follow.
-    - **Correlation IDs**: every request/response pair shares a correlation ID, allowing async multiplexing without a shared request queue.
-    - **Zig's `@intCast` and `std.mem` primitives**: no hidden allocations, no serialization library overhead. You control every byte.
-    - **Wire compatibility**: if you can encode/decode these binary structs correctly, you can talk to real Aeron Java clients.
+> [!IMPORTANT]
+> **Key takeaways**
+> - **Archive is a client**: it communicates with your application via standard Aeron Publications/Subscriptions, not shared-memory rings.
+> - **Fixed headers + variable data**: struct size is comptime-constant; string length is runtime data. `channel_length` tells you how many bytes follow.
+> - **Correlation IDs**: every request/response pair shares a correlation ID, allowing async multiplexing without a shared request queue.
+> - **Zig's `@intCast` and `std.mem` primitives**: no hidden allocations, no serialization library overhead. You control every byte.
+> - **Wire compatibility**: if you can encode/decode these binary structs correctly, you can talk to real Aeron Java clients.

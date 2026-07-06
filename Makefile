@@ -1,13 +1,13 @@
 NIX_RUN := $(if $(IN_NIX_SHELL),,nix develop --command )
 export ZIG_GLOBAL_CACHE_DIR := $(CURDIR)/.zig-global-cache
 export ZIG_LOCAL_CACHE_DIR := $(CURDIR)/.zig-cache
-AERON_VERSION := 1.50.2
+AERON_VERSION := 1.50.4
 AERON_ALL_JAR_URL := https://repo1.maven.org/maven2/io/aeron/aeron-all/$(AERON_VERSION)/aeron-all-$(AERON_VERSION).jar
 AERON_UPSTREAM_REPO ?= https://github.com/aeron-io/aeron.git
 AERON_UPSTREAM_REF ?= release/1.50.x
 AERON_UPSTREAM_DIR ?= vendor/aeron
 ZIG_UPSTREAM_REPO ?= https://codeberg.org/ziglang/zig
-ZIG_UPSTREAM_REF ?= 0.16.0
+ZIG_UPSTREAM_REF ?= 0.16.x
 ZIG_UPSTREAM_DIR ?= vendor/zig
 INTEROP_ZIG_BUILD_ENV_IMAGE ?= harus-aeron-zig-build-env:latest
 DOCS_PORT ?= 8000
@@ -229,12 +229,12 @@ interop-preflight:
 interop:  ## Run full interop test suite (100 messages, all scenarios)
 	@$(MAKE) interop-preflight
 	@$(MAKE) setup-interop-base
-	AERON_VERSION=1.50.2 ZIG_BUILD_ENV_IMAGE=$(INTEROP_ZIG_BUILD_ENV_IMAGE) MSG_COUNT=100 $(COMPOSE) -f deploy/docker-compose.ci.yml up --build --abort-on-container-exit --exit-code-from java-client
+	AERON_VERSION=$(AERON_VERSION) ZIG_BUILD_ENV_IMAGE=$(INTEROP_ZIG_BUILD_ENV_IMAGE) MSG_COUNT=100 $(COMPOSE) -f deploy/docker-compose.ci.yml up --build --abort-on-container-exit --exit-code-from java-client
 
 interop-smoke:  ## Run quick smoke interop test (10 messages, CI-friendly)
 	@$(MAKE) interop-preflight
 	@$(MAKE) setup-interop-base
-	AERON_VERSION=1.50.2 ZIG_BUILD_ENV_IMAGE=$(INTEROP_ZIG_BUILD_ENV_IMAGE) MSG_COUNT=10 $(COMPOSE) -f deploy/docker-compose.ci.yml up --build --abort-on-container-exit --exit-code-from java-client
+	AERON_VERSION=$(AERON_VERSION) ZIG_BUILD_ENV_IMAGE=$(INTEROP_ZIG_BUILD_ENV_IMAGE) MSG_COUNT=10 $(COMPOSE) -f deploy/docker-compose.ci.yml up --build --abort-on-container-exit --exit-code-from java-client
 
 interop-status:  ## Show status of running interop jobs
 	@echo "=== Interop Jobs ==="

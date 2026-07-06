@@ -2,13 +2,14 @@
 
 The Conductor is the "brain" of the Media Driver. It doesn't touch the data path (sending or receiving packets); instead, it manages the lifecycle of resources and coordinates between clients and the other driver agents.
 
-!!! abstract "What you'll build"
-    A precise mental model of the Conductor's role as the control-plane orchestrator:
-
-    - How processes discover and synchronize via shared memory and `CnC.dat`
-    - The four shared buffers: to-driver ring buffer, to-clients broadcast buffer, counters metadata, counters values
-    - How the Conductor polls commands, dispatches them, and signals responses via broadcast
-    - Client discovery, keepalive, and resource cleanup on client timeout
+> [!NOTE]
+> **What you'll build**
+> A precise mental model of the Conductor's role as the control-plane orchestrator:
+>
+> - How processes discover and synchronize via shared memory and `CnC.dat`
+> - The four shared buffers: to-driver ring buffer, to-clients broadcast buffer, counters metadata, counters values
+> - How the Conductor polls commands, dispatches them, and signals responses via broadcast
+> - Client discovery, keepalive, and resource cleanup on client timeout
 
 ## The Coordination Problem
 
@@ -53,10 +54,11 @@ const ptr = try std.posix.mmap(
 const mapped = @as([*]align(std.heap.page_size_min) u8, @ptrCast(ptr))[0..total_size];
 ```
 
-!!! tip "`.TYPE = .SHARED` ensures inter-process visibility"
-    The `.TYPE = .SHARED` flag is critical: it ensures that writes to this memory are
-    visible to other processes mapping the same file. Without it, the memory would be
-    private to the process and changes would not propagate.
+> [!TIP]
+> **`.TYPE = .SHARED` ensures inter-process visibility**
+> The `.TYPE = .SHARED` flag is critical: it ensures that writes to this memory are
+> visible to other processes mapping the same file. Without it, the memory would be
+> private to the process and changes would not propagate.
 
 ### Pointer Arithmetic in Mapped Memory
 
@@ -95,11 +97,12 @@ When you call `Aeron.connect()`, the client:
 
 The Conductor manages the lifecycle of Publications and Subscriptions.
 
-!!! info "Publication lifecycle"
-    When a client asks for a **Publication**, the Conductor allocates a new `session_id`, creates
-    the log buffer files on disk, and notifies the client via the broadcast buffer. If a client
-    crashes, its keepalive will stop. The Conductor detects this and eventually cleans up the
-    associated resources (closing log buffers, reclaiming session IDs).
+> [!NOTE]
+> **Publication lifecycle**
+> When a client asks for a **Publication**, the Conductor allocates a new `session_id`, creates
+> the log buffer files on disk, and notifies the client via the broadcast buffer. If a client
+> crashes, its keepalive will stop. The Conductor detects this and eventually cleans up the
+> associated resources (closing log buffers, reclaiming session IDs).
 
 ## Key Files
 
@@ -109,16 +112,18 @@ The Conductor manages the lifecycle of Publications and Subscriptions.
 
 Compare against the Java reference: [`DriverConductor.java`](https://github.com/aeron-io/aeron/blob/master/aeron-driver/src/main/java/io/aeron/driver/DriverConductor.java).
 
-!!! question "Exercise"
-    1. Open `src/driver/conductor.zig` and review the `handleMessage` dispatcher.
-    2. Verify that the conductor can process an `ADD_PUBLICATION` command.
-    3. Trace how the publication is passed to the Sender via `onAddPublication()`.
+> [!NOTE]
+> **Exercise**
+> 1. Open `src/driver/conductor.zig` and review the `handleMessage` dispatcher.
+> 2. Verify that the conductor can process an `ADD_PUBLICATION` command.
+> 3. Trace how the publication is passed to the Sender via `onAddPublication()`.
 
-!!! success "Key takeaways"
-    - The Conductor is the control-plane orchestrator: it manages resource lifecycle, not the data path.
-    - Multi-process coordination is achieved through shared memory (mmap) and a `CnC.dat` file.
-    - The four shared buffers (ring, broadcast, counters-meta, counters-values) form the IPC protocol.
-    - The Conductor polls the to-driver ring buffer for commands and responds via broadcast.
-    - Client discovery and keepalive ensure graceful cleanup on process death.
+> [!IMPORTANT]
+> **Key takeaways**
+> - The Conductor is the control-plane orchestrator: it manages resource lifecycle, not the data path.
+> - Multi-process coordination is achieved through shared memory (mmap) and a `CnC.dat` file.
+> - The four shared buffers (ring, broadcast, counters-meta, counters-values) form the IPC protocol.
+> - The Conductor polls the to-driver ring buffer for commands and responds via broadcast.
+> - Client discovery and keepalive ensure graceful cleanup on process death.
 
 Next, we'll assemble all three agents (Conductor, Sender, Receiver) into the `MediaDriver` and explore how they coordinate in embedded and standalone modes.

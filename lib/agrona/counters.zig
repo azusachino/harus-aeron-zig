@@ -12,6 +12,27 @@ pub const SEND_CHANNEL_STATUS: i32 = 6;
 pub const RECEIVE_CHANNEL_STATUS: i32 = 7;
 pub const CHANNEL_STATUS: i32 = SEND_CHANNEL_STATUS;
 
+// LESSON(counters): The driver publishes each bound local socket address in a dedicated
+// counter (type 14) keyed to its channel-status counter id. This is how a client discovers
+// the port the driver actually bound when it requested an ephemeral `endpoint=host:0` — the
+// PublicationReady/SubscriptionReady flyweights carry only the channel-status counter id, not
+// the address. Reference: aeron-client/src/main/c/status/aeron_local_sockaddr.c
+pub const LOCAL_SOCKADDR_STATUS: i32 = 14;
+pub const RCV_LOCAL_SOCKADDR_NAME: []const u8 = "rcv-local-sockaddr";
+pub const SND_LOCAL_SOCKADDR_NAME: []const u8 = "snd-local-sockaddr";
+
+// ChannelEndpointStatus values (aeron_counters_manager.h).
+pub const CHANNEL_ENDPOINT_INITIALIZING: i64 = 0;
+pub const CHANNEL_ENDPOINT_ERRORED: i64 = -1;
+pub const CHANNEL_ENDPOINT_ACTIVE: i64 = 1;
+
+// Local-socket-address key layout (aeron_local_sockaddr_key_layout_t):
+//   int32 channel_status_id; int32 local_sockaddr_len; char local_sockaddr[..]
+pub const LOCAL_SOCKADDR_CHANNEL_STATUS_ID_OFFSET: usize = 0;
+pub const LOCAL_SOCKADDR_LENGTH_OFFSET: usize = LOCAL_SOCKADDR_CHANNEL_STATUS_ID_OFFSET + @sizeOf(i32);
+pub const LOCAL_SOCKADDR_STRING_OFFSET: usize = LOCAL_SOCKADDR_LENGTH_OFFSET + @sizeOf(i32);
+pub const LOCAL_SOCKADDR_MAX_LENGTH: usize = MAX_KEY_LENGTH - LOCAL_SOCKADDR_STRING_OFFSET;
+
 pub const RECORD_UNUSED: i32 = 0;
 pub const RECORD_ALLOCATED: i32 = 1;
 pub const RECORD_RECLAIMED: i32 = -1;
@@ -138,6 +159,38 @@ pub const CountersMap = struct {
         ) catch label_buf[0..0];
 
         return self.allocateCounter(type_id, key_buf[0..key_length], label_len, registration_id, 0, 0);
+    }
+
+    // Allocate a local-socket-address counter (type LOCAL_SOCKADDR_STATUS) advertising the
+    // resolved bound address for a channel. The counter is keyed to `channel_status_id` so the
+    // client can correlate it, and its value should be set to CHANNEL_ENDPOINT_ACTIVE by the
+    // caller once the transport is live. Mirrors aeron_counter_local_sockaddr_indicator_allocate.
+    pub fn allocateLocalSocketAddressCounter(
+        self: *CountersMap,
+        name: []const u8,
+        registration_id: i64,
+        channel_status_id: i32,
+        local_sockaddr: []const u8,
+    ) CounterHandle {
+        var key_buf: [MAX_KEY_LENGTH]u8 = undefined;
+        @memset(&key_buf, 0);
+
+        const addr_len = @min(local_sockaddr.len, LOCAL_SOCKADDR_MAX_LENGTH);
+        std.mem.writeInt(i32, key_buf[LOCAL_SOCKADDR_CHANNEL_STATUS_ID_OFFSET..][0..4], channel_status_id, .little);
+        std.mem.writeInt(i32, key_buf[LOCAL_SOCKADDR_LENGTH_OFFSET..][0..4], @as(i32, @intCast(addr_len)), .little);
+        if (addr_len > 0) {
+            @memcpy(key_buf[LOCAL_SOCKADDR_STRING_OFFSET .. LOCAL_SOCKADDR_STRING_OFFSET + addr_len], local_sockaddr[0..addr_len]);
+        }
+        const key_length = LOCAL_SOCKADDR_STRING_OFFSET + addr_len;
+
+        var label_buf: [MAX_LABEL_LENGTH]u8 = undefined;
+        const label = std.fmt.bufPrint(
+            &label_buf,
+            "{s}: {d} {s}",
+            .{ name, channel_status_id, local_sockaddr[0..addr_len] },
+        ) catch label_buf[0..0];
+
+        return self.allocateCounter(LOCAL_SOCKADDR_STATUS, key_buf[0..key_length], label, registration_id, 0, 0);
     }
 
     fn allocateCounter(
@@ -353,6 +406,35 @@ test "allocateStreamCounter writes upstream-style key and value metadata" {
     try std.testing.expectEqual(@as(i64, 99), std.mem.readInt(i64, meta[meta_offset + KEY_OFFSET + STREAM_COUNTER_REGISTRATION_ID_OFFSET ..][0..8], .little));
     try std.testing.expectEqual(@as(i32, 7), std.mem.readInt(i32, meta[meta_offset + KEY_OFFSET + STREAM_COUNTER_SESSION_ID_OFFSET ..][0..4], .little));
     try std.testing.expectEqual(@as(i32, 1001), std.mem.readInt(i32, meta[meta_offset + KEY_OFFSET + STREAM_COUNTER_STREAM_ID_OFFSET ..][0..4], .little));
+}
+
+test "allocateLocalSocketAddressCounter writes type-14 key layout and label" {
+    var meta align(64) = [_]u8{0} ** (METADATA_LENGTH * 2);
+    var values align(64) = [_]u8{0} ** (COUNTER_LENGTH * 2);
+    var counters = CountersMap.init(&meta, &values);
+
+    // channel-status counter first (slot 0), then the local-sockaddr counter keyed to it.
+    const status = counters.allocateChannelStatusCounter(RECEIVE_CHANNEL_STATUS, "rcv-channel", 55, "aeron:udp?endpoint=127.0.0.1:0");
+    const handle = counters.allocateLocalSocketAddressCounter(RCV_LOCAL_SOCKADDR_NAME, 55, status.counter_id, "127.0.0.1:40123");
+    try std.testing.expect(handle.counter_id != NULL_COUNTER_ID);
+
+    const meta_offset = @as(usize, @intCast(handle.counter_id)) * METADATA_LENGTH;
+    // Type id must be 14 so a real Aeron client's local-sockaddr scan matches it.
+    try std.testing.expectEqual(LOCAL_SOCKADDR_STATUS, std.mem.readInt(i32, meta[meta_offset + TYPE_ID_OFFSET ..][0..4], .little));
+    // Registration id carried through.
+    try std.testing.expectEqual(@as(i64, 55), counters.getCounterRegistrationId(handle.counter_id));
+
+    const key = meta[meta_offset + KEY_OFFSET ..];
+    try std.testing.expectEqual(status.counter_id, std.mem.readInt(i32, key[LOCAL_SOCKADDR_CHANNEL_STATUS_ID_OFFSET..][0..4], .little));
+    const addr_len = std.mem.readInt(i32, key[LOCAL_SOCKADDR_LENGTH_OFFSET..][0..4], .little);
+    try std.testing.expectEqual(@as(i32, "127.0.0.1:40123".len), addr_len);
+    try std.testing.expectEqualStrings("127.0.0.1:40123", key[LOCAL_SOCKADDR_STRING_OFFSET .. LOCAL_SOCKADDR_STRING_OFFSET + @as(usize, @intCast(addr_len))]);
+
+    const label_len = std.mem.readInt(i32, meta[meta_offset + LABEL_LENGTH_OFFSET ..][0..4], .little);
+    const label = meta[meta_offset + LABEL_DATA_OFFSET .. meta_offset + LABEL_DATA_OFFSET + @as(usize, @intCast(label_len))];
+    var expect_buf: [64]u8 = undefined;
+    const expected = try std.fmt.bufPrint(&expect_buf, "rcv-local-sockaddr: {d} 127.0.0.1:40123", .{status.counter_id});
+    try std.testing.expectEqualStrings(expected, label);
 }
 
 test "allocateChannelStatusCounter writes upstream-style key and registration metadata" {

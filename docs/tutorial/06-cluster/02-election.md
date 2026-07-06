@@ -4,19 +4,21 @@ In a distributed system, multiple nodes need to agree on **who is the leader**. 
 
 This chapter explains how Raft leader election works — and why election timeouts are **randomized** to prevent infinite tie votes.
 
-!!! abstract "What you'll build"
-    A working Raft election state machine that handles split-vote prevention and automatic failover:
-
-    - The three Raft states: Follower, Candidate, Leader
-    - Why election timeouts are randomized (split-vote prevention)
-    - The vote-granting rules: only vote if candidate's log is at least as up-to-date
-    - What happens when a leader sees a higher term (immediately reverts to Follower)
-    - How the cluster tracks voting state across members
+> [!NOTE]
+> **What you'll build**
+> A working Raft election state machine that handles split-vote prevention and automatic failover:
+>
+> - The three Raft states: Follower, Candidate, Leader
+> - Why election timeouts are randomized (split-vote prevention)
+> - The vote-granting rules: only vote if candidate's log is at least as up-to-date
+> - What happens when a leader sees a higher term (immediately reverts to Follower)
+> - How the cluster tracks voting state across members
 
 ## Why It Works This Way (Aeron Concept)
 
-!!! info "Aeron concept: election via heartbeat timeouts"
-    Real Aeron Cluster's election (Java source: `aeron-cluster/src/main/java/io/aeron/cluster/Election.java`) implements the core Raft algorithm with a twist: instead of `RequestAppend` heartbeats, the leader broadcasts `CommitPosition` messages on the **consensus channel**. Followers watch the consensus channel for these heartbeats; if one doesn't arrive within the timeout window, the follower's election timer fires.
+> [!NOTE]
+> **Aeron concept: election via heartbeat timeouts**
+> Real Aeron Cluster's election (Java source: `aeron-cluster/src/main/java/io/aeron/cluster/Election.java`) implements the core Raft algorithm with a twist: instead of `RequestAppend` heartbeats, the leader broadcasts `CommitPosition` messages on the **consensus channel**. Followers watch the consensus channel for these heartbeats; if one doesn't arrive within the timeout window, the follower's election timer fires.
 
 ### The State Machine
 
@@ -89,34 +91,36 @@ The randomization ensures that in a tie, one node breaks the deadlock by asking 
 
 ### Vote Granting Rules
 
-!!! info "Safety guarantee: leaders have all committed entries"
-    A member only votes for a candidate if **both** of these hold:
-    1. The candidate's term is >= the member's current term
-    2. The candidate's log is at least as up-to-date (term and position)
-
-    Pseudo-code:
-    ```
-    onRequestVote(candidate_term, candidate_log_term, candidate_log_position) {
-        if (candidate_term < current_term) {
-            return vote_denied;
-        }
-        if (candidate_log_term < current_log_term
-            or (candidate_log_term == current_log_term
-                and candidate_log_position < current_log_position)) {
-            return vote_denied;
-        }
-        // Candidate's log is at least as up-to-date as ours
-        current_term = candidate_term;
-        return vote_granted;
-    }
-    ```
-
-    This ensures: **once a leader is elected, it has the most up-to-date log**. If the leader crashes, the next leader is guaranteed to have all committed entries — no data loss.
+> [!NOTE]
+> **Safety guarantee: leaders have all committed entries**
+> A member only votes for a candidate if **both** of these hold:
+> 1. The candidate's term is >= the member's current term
+> 2. The candidate's log is at least as up-to-date (term and position)
+>
+> Pseudo-code:
+> ```
+> onRequestVote(candidate_term, candidate_log_term, candidate_log_position) {
+>     if (candidate_term < current_term) {
+>         return vote_denied;
+>     }
+>     if (candidate_log_term < current_log_term
+>         or (candidate_log_term == current_log_term
+>             and candidate_log_position < current_log_position)) {
+>         return vote_denied;
+>     }
+>     // Candidate's log is at least as up-to-date as ours
+>     current_term = candidate_term;
+>     return vote_granted;
+> }
+> ```
+>
+> This ensures: **once a leader is elected, it has the most up-to-date log**. If the leader crashes, the next leader is guaranteed to have all committed entries — no data loss.
 
 ## Zig Concept: Tagged Union State Machine
 
-!!! info "Zig concept: exhaustive state machines with enums"
-    Zig doesn't have classes or inheritance. Instead, we use **tagged unions** (`union(enum)`) to build state machines that the compiler verifies are exhaustively handled.
+> [!NOTE]
+> **Zig concept: exhaustive state machines with enums**
+> Zig doesn't have classes or inheritance. Instead, we use **tagged unions** (`union(enum)`) to build state machines that the compiler verifies are exhaustively handled.
 
 ### Standalone Example
 
@@ -338,32 +342,33 @@ Key observations:
 
 ## Exercise
 
-!!! question "Exercise: Implement onRequestVote with term and log checks"
-    Implement `onRequestVote` with proper term and log completeness checks.
-
-    Open `tutorial/cluster/election.zig` and implement the function:
-
-    ```zig
-    /// Vote-granting logic for Raft election.
-    /// Returns true if we grant the vote, false if we deny it.
-    /// Updates our leader_ship_term_id if the candidate's term is higher.
-    pub fn onRequestVote(
-        self: *Election,
-        candidate_term_id: i64,
-        candidate_log_term: i64,
-        candidate_log_position: i64,
-    ) bool {
-        // TODO: implement
-        @panic("TODO: onRequestVote");
-    }
-    ```
-
-    - [ ] Deny if `candidate_term_id < self.leader_ship_term_id` (old term)
-    - [ ] Deny if candidate's log is behind: `candidate_log_term < self.leader_ship_term_id`, OR `candidate_log_term == self.leader_ship_term_id AND candidate_log_position < self.log_position`
-    - [ ] Grant vote and update `self.leader_ship_term_id` if all checks pass
-    - [ ] Write a test: create two elections, have one request votes from the other, verify term updates
-
-    Compare against `src/cluster/election.zig`.
+> [!NOTE]
+> **Exercise: Implement onRequestVote with term and log checks**
+> Implement `onRequestVote` with proper term and log completeness checks.
+>
+> Open `tutorial/cluster/election.zig` and implement the function:
+>
+> ```zig
+> /// Vote-granting logic for Raft election.
+> /// Returns true if we grant the vote, false if we deny it.
+> /// Updates our leader_ship_term_id if the candidate's term is higher.
+> pub fn onRequestVote(
+>     self: *Election,
+>     candidate_term_id: i64,
+>     candidate_log_term: i64,
+>     candidate_log_position: i64,
+> ) bool {
+>     // TODO: implement
+>     @panic("TODO: onRequestVote");
+> }
+> ```
+>
+> - [ ] Deny if `candidate_term_id < self.leader_ship_term_id` (old term)
+> - [ ] Deny if candidate's log is behind: `candidate_log_term < self.leader_ship_term_id`, OR `candidate_log_term == self.leader_ship_term_id AND candidate_log_position < self.log_position`
+> - [ ] Grant vote and update `self.leader_ship_term_id` if all checks pass
+> - [ ] Write a test: create two elections, have one request votes from the other, verify term updates
+>
+> Compare against `src/cluster/election.zig`.
 
 ## Check Your Work
 
@@ -374,11 +379,12 @@ make test-unit
 
 Look for tests related to `onRequestVote`.
 
-!!! success "Key takeaways"
-    1. **Raft simplifies consensus**: the state machine handles all the complexity. Each state has well-defined transitions.
-    2. **Randomized timeouts prevent deadlock**: if two candidates collide, randomization ensures one breaks the tie.
-    3. **Tagged unions for state machines**: Zig's `enum` and exhaustive `switch` make it impossible to forget a state.
-    4. **Vote granting is careful**: only vote for candidates with current-or-higher term AND up-to-date log. This guarantees safety.
-    5. **Higher-term deposition**: if a leader sees a higher term, it immediately steps down. Simple, effective, and prevents split-brain.
+> [!IMPORTANT]
+> **Key takeaways**
+> 1. **Raft simplifies consensus**: the state machine handles all the complexity. Each state has well-defined transitions.
+> 2. **Randomized timeouts prevent deadlock**: if two candidates collide, randomization ensures one breaks the tie.
+> 3. **Tagged unions for state machines**: Zig's `enum` and exhaustive `switch` make it impossible to forget a state.
+> 4. **Vote granting is careful**: only vote for candidates with current-or-higher term AND up-to-date log. This guarantees safety.
+> 5. **Higher-term deposition**: if a leader sees a higher term, it immediately steps down. Simple, effective, and prevents split-brain.
 
 Next, we'll see how the leader uses replication to get log entries to followers.

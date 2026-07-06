@@ -336,7 +336,7 @@ All scenario test files are **new files** created in `test/protocol/`, `test/dri
 Add these steps to `build.zig` (follow the existing `test-unit` / `test-integration` pattern):
 
 ```zig
-// Zig 0.15.2 API — use b.path() not .{ .path = "..." }
+// Zig 0.16.0 API — use b.path() not .{ .path = "..." }
 const test_protocol = b.addTest(.{
     .root_source_file = b.path("test/protocol/frame_codec_test.zig"),
     .target = target,

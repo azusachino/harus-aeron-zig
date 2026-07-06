@@ -161,6 +161,10 @@ pub const ReceiveChannelEndpoint = struct {
 
     pub fn bind(self: *ReceiveChannelEndpoint) !void {
         try net.bindSocket(self.socket, &self.bound_address.any, self.bound_address.getOsSockLen());
+        // Resolve the OS-assigned address so an ephemeral port (endpoint=...:0) is
+        // filled in with the concrete port — this is what the driver propagates back
+        // to the client via ON_PUBLICATION_READY / ON_SUBSCRIPTION_READY.
+        self.bound_address = try net.getSockName(self.socket);
     }
 
     pub fn joinMulticast(self: *ReceiveChannelEndpoint, group: net.Address, interface_addr: net.Address) !void {
@@ -207,6 +211,22 @@ test "Endpoint: open receive endpoint" {
     var ep = try ReceiveChannelEndpoint.open(&channel);
     defer ep.close();
     try std.testing.expectEqual(@as(u16, 0), ep.bound_address.getPort());
+    try std.testing.expectEqual(std.posix.AF.INET, ep.bound_address.any.family);
+}
+
+test "Endpoint: ephemeral port is resolved to a concrete port after bind" {
+    const allocator = std.testing.allocator;
+    var channel = try UdpChannel.parse(allocator, "aeron:udp?endpoint=127.0.0.1:0");
+    defer channel.deinit(allocator);
+
+    var ep = try ReceiveChannelEndpoint.open(&channel);
+    defer ep.close();
+    // Before bind the port is still the ephemeral sentinel.
+    try std.testing.expectEqual(@as(u16, 0), ep.bound_address.getPort());
+
+    try ep.bind();
+    // The OS assigned a concrete ephemeral port; bound_address now reflects it.
+    try std.testing.expect(ep.bound_address.getPort() != 0);
     try std.testing.expectEqual(std.posix.AF.INET, ep.bound_address.any.family);
 }
 

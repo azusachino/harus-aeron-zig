@@ -2,15 +2,16 @@
 
 The `MediaDriver` is the top-level orchestrator. It owns a `DriverConductor`, a `Sender`, and a `Receiver`, plus all shared buffers and endpoints. It can run in two modes: **standalone** (one OS thread per agent) and **embedded** (all three agents driven synchronously by a single `doWork` call).
 
-!!! abstract "What you'll build"
-    A precise mental model of how the three agents and shared buffers come together:
-
-    - The `MediaDriverContext` configuration and its defaults
-    - The `MediaDriver` struct: agents, buffers, IPC primitives, and thread fields
-    - The `init` function: wiring everything together and guarding with `errdefer`
-    - Embedded mode: synchronous testing without threads or sockets
-    - Standalone mode: three OS threads in busy-spin loops with atomic coordination
-    - Graceful shutdown via atomic `running` flag and thread join
+> [!NOTE]
+> **What you'll build**
+> A precise mental model of how the three agents and shared buffers come together:
+>
+> - The `MediaDriverContext` configuration and its defaults
+> - The `MediaDriver` struct: agents, buffers, IPC primitives, and thread fields
+> - The `init` function: wiring everything together and guarding with `errdefer`
+> - Embedded mode: synchronous testing without threads or sockets
+> - Standalone mode: three OS threads in busy-spin loops with atomic coordination
+> - Graceful shutdown via atomic `running` flag and thread join
 
 ## MediaDriverContext
 
@@ -33,9 +34,10 @@ Callers pass a context struct to `init`. Because Zig allows struct literals with
 var md = try MediaDriver.init(allocator, .{ .mtu_length = 8192 });
 ```
 
-!!! tip "Zig struct literal defaults are elegant"
-    By defining sensible defaults in the struct and accepting partial field initialization,
-    Zig allows callers to override only the fields they care about. No builder pattern needed.
+> [!TIP]
+> **Zig struct literal defaults are elegant**
+> By defining sensible defaults in the struct and accepting partial field initialization,
+> Zig allows callers to override only the fields they care about. No builder pattern needed.
 
 ## MediaDriver Fields
 
@@ -141,11 +143,12 @@ _ = md.doWork();
 try testing.expect(md.conductor_agent.publications.items.len == 1);
 ```
 
-!!! info "Embedded mode: deterministic testing"
-    Because everything runs on a single thread with no real sockets, tests are deterministic:
-    no races, no timing sensitivity, no port conflicts. You can measure exact work counts,
-    which helps verify that idle drivers return 0. This is the primary pattern for unit and
-    integration tests.
+> [!NOTE]
+> **Embedded mode: deterministic testing**
+> Because everything runs on a single thread with no real sockets, tests are deterministic:
+> no races, no timing sensitivity, no port conflicts. You can measure exact work counts,
+> which helps verify that idle drivers return 0. This is the primary pattern for unit and
+> integration tests.
 
 ## Standalone Mode
 
@@ -170,10 +173,11 @@ fn conductorThreadFunc(md: *MediaDriver) void {
 
 The same pattern repeats for `senderThreadFunc` and `receiverThreadFunc`. The `.acquire` memory order on the load ensures the thread sees any stores to shared state that preceded `running.store(true, .release)`.
 
-!!! warning "Standalone mode requires core isolation in production"
-    Three busy-spin threads running at full CPU will contend with application threads.
-    Production deployments must pin each driver thread to an isolated core via `sched_setaffinity`.
-    For development, monitor CPU usage and be aware of this overhead.
+> [!WARNING]
+> **Standalone mode requires core isolation in production**
+> Three busy-spin threads running at full CPU will contend with application threads.
+> Production deployments must pin each driver thread to an isolated core via `sched_setaffinity`.
+> For development, monitor CPU usage and be aware of this overhead.
 
 ## Shutdown
 
@@ -221,11 +225,12 @@ Compare against the Java reference: [`MediaDriver.java`](https://github.com/aero
 | `senderThreadFunc` | Thread entry: busy-spin sender |
 | `receiverThreadFunc` | Thread entry: busy-spin receiver |
 
-!!! success "Key takeaways"
-    - `MediaDriver` is the container that wires together three agents and four shared buffers.
-    - Embedded mode enables deterministic, single-threaded testing with no sockets.
-    - Standalone mode spawns three OS threads that coordinate via atomic flags and shared memory.
-    - The init function uses `errdefer` to guard partial allocations against failure.
-    - No vtable needed: concrete agent structs with an informal `doWork()` interface.
+> [!IMPORTANT]
+> **Key takeaways**
+> - `MediaDriver` is the container that wires together three agents and four shared buffers.
+> - Embedded mode enables deterministic, single-threaded testing with no sockets.
+> - Standalone mode spawns three OS threads that coordinate via atomic flags and shared memory.
+> - The init function uses `errdefer` to guard partial allocations against failure.
+> - No vtable needed: concrete agent structs with an informal `doWork()` interface.
 
 You've now completed the Media Driver trilogy! The three agents (Conductor, Sender, Receiver) are the heart of Aeron's low-latency, lock-free data transport. Next, we'll explore how clients use the driver to publish and subscribe — and see the end-to-end flow in action.

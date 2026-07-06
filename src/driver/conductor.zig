@@ -83,6 +83,7 @@ pub const SubscriptionEntry = struct {
     stream_id: i32,
     channel: []u8,
     channel_status_indicator_counter_id: i32,
+    local_socket_address_counter_id: i32 = counters.NULL_COUNTER_ID,
 };
 
 /// Tracks per-client liveness for timeout eviction.
@@ -170,6 +171,9 @@ pub const DriverConductor = struct {
         for (self.subscriptions.items) |sub_entry| {
             if (sub_entry.channel_status_indicator_counter_id != counters.NULL_COUNTER_ID) {
                 self.counters_map.free(sub_entry.channel_status_indicator_counter_id);
+            }
+            if (sub_entry.local_socket_address_counter_id != counters.NULL_COUNTER_ID) {
+                self.counters_map.free(sub_entry.local_socket_address_counter_id);
             }
             self.allocator.free(sub_entry.channel);
         }
@@ -774,6 +778,27 @@ pub const DriverConductor = struct {
         }
     }
 
+    /// Bind the shared receive socket for `channel_data` (once, on the first network
+    /// subscription) and resolve the concrete bound address via getsockname. Returns the
+    /// formatted "host:port" of the local socket — the channel's endpoint host paired with the
+    /// OS-resolved port so an ephemeral `endpoint=host:0` yields a real port — written into
+    /// `buf`. Returns null for channels without a network endpoint (e.g. IPC) or on failure.
+    fn resolveLocalSocketAddress(self: *DriverConductor, channel_data: []const u8, buf: []u8) ?[]const u8 {
+        var udp_ch = transport_uri.UdpChannel.parse(self.allocator, channel_data) catch return null;
+        defer udp_ch.deinit(self.allocator);
+        const ep = udp_ch.endpoint orelse return null;
+
+        if (!self.recv_bound) {
+            const bind_addr = net.Address.initIp4(.{ 0, 0, 0, 0 }, ep.getPort());
+            net.bindSocket(self.recv_endpoint.socket, &bind_addr.any, bind_addr.getOsSockLen()) catch return null;
+            self.recv_bound = true;
+        }
+
+        const resolved = net.getSockName(self.recv_endpoint.socket) catch return null;
+        self.recv_endpoint.bound_address = resolved;
+        return ep.formatWithPort(resolved.getPort(), buf) catch null;
+    }
+
     pub fn handleAddSubscription(self: *DriverConductor, data: []const u8) void {
         // LESSON(conductor): Subscription lifecycle—store channel + stream_id, wait for publisher SETUP to create Image. See docs/tutorial/03-driver/03-conductor.md
         if (data.len < SUBSCRIPTION_COMMAND_CHANNEL_OFFSET) return;
@@ -792,21 +817,10 @@ pub const DriverConductor = struct {
 
         const channel_data = data[SUBSCRIPTION_COMMAND_CHANNEL_OFFSET .. SUBSCRIPTION_COMMAND_CHANNEL_OFFSET + @as(usize, @intCast(channel_len))];
 
-        // Bind recv endpoint to channel port on first subscription (if not already bound)
-        if (!self.recv_bound) {
-            var udp_ch = transport_uri.UdpChannel.parse(self.allocator, channel_data) catch null;
-            defer if (udp_ch) |*ch| ch.deinit(self.allocator);
-            if (udp_ch) |ch| {
-                if (ch.endpoint) |ep| {
-                    const port = ep.getPort();
-                    if (port != 0) {
-                        const bind_addr = net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
-                        net.bindSocket(self.recv_endpoint.socket, &bind_addr.any, bind_addr.getOsSockLen()) catch {};
-                        self.recv_bound = true;
-                    }
-                }
-            }
-        }
+        // Bind the shared recv socket for this channel (on first subscription) and resolve the
+        // concrete local address, so an ephemeral `endpoint=host:0` request gets a real port.
+        var local_addr_buf: [64]u8 = undefined;
+        const local_sockaddr: ?[]const u8 = self.resolveLocalSocketAddress(channel_data, &local_addr_buf);
 
         const channel_copy = self.allocator.dupe(u8, channel_data) catch {
             self.sendError(correlation_id, 2, "Out of memory");
@@ -824,16 +838,34 @@ pub const DriverConductor = struct {
             self.sendError(correlation_id, 3, "Failed to allocate receive channel status");
             return;
         }
-        self.counters_map.set(channel_status_handle.counter_id, 1);
+        self.counters_map.set(channel_status_handle.counter_id, counters.CHANNEL_ENDPOINT_ACTIVE);
+
+        // Advertise the resolved bound address in a local-socket-address counter keyed to the
+        // channel-status counter, so the client can discover the ephemeral port it requested.
+        var local_sockaddr_counter_id: i32 = counters.NULL_COUNTER_ID;
+        if (local_sockaddr) |addr| {
+            const handle = self.counters_map.allocateLocalSocketAddressCounter(
+                counters.RCV_LOCAL_SOCKADDR_NAME,
+                correlation_id,
+                channel_status_handle.counter_id,
+                addr,
+            );
+            if (handle.counter_id != counters.NULL_COUNTER_ID) {
+                self.counters_map.set(handle.counter_id, counters.CHANNEL_ENDPOINT_ACTIVE);
+                local_sockaddr_counter_id = handle.counter_id;
+            }
+        }
 
         const entry = SubscriptionEntry{
             .registration_id = correlation_id,
             .stream_id = stream_id,
             .channel = channel_copy,
             .channel_status_indicator_counter_id = channel_status_handle.counter_id,
+            .local_socket_address_counter_id = local_sockaddr_counter_id,
         };
 
         self.subscriptions.append(self.allocator, entry) catch {
+            if (local_sockaddr_counter_id != counters.NULL_COUNTER_ID) self.counters_map.free(local_sockaddr_counter_id);
             self.counters_map.free(channel_status_handle.counter_id);
             self.allocator.free(channel_copy);
             self.sendError(correlation_id, 2, "Out of memory");
@@ -918,6 +950,9 @@ pub const DriverConductor = struct {
             self.receiver.mutex.unlock();
             if (removed.channel_status_indicator_counter_id != counters.NULL_COUNTER_ID) {
                 self.counters_map.free(removed.channel_status_indicator_counter_id);
+            }
+            if (removed.local_socket_address_counter_id != counters.NULL_COUNTER_ID) {
+                self.counters_map.free(removed.local_socket_address_counter_id);
             }
             self.allocator.free(removed.channel);
             self.sendOperationSuccess(correlation_id);
@@ -1231,6 +1266,70 @@ test "DriverConductor ADD_SUBSCRIPTION creates entry and sends ready response" {
         conductor.subscriptions.items[0].channel_status_indicator_counter_id,
         std.mem.readInt(i32, payload[8..12], .little),
     );
+}
+
+test "DriverConductor ADD_SUBSCRIPTION with ephemeral endpoint resolves port into a local-sockaddr counter" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var ring_buf: [4096]u8 align(8) = undefined;
+    var rb = ring_buffer.ManyToOneRingBuffer.init(&ring_buf);
+
+    var bcast = try broadcast.BroadcastTransmitter.init(allocator, 16384);
+    defer bcast.deinit(allocator);
+
+    var meta_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
+    var values_buf: [4096]u8 align(64) = [_]u8{0} ** 4096;
+    var cm = counters.CountersMap.init(&meta_buf, &values_buf);
+
+    // A real UDP socket so bind() + getsockname() can resolve an ephemeral port.
+    const sock = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
+    var recv_ep = @import("../transport/endpoint.zig").ReceiveChannelEndpoint{
+        .socket = sock,
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+    };
+    defer net.closeSocket(sock);
+    var send_ep = @import("../transport/endpoint.zig").SendChannelEndpoint{ .socket = INVALID_SOCKET };
+
+    var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &cm, null);
+    defer receiver.deinit();
+    var sender = try sender_mod.Sender.init(allocator, &send_ep, &cm);
+    defer sender.deinit();
+
+    // recv_bound = false so the conductor binds the socket itself (ephemeral :0).
+    var conductor = try DriverConductor.init(allocator, &rb, &bcast, &cm, &receiver, &sender, &recv_ep, false, "/tmp", 5_000_000_000, 5_000_000_000, 5_000_000_000);
+    defer conductor.deinit();
+
+    var cmd_buf: [96]u8 = undefined;
+    @memset(&cmd_buf, 0);
+    const channel = "aeron:udp?endpoint=127.0.0.1:0";
+    std.mem.writeInt(i64, cmd_buf[0..8], 88, .little);
+    std.mem.writeInt(i64, cmd_buf[8..16], 54321, .little);
+    std.mem.writeInt(i64, cmd_buf[16..24], -1, .little);
+    std.mem.writeInt(i32, cmd_buf[24..28], 99, .little);
+    std.mem.writeInt(i32, cmd_buf[28..32], @as(i32, @intCast(channel.len)), .little);
+    @memcpy(cmd_buf[32 .. 32 + channel.len], channel);
+
+    conductor.handleAddSubscription(cmd_buf[0 .. 32 + channel.len]);
+
+    try testing.expectEqual(@as(usize, 1), conductor.subscriptions.items.len);
+    const sub = conductor.subscriptions.items[0];
+    const sockaddr_id = sub.local_socket_address_counter_id;
+    try testing.expect(sockaddr_id != counters.NULL_COUNTER_ID);
+
+    // Counter is type 14 and marked ACTIVE.
+    const meta_offset = @as(usize, @intCast(sockaddr_id)) * counters.METADATA_LENGTH;
+    try testing.expectEqual(counters.LOCAL_SOCKADDR_STATUS, std.mem.readInt(i32, meta_buf[meta_offset + counters.TYPE_ID_OFFSET ..][0..4], .little));
+    try testing.expectEqual(counters.CHANNEL_ENDPOINT_ACTIVE, cm.get(sockaddr_id));
+
+    // Key correlates to the channel-status counter and advertises the resolved port (non-zero).
+    const key = meta_buf[meta_offset + counters.KEY_OFFSET ..];
+    try testing.expectEqual(sub.channel_status_indicator_counter_id, std.mem.readInt(i32, key[counters.LOCAL_SOCKADDR_CHANNEL_STATUS_ID_OFFSET..][0..4], .little));
+    const addr_len: usize = @intCast(std.mem.readInt(i32, key[counters.LOCAL_SOCKADDR_LENGTH_OFFSET..][0..4], .little));
+    const addr = key[counters.LOCAL_SOCKADDR_STRING_OFFSET .. counters.LOCAL_SOCKADDR_STRING_OFFSET + addr_len];
+    try testing.expect(std.mem.startsWith(u8, addr, "127.0.0.1:"));
+    try testing.expect(!std.mem.eql(u8, addr, "127.0.0.1:0"));
 }
 
 test "DriverConductor REMOVE_PUBLICATION cleans up entry" {

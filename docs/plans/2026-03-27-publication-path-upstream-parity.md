@@ -6,7 +6,7 @@
 
 **Architecture:** the client already emits `ADD_PUBLICATION` in upstream field order, but the driver response and client-side publication materialization are still reduced. The driver must emit the full `PublicationBuffersReadyFlyweight`-compatible payload, and the client must consume it as the contract for publication readiness.
 
-**Tech Stack:** Zig 0.15.2, Nix devShell, vendored Aeron `1.50.2`, local `vendor/aeron` source as the canonical contract, `make check`, `make interop-smoke`.
+**Tech Stack:** Zig 0.16.0, Nix devShell, vendored Aeron `1.50.2`, local `vendor/aeron` source as the canonical contract, `make check`, `make interop-smoke`.
 
 ---
 

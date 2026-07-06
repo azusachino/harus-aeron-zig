@@ -4,7 +4,26 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [1.0.0-rc2] - 2026-04-14
+## [0.9.0] - 2026-07-06
+
+### Changed
+- Migrated the codebase to Zig 0.16 (`ArrayList` `.empty`, `alignedAlloc(.@"8", …)`, `DebugAllocator`, local `time` module).
+
+### Added
+- Completed Phase 11 release requirements.
+- **Task P11-1 (Ring Buffer Recovery)**: Added `ManyToOneRingBuffer.unblock()` to handle crashed writers holding negative sentinels or zero-value gaps in the ring buffer, fully integrated with driver conductor.
+- **Task P11-2 (Cluster Snapshotting & Recovery)**: Auto-wired `ClusterConductor` snapshotting on `handleSnapshotBegin` to serialize node state directly into the Aeron Archive catalog/data segments, plus recovery loading in `loadLastSnapshot()` during initialization.
+- **Task P11-4 (Wildcard/Ephemeral Bindings)**: Bound wildcard IP interfaces (`0.0.0.0` or `::`) and ephemeral ports (`:0`) dynamically, allocating type-14 local socket address status counters to propagate ports back to subscribers.
+- **Task P11-5 (Tutorial Complete)**: Created all missing code stubs in `tutorial/archive/` and `tutorial/cluster/`, aligned all prose chapters under `docs/tutorial/`, added a Workspace guide in `tutorial/README.md`, and validated using a custom lesson linter (`make check`).
+- **Release Baselines**: Verified complete Java-Zig interop smoke validation matrix and established performance baselines for throughput, round-trip latency, and fanout overhead.
+- Extracted the IPC primitives into a standalone `lib/agrona` module (ring buffer, broadcast, idle strategy, counters) with a `root.zig` entry point.
+- Real UDP `SETUP` frame parsing in the receiver, plus connected ring-buffer → conductor → broadcast round-trip tests (`test/driver/{setup_frame_parse,conductor_ipc,subscription_lifecycle,publication_lifecycle}_test.zig`).
+
+### Fixed
+- Interop: closed the keepalive-timeout blocker — `make interop-smoke` now passes end-to-end against the Java `aeron@1.50.2` client (`ADD_SUBSCRIPTION` → `ON_SUBSCRIPTION_READY` round-trip, SETUP/DATA/STATUS, reconnect).
+- Cluster: completed the Zig 0.16 migration of `src/cluster/conductor.zig`, restoring a green build on `main`.
+
+## [0.9.0-rc2] - 2026-04-14
 
 ### Added
 - **Cluster**: Implemented passive members tracking and dynamic membership updates via `AddPassiveMember` (SBE id=70).
@@ -16,7 +35,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - **Cluster**: Fixed memory leaks during conductor deinit involving `passive_peers` strings.
 
-## [1.0.0] - 2026-04-11 — Test completeness and release gate
+## [0.9.0-rc1] - 2026-04-11 — Test completeness and release gate
 
 ### Added
 - **269 tests** across protocol, IPC, log buffer, driver, archive, cluster, integration, and soak suites

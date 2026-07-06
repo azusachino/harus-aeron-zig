@@ -67,6 +67,15 @@ pub fn bindSocket(fd: socket_t, address: *const std.posix.sockaddr, address_len:
     if (std.posix.errno(std.posix.system.bind(fd, address, address_len)) != .SUCCESS) return error.BindFailed;
 }
 
+/// Read back the socket's locally-bound address. After binding an ephemeral
+/// port (e.g. `endpoint=host:0`), this resolves the concrete port the OS assigned.
+pub fn getSockName(fd: socket_t) !Address {
+    var addr: Address = undefined;
+    var addrlen: std.posix.socklen_t = @sizeOf(Address);
+    if (std.posix.errno(std.posix.system.getsockname(fd, &addr.any, &addrlen)) != .SUCCESS) return error.GetSockNameFailed;
+    return addr;
+}
+
 pub fn setSockOpt(fd: socket_t, level: anytype, optname: anytype, value: []const u8) !void {
     std.posix.setsockopt(fd, @intCast(asCUint(level)), asCUint(optname), value) catch return error.SetSockOptFailed;
 }
@@ -131,4 +140,37 @@ pub const Address = extern union {
             else => @sizeOf(std.posix.sockaddr),
         };
     }
+
+    /// Format this address' host with the given port as "a.b.c.d:port" (IPv4) or
+    /// "[h:h:...]:port" (IPv6). The address' own port is ignored so callers can pair a
+    /// URI-supplied host with an OS-resolved ephemeral port.
+    pub fn formatWithPort(self: Address, port: u16, buf: []u8) ![]const u8 {
+        return switch (self.any.family) {
+            std.posix.AF.INET => blk: {
+                const b: [4]u8 = @bitCast(self.in.addr);
+                break :blk std.fmt.bufPrint(buf, "{d}.{d}.{d}.{d}:{d}", .{ b[0], b[1], b[2], b[3], port });
+            },
+            std.posix.AF.INET6 => blk: {
+                const g: [8]u16 = @bitCast(self.in6.addr);
+                break :blk std.fmt.bufPrint(buf, "[{x}:{x}:{x}:{x}:{x}:{x}:{x}:{x}]:{d}", .{
+                    std.mem.bigToNative(u16, g[0]), std.mem.bigToNative(u16, g[1]),
+                    std.mem.bigToNative(u16, g[2]), std.mem.bigToNative(u16, g[3]),
+                    std.mem.bigToNative(u16, g[4]), std.mem.bigToNative(u16, g[5]),
+                    std.mem.bigToNative(u16, g[6]), std.mem.bigToNative(u16, g[7]),
+                    port,
+                });
+            },
+            else => error.UnsupportedAddressFamily,
+        };
+    }
 };
+
+test "Address.formatWithPort pairs host with a resolved port" {
+    var buf: [64]u8 = undefined;
+    // IPv4 host with an OS-resolved ephemeral port; the address' own port (0) is ignored.
+    const v4 = Address.initIp4(.{ 127, 0, 0, 1 }, 0);
+    try std.testing.expectEqualStrings("127.0.0.1:40123", try v4.formatWithPort(40123, &buf));
+
+    const v6 = Address.initIp6(.{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }, 0, 0, 0);
+    try std.testing.expectEqualStrings("[0:0:0:0:0:0:0:1]:9999", try v6.formatWithPort(9999, &buf));
+}
