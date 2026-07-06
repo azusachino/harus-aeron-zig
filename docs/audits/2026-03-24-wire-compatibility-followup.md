@@ -28,7 +28,7 @@ That said, this is still a partial Aeron implementation, not a full replacement 
 
 The archive stack is not yet comparable to the real Aeron Archive.
 
-- [src/archive/recorder.zig](/Users/yinchun.pang/Projects/project-github/harus-aeron-zig/src/archive/recorder.zig) still contains TODOs for metadata propagation.
+- [src/archive/recorder.zig](../../src/archive/recorder.zig) still contains TODOs for metadata propagation.
 - The archive control path is still simplified relative to upstream SBE-driven control messages.
 - Replay is still much closer to an in-memory proof of concept than the file-backed replay pipeline in official Aeron.
 
