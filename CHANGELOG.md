@@ -4,7 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-07-06
+## [0.9.0] - 2026-07-06
+
+### Changed
+- Migrated the codebase to Zig 0.16 (`ArrayList` `.empty`, `alignedAlloc(.@"8", …)`, `DebugAllocator`, local `time` module).
 
 ### Added
 - Completed Phase 11 release requirements.
@@ -13,14 +16,6 @@ All notable changes to this project will be documented in this file.
 - **Task P11-4 (Wildcard/Ephemeral Bindings)**: Bound wildcard IP interfaces (`0.0.0.0` or `::`) and ephemeral ports (`:0`) dynamically, allocating type-14 local socket address status counters to propagate ports back to subscribers.
 - **Task P11-5 (Tutorial Complete)**: Created all missing code stubs in `tutorial/archive/` and `tutorial/cluster/`, aligned all prose chapters under `docs/tutorial/`, added a Workspace guide in `tutorial/README.md`, and validated using a custom lesson linter (`make check`).
 - **Release Baselines**: Verified complete Java-Zig interop smoke validation matrix and established performance baselines for throughput, round-trip latency, and fanout overhead.
-
-
-## [0.9.0] - 2026-07-03
-
-### Changed
-- Migrated the codebase to Zig 0.16 (`ArrayList` `.empty`, `alignedAlloc(.@"8", …)`, `DebugAllocator`, local `time` module).
-
-### Added
 - Extracted the IPC primitives into a standalone `lib/agrona` module (ring buffer, broadcast, idle strategy, counters) with a `root.zig` entry point.
 - Real UDP `SETUP` frame parsing in the receiver, plus connected ring-buffer → conductor → broadcast round-trip tests (`test/driver/{setup_frame_parse,conductor_ipc,subscription_lifecycle,publication_lifecycle}_test.zig`).
 

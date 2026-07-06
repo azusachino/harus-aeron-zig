@@ -171,5 +171,4 @@ nav:
       - Setup: guides/setup.md
   - Reference:
       - Plan: plan.md
-      - Release Audit: audits/1.0.0-release-audit.md
       - Course Gap Report: course/lesson-gap-report.md
