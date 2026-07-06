@@ -4,6 +4,7 @@
 const std = @import("std");
 const election_mod = @import("election.zig");
 const conductor_mod = @import("conductor.zig");
+const archive_mod = @import("../archive/archive.zig");
 
 // =============================================================================
 // MemberConfig
@@ -40,6 +41,8 @@ pub const ClusterContext = struct {
     consensus_channel: []const u8 = "aeron:udp?endpoint=localhost:9030",
     /// Stream ID for consensus.
     consensus_stream_id: i32 = 102,
+    /// Wired archive instance for auto-wired snapshots and recovery.
+    archive: ?*archive_mod.Archive = null,
 };
 
 /// ElectionSnapshot — owned copy of election state for restart continuity.
@@ -91,11 +94,15 @@ pub const ConsensusModule = struct {
         else
             1;
 
+        var conductor = conductor_mod.ClusterConductor.init(allocator, ctx.member_id);
+        conductor.archive = ctx.archive;
+        try conductor.loadLastSnapshot();
+
         return ConsensusModule{
             .allocator = allocator,
             .ctx = ctx,
             .election = try election_mod.Election.init(allocator, ctx.member_id, cluster_size),
-            .conductor = conductor_mod.ClusterConductor.init(allocator, ctx.member_id),
+            .conductor = conductor,
             .is_running = false,
         };
     }

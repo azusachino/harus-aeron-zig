@@ -16,8 +16,6 @@ exclude_docs: |
   plans/**
   specs/**
 
-
-
 theme:
   name: material
   language: en

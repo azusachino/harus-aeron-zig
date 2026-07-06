@@ -7,6 +7,9 @@ const QueryMemberList = protocol_mod.QueryMemberList;
 const std = @import("std");
 const log_mod = @import("log.zig");
 const time = @import("../time.zig");
+const archive_mod = @import("../archive/archive.zig");
+const recorder_mod = @import("../archive/recorder.zig");
+const io_mod = @import("../io.zig");
 
 // =============================================================================
 // Role Enum
@@ -252,6 +255,7 @@ pub const ClusterConductor = struct {
     peers: std.ArrayList(ActiveMember) = .empty,
     /// Known passive peers (non-voting members). Populated via add_passive_member commands.
     passive_peers: std.ArrayList(ActiveMember) = .empty,
+    archive: ?*archive_mod.Archive = null,
 
     /// Initialize a new ClusterConductor.
     pub fn init(allocator: std.mem.Allocator, member_id: i32) ClusterConductor {
@@ -483,10 +487,48 @@ pub const ClusterConductor = struct {
     /// Handle snapshot_begin command.
     /// Mark snapshot in progress and capture current conductor state.
     pub fn handleSnapshotBegin(self: *ClusterConductor, cmd: SnapshotBeginCmd) !void {
-        _ = cmd;
         self.snapshot_state = .taking;
         if (self.pending_snapshot) |*old| old.deinit(self.allocator);
         self.pending_snapshot = try self.captureState(self.allocator);
+
+        // If an archive is wired, serialize the state and write it directly to the archive directory
+        if (self.archive) |arc| {
+            const blob = try self.serializeState(self.allocator);
+            defer self.allocator.free(blob);
+
+            const rec = arc.conductor.recorder orelse return error.RecorderNotInitialized;
+            const timestamp = time.milliTimestamp();
+            const recording_id = try rec.onStartRecording(
+                cmd.member_id,
+                2, // stream_id
+                "aeron:ipc?stream-id=2", // channel
+                "snapshot", // source_identity
+                .{
+                    .initial_term_id = 0,
+                    .segment_file_length = 128 * 1024 * 1024,
+                    .term_buffer_length = 65536,
+                    .mtu_length = 1408,
+                    .start_position = 0,
+                    .start_timestamp = timestamp,
+                },
+            );
+
+            // Find the active recording session and write the blob directly to it
+            var written = false;
+            for (rec.sessions.items) |*session| {
+                if (session.recording_id == recording_id) {
+                    try session.onFragment(blob);
+                    written = true;
+                    break;
+                }
+            }
+            if (!written) return error.RecordingSessionNotFound;
+
+            // Stop recording
+            try rec.onStopRecording(recording_id, time.milliTimestamp());
+
+            std.log.info("ClusterConductor member={d} successfully wrote snapshot to recording_id={d}", .{ self.member_id, recording_id });
+        }
     }
 
     /// Handle snapshot_end command.
@@ -497,6 +539,33 @@ pub const ClusterConductor = struct {
         if (self.pending_snapshot) |*snap| {
             snap.deinit(self.allocator);
             self.pending_snapshot = null;
+        }
+    }
+
+    /// Load the last successful snapshot from the Archive, if wired up.
+    pub fn loadLastSnapshot(self: *ClusterConductor) !void {
+        const arc = self.archive orelse return;
+        if (arc.conductor.catalog.findLastMatchingRecording(0, "aeron:ipc?stream-id=2", 2)) |recording_id| {
+            const path = try recorder_mod.RecordingWriter.segmentFilePath(self.allocator, arc.ctx.archive_dir, recording_id, 0);
+            defer self.allocator.free(path);
+
+            var file = std.Io.Dir.cwd().openFile(io_mod.io(), path, .{}) catch |err| switch (err) {
+                error.FileNotFound => null,
+                else => return err,
+            };
+            if (file) |*f| {
+                defer f.close(io_mod.io());
+                const size = @as(usize, @intCast(try f.length(io_mod.io())));
+                if (size > 0) {
+                    const buf = try self.allocator.alloc(u8, size);
+                    defer self.allocator.free(buf);
+                    const read_len = try f.readPositionalAll(io_mod.io(), buf, 0);
+                    if (read_len == size) {
+                        try self.loadSnapshot(buf);
+                        std.log.info("ClusterConductor member={d} successfully restored snapshot from recording_id={d}", .{ self.member_id, recording_id });
+                    }
+                }
+            }
         }
     }
 
@@ -783,8 +852,9 @@ pub const ClusterConductor = struct {
         if (try reader.readInt(u32) != SNAPSHOT_MAGIC) return error.InvalidSnapshotMagic;
         if (try reader.readInt(u32) != SNAPSHOT_VERSION) return error.UnsupportedSnapshotVersion;
 
-        const role = std.meta.intToEnum(ClusterRole, try reader.readInt(u8)) catch
-            return error.InvalidSnapshotRole;
+        const role_int = try reader.readInt(u8);
+        if (role_int >= 3) return error.InvalidSnapshotRole;
+        const role: ClusterRole = @enumFromInt(role_int);
         const leader_member_id = try reader.readInt(i32);
         const leader_ship_term_id = try reader.readInt(i64);
         const next_session_id = try reader.readInt(i64);
@@ -1324,6 +1394,75 @@ test "serializeState round trips through loadSnapshot" {
     var restored = ClusterConductor.init(allocator, 2);
     defer restored.deinit();
     try restored.loadSnapshot(blob);
+
+    try std.testing.expectEqual(ClusterRole.leader, restored.role);
+    try std.testing.expectEqual(@as(i64, 5), restored.leader_ship_term_id);
+    try std.testing.expectEqual(conductor.log.appendPosition(), restored.log.appendPosition());
+    try std.testing.expectEqual(conductor.commit_position, restored.commit_position);
+    try std.testing.expectEqual(conductor.next_session_id, restored.next_session_id);
+    try std.testing.expectEqual(@as(usize, 1), restored.sessionCount());
+    try std.testing.expectEqualSlices(u8, "aeron:udp://localhost:40124", restored.sessions.items[0].response_channel);
+    try std.testing.expectEqualSlices(u8, "resume", restored.log.entryAt(0).?.data);
+}
+
+test "ClusterConductor auto-wired snapshot round trip" {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/aeron-cluster-snapshot-test-{d}", .{time.nanoTimestamp()});
+    defer allocator.free(archive_dir);
+    try std.Io.Dir.cwd().createDirPath(io_mod.io(), archive_dir);
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), archive_dir) catch {};
+
+    const ctx = archive_mod.ArchiveContext{ .archive_dir = archive_dir };
+    var archive = try archive_mod.Archive.init(allocator, ctx);
+    defer archive.deinit();
+
+    var conductor = ClusterConductor.init(allocator, 2);
+    defer conductor.deinit();
+    conductor.archive = &archive;
+    conductor.becomeLeader(5);
+
+    const response_channel = try allocator.dupe(u8, "aeron:udp://localhost:40124");
+    defer allocator.free(response_channel);
+    try conductor.enqueueCommand(.{
+        .session_connect = .{
+            .correlation_id = 11,
+            .cluster_session_id = 1,
+            .response_stream_id = 8,
+            .response_channel = response_channel,
+        },
+    });
+    _ = try conductor.doWork();
+    conductor.response_queue.clearRetainingCapacity();
+
+    const data = try allocator.dupe(u8, "resume");
+    defer allocator.free(data);
+    try conductor.enqueueCommand(.{
+        .session_message = .{
+            .cluster_session_id = 1,
+            .timestamp = 2000,
+            .data = data,
+        },
+    });
+    _ = try conductor.doWork();
+    conductor.response_queue.clearRetainingCapacity();
+
+    // Trigger snapshot
+    try conductor.handleSnapshotBegin(.{
+        .leadership_term_id = 5,
+        .log_position = conductor.log.appendPosition(),
+        .timestamp = 2000,
+        .member_id = 2,
+    });
+
+    // Create a new conductor instance and restore state
+    var restored = ClusterConductor.init(allocator, 2);
+    defer restored.deinit();
+    restored.archive = &archive;
+
+    try restored.loadLastSnapshot();
 
     try std.testing.expectEqual(ClusterRole.leader, restored.role);
     try std.testing.expectEqual(@as(i64, 5), restored.leader_ship_term_id);
