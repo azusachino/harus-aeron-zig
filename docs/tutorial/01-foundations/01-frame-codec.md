@@ -2,14 +2,15 @@
 
 Aeron moves data as binary frames over UDP. Before anything else — the ring buffer, the log buffer, the driver — you need to understand what a frame looks like on the wire and how the Zig code models it.
 
-!!! abstract "What you'll build"
-    A precise mental model of the Aeron wire frame and the Zig idioms that pin
-    its layout to the byte:
-
-    - The common 8-byte `FrameHeader` and the frame types that extend it
-    - Why wire types are `extern struct` and how `comptime` size asserts guard them
-    - The `align(4)` trick that reproduces Aeron's `#pragma pack(4)`
-    - The four helper functions the whole data path relies on
+> [!NOTE]
+> **What you'll build**
+> A precise mental model of the Aeron wire frame and the Zig idioms that pin
+> its layout to the byte:
+>
+> - The common 8-byte `FrameHeader` and the frame types that extend it
+> - Why wire types are `extern struct` and how `comptime` size asserts guard them
+> - The `align(4)` trick that reproduces Aeron's `#pragma pack(4)`
+> - The four helper functions the whole data path relies on
 
 ## What Is a Frame
 
@@ -69,10 +70,11 @@ classDiagram
 
 Zig's default struct layout may reorder or pad fields freely. For wire formats you need exact field positions matching the Aeron C/Java reference.
 
-!!! info "Zig concept: `extern struct`"
-    `extern struct` follows C ABI layout rules: fields are laid out in declaration
-    order, with natural alignment padding inserted between them. That makes the
-    layout predictable and stable — exactly what a wire format needs.
+> [!NOTE]
+> **Zig concept: `extern struct`**
+> `extern struct` follows C ABI layout rules: fields are laid out in declaration
+> order, with natural alignment padding inserted between them. That makes the
+> layout predictable and stable — exactly what a wire format needs.
 
 ```zig
 pub const FrameHeader = extern struct {
@@ -95,11 +97,12 @@ comptime {
 }
 ```
 
-!!! tip "Fail at build time, not on the wire"
-    `@sizeOf` is evaluated at compile time. If a field type or ordering change
-    ever breaks the expected size, the build fails immediately — before any test
-    runs. Every frame type in `src/protocol/frame.zig` should carry one of these
-    assertions.
+> [!TIP]
+> **Fail at build time, not on the wire**
+> `@sizeOf` is evaluated at compile time. If a field type or ordering change
+> ever breaks the expected size, the build fails immediately — before any test
+> runs. Every frame type in `src/protocol/frame.zig` should carry one of these
+> assertions.
 
 ## Frame Types and Their Layouts
 
@@ -165,15 +168,16 @@ Sent by receivers to signal their consumption position and flow-control window.
 | 24 | `receiver_window` | i32 | Bytes the receiver can accept |
 | 28 | `receiver_id` | i64 align(4) | Unique receiver ID |
 
-!!! warning "The `align(4)` is load-bearing"
-    Aeron's C header uses `#pragma pack(4)`, placing the 8-byte `receiver_id` at
-    offset 28 — **not** 8-aligned. Without the `align(4)` annotation, Zig would
-    pad to offset 32 and produce 40 bytes instead of 36, silently breaking wire
-    compatibility. The `comptime` size assertion is what catches this.
-
-    ```zig
-    receiver_id: i64 align(4),
-    ```
+> [!WARNING]
+> **The `align(4)` is load-bearing**
+> Aeron's C header uses `#pragma pack(4)`, placing the 8-byte `receiver_id` at
+> offset 28 — **not** 8-aligned. Without the `align(4)` annotation, Zig would
+> pad to offset 32 and produce 40 bytes instead of 36, silently breaking wire
+> compatibility. The `comptime` size assertion is what catches this.
+>
+> ```zig
+> receiver_id: i64 align(4),
+> ```
 
 ### NakHeader — 28 bytes
 
@@ -210,8 +214,9 @@ Fragment reassembly in the subscriber polls frames until it sees a frame where b
 
 `src/protocol/frame.zig` — all frame types, constants (`FRAME_ALIGNMENT = 32`, `VERSION = 0x00`), the `FrameType` enum, and the helper functions.
 
-!!! success "Key takeaways"
-    - A frame is a fixed binary header + optional payload; `frame_length` is self-describing, so there is no UDP-level envelope.
-    - `extern struct` + a `comptime @sizeOf` assertion pins every wire type to an exact byte layout.
-    - `align(4)` reproduces Aeron's `#pragma pack(4)` — omitting it silently corrupts the `StatusMessage` layout.
-    - The BEGIN/END flag pair drives fragmentation and reassembly across the whole data path.
+> [!IMPORTANT]
+> **Key takeaways**
+> - A frame is a fixed binary header + optional payload; `frame_length` is self-describing, so there is no UDP-level envelope.
+> - `extern struct` + a `comptime @sizeOf` assertion pins every wire type to an exact byte layout.
+> - `align(4)` reproduces Aeron's `#pragma pack(4)` — omitting it silently corrupts the `StatusMessage` layout.
+> - The BEGIN/END flag pair drives fragmentation and reassembly across the whole data path.

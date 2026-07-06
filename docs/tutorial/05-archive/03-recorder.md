@@ -2,23 +2,25 @@
 
 The Catalog tells you what was recorded. The Recorder is the component that *does* the recording — it subscribes to live Aeron streams, pulls fragments as they arrive, and writes them to disk in segmented files.
 
-!!! abstract "What you'll build"
-    A multi-component recording system:
+> [!NOTE]
+> **What you'll build**
+> A multi-component recording system:
+>
+> - **RecordingWriter**: buffers incoming media frames and rotates to new segment files when a threshold is crossed
+> - **RecordingSession**: owns a Subscription and uses the RecordingWriter to persist fragments
+> - **Recorder**: duty agent that polls all active sessions and advances their state machines
 
-    - **RecordingWriter**: buffers incoming media frames and rotates to new segment files when a threshold is crossed
-    - **RecordingSession**: owns a Subscription and uses the RecordingWriter to persist fragments
-    - **Recorder**: duty agent that polls all active sessions and advances their state machines
-
-!!! info "Aeron concept: Subscription-based recording with segment rotation"
-    When you call `StartRecordingRequest`, the archive creates a `RecordingSession` that subscribes
-    to your channel/stream using the same Subscription API you use in your application code. Incoming
-    fragments flow through the subscription's ring buffer; the session's duty cycle polls them and
-    writes them to disk.
-
-    Segment rotation — splitting a large recording into fixed-size files — makes file handling predictable.
-    If you have a 1GB recording in a single file, seeking and reading are slower than splitting it into
-    128MB chunks. The archive uses power-of-2 segment sizes so the math is simple: seek to
-    `base_position + (offset % segment_length)` to find a byte within a segment.
+> [!NOTE]
+> **Aeron concept: Subscription-based recording with segment rotation**
+> When you call `StartRecordingRequest`, the archive creates a `RecordingSession` that subscribes
+> to your channel/stream using the same Subscription API you use in your application code. Incoming
+> fragments flow through the subscription's ring buffer; the session's duty cycle polls them and
+> writes them to disk.
+>
+> Segment rotation — splitting a large recording into fixed-size files — makes file handling predictable.
+> If you have a 1GB recording in a single file, seeking and reading are slower than splitting it into
+> 128MB chunks. The archive uses power-of-2 segment sizes so the math is simple: seek to
+> `base_position + (offset % segment_length)` to find a byte within a segment.
 
 ```mermaid
 flowchart TD
@@ -36,10 +38,11 @@ flowchart TD
     L --> I
 ```
 
-!!! info "Zig concept: File I/O and segment rotation"
-    Recording is a simple state machine: receive a fragment, append to buffer, check if we should
-    rotate, flush to disk. In Zig 0.16, file operations require passing an `std.Io` context through
-    each method call, obtained via `io_mod.io()`.
+> [!NOTE]
+> **Zig concept: File I/O and segment rotation**
+> Recording is a simple state machine: receive a fragment, append to buffer, check if we should
+> rotate, flush to disk. In Zig 0.16, file operations require passing an `std.Io` context through
+> each method call, obtained via `io_mod.io()`.
 
 ### RecordingWriter Structure
 
@@ -90,9 +93,10 @@ pub const RecordingWriter = struct {
     }
 };
 
-!!! note "Zig 0.16 file I/O"
-    File I/O methods like `writeStreamingAll()`, `sync()`, `close()`, and `createFile()` now take
-    an `std.Io` as their first argument. This is threaded through via `io_mod.io()`.
+> [!NOTE]
+> **Zig 0.16 file I/O**
+> File I/O methods like `writeStreamingAll()`, `sync()`, `close()`, and `createFile()` now take
+> an `std.Io` as their first argument. This is threaded through via `io_mod.io()`.
 
 ### RecordingSession
 
@@ -189,22 +193,23 @@ Open `src/archive/recorder.zig` and scan these functions:
 
 The key insight is that the Recorder is a *consumer* of your application's published data. It uses the same Subscription API as any Aeron client, so fragmentation, flow control, and NAK-based retransmission all work transparently. The archive never has to "chase" slow publishers or handle backpressure specially — Aeron's receiver handles it.
 
-!!! question "Exercise"
-    Implement the `RecordingWriter.write()` rotation logic in `tutorial/archive/recorder.zig`.
-
-    Your task:
-    1. Append the data to the in-memory buffer and the file.
-    2. Increment `stop_position`.
-    3. Check if rotation is needed: `segment_file_length > 0` && `stop_position - current_segment_base >= segment_file_length`.
-    4. If so, call `rotateSegment()`.
-
-    Acceptance criteria:
-    - [ ] Writing a fragment appends it to both buffer and file
-    - [ ] When the segment is full, `rotateSegment()` is called automatically
-    - [ ] After rotation, the next write goes to a new file with an updated `current_segment_base`
-    - [ ] Segment filenames follow the pattern `<recording_id>-<base_position>.dat`
-
-    Hint: Segment rotation happens in-place; don't allocate a new RecordingWriter. Just close the old file, update `current_segment_base`, and open a new file.
+> [!NOTE]
+> **Exercise**
+> Implement the `RecordingWriter.write()` rotation logic in `tutorial/archive/recorder.zig`.
+>
+> Your task:
+> 1. Append the data to the in-memory buffer and the file.
+> 2. Increment `stop_position`.
+> 3. Check if rotation is needed: `segment_file_length > 0` && `stop_position - current_segment_base >= segment_file_length`.
+> 4. If so, call `rotateSegment()`.
+>
+> Acceptance criteria:
+> - [ ] Writing a fragment appends it to both buffer and file
+> - [ ] When the segment is full, `rotateSegment()` is called automatically
+> - [ ] After rotation, the next write goes to a new file with an updated `current_segment_base`
+> - [ ] Segment filenames follow the pattern `<recording_id>-<base_position>.dat`
+>
+> Hint: Segment rotation happens in-place; don't allocate a new RecordingWriter. Just close the old file, update `current_segment_base`, and open a new file.
 
 ```bash
 cd /Users/azusachino/Projects/project-github/harus-aeron-zig
@@ -213,9 +218,10 @@ make test-unit
 
 Run a simple test: create a RecordingWriter with `segment_file_length = 100`, write 150 bytes, and verify two files are created.
 
-!!! success "Key takeaways"
-    - **Subscription-based recording**: use the same polling loop as a live subscriber; no special-case code path.
-    - **Segment rotation**: fixed-size segments enable predictable seeking and make files manageable.
-    - **Power-of-2 sizing**: segment boundaries line up with binary arithmetic (`& (size - 1)` is faster than `% size`).
-    - **Duty cycle pattern**: Recorder polls all sessions once per cycle; work count signals whether more polling might help.
-    - **No copies between formats**: fragments go from network → logbuffer → segment file; the same bytes, moved once.
+> [!IMPORTANT]
+> **Key takeaways**
+> - **Subscription-based recording**: use the same polling loop as a live subscriber; no special-case code path.
+> - **Segment rotation**: fixed-size segments enable predictable seeking and make files manageable.
+> - **Power-of-2 sizing**: segment boundaries line up with binary arithmetic (`& (size - 1)` is faster than `% size`).
+> - **Duty cycle pattern**: Recorder polls all sessions once per cycle; work count signals whether more polling might help.
+> - **No copies between formats**: fragments go from network → logbuffer → segment file; the same bytes, moved once.

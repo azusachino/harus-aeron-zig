@@ -4,25 +4,27 @@ A leader is only useful if it can convince followers to replicate entries. The R
 
 This chapter explains the replication flow, the commit index safety property, and how to implement the quorum check.
 
-!!! abstract "What you'll build"
-    A complete log replication engine with quorum-based commit safety:
-
-    - The log entry lifecycle: append (leader) → replicate (followers) → ACK → commit
-    - Why the commit index only advances when a quorum ACKs (the safety guarantee)
-    - The `AppendRequest` / `AppendPosition` / `CommitPosition` message flow
-    - What happens during a leader failover (new leader replays uncommitted entries)
-    - How to calculate "is this entry committed?"
+> [!NOTE]
+> **What you'll build**
+> A complete log replication engine with quorum-based commit safety:
+>
+> - The log entry lifecycle: append (leader) → replicate (followers) → ACK → commit
+> - Why the commit index only advances when a quorum ACKs (the safety guarantee)
+> - The `AppendRequest` / `AppendPosition` / `CommitPosition` message flow
+> - What happens during a leader failover (new leader replays uncommitted entries)
+> - How to calculate "is this entry committed?"
 
 ## Why It Works This Way (Aeron Concept)
 
-!!! info "Aeron concept: log durability via Archive"
-    In Raft, the **log is the source of truth**. Once a majority of nodes have a log entry, that entry survives any node failures — even if the leader crashes and a follower becomes the new leader.
-
-    Real Aeron persists the cluster log to the Archive (a recorded stream). This gives durability:
-    - If a node crashes and restarts, it replays the log from the archive to rebuild its state machine
-    - If a new leader is elected, it can safely tell followers "here's where your log should be"
-
-    The protocol itself is straightforward:
+> [!NOTE]
+> **Aeron concept: log durability via Archive**
+> In Raft, the **log is the source of truth**. Once a majority of nodes have a log entry, that entry survives any node failures — even if the leader crashes and a follower becomes the new leader.
+>
+> Real Aeron persists the cluster log to the Archive (a recorded stream). This gives durability:
+> - If a node crashes and restarts, it replays the log from the archive to rebuild its state machine
+> - If a new leader is elected, it can safely tell followers "here's where your log should be"
+>
+> The protocol itself is straightforward:
 
 1. **Leader appends** an entry to its local log when a client publishes a message
 2. **Leader broadcasts** `AppendRequest` messages to all followers, carrying entry data
@@ -65,28 +67,31 @@ sequenceDiagram
 
 ### Commit Index Safety
 
-!!! warning "Safety: only committed entries survive leader failover"
-    The key insight: **commit_position advances only when a quorum ACKs**.
-
-    Why? Suppose the leader crashes right after appending an entry:
-    - Scenario A: 3 nodes (leader, F1, F2). Leader appends, writes locally, then crashes before sending AppendRequest.
-    - F1 and F2 don't have the entry. A new leader is elected (say, F1). The entry is lost.
-    - Lesson: writing locally is not enough. Must reach a quorum.
-
-    So the protocol enforces: only after the leader knows a quorum has the entry does it say "this is committed."
+> [!WARNING]
+> **Safety: only committed entries survive leader failover**
+> The key insight: **commit_position advances only when a quorum ACKs**.
+>
+> Why? Suppose the leader crashes right after appending an entry:
+> - Scenario A: 3 nodes (leader, F1, F2). Leader appends, writes locally, then crashes before sending AppendRequest.
+> - F1 and F2 don't have the entry. A new leader is elected (say, F1). The entry is lost.
+> - Lesson: writing locally is not enough. Must reach a quorum.
+>
+> So the protocol enforces: only after the leader knows a quorum has the entry does it say "this is committed."
 
 ### Follower Failover
 
-!!! tip "New leader always has all committed entries"
-    If the leader crashes:
-    1. F1 gets elected as the new leader
-    2. F1's log is guaranteed to have all committed entries (because only entries on a quorum are committed)
-    3. F1 can send `NewLeadershipTerm` to F2 and all followers, telling them to truncate uncommitted entries
+> [!TIP]
+> **New leader always has all committed entries**
+> If the leader crashes:
+> 1. F1 gets elected as the new leader
+> 2. F1's log is guaranteed to have all committed entries (because only entries on a quorum are committed)
+> 3. F1 can send `NewLeadershipTerm` to F2 and all followers, telling them to truncate uncommitted entries
 
 ## Zig Concept: Atomic Commit Index + `std.ArrayList` for In-Flight Entries
 
-!!! info "Zig concept: tracking follower progress with arrays"
-    How do we track which followers have which entries? We use a simple array:
+> [!NOTE]
+> **Zig concept: tracking follower progress with arrays**
+> How do we track which followers have which entries? We use a simple array:
 
 ```zig
 pub const LogLeader = struct {
@@ -284,32 +289,33 @@ The leader uses `getCommitPosition`: given a target position, check how many fol
 
 ## Exercise
 
-!!! question "Exercise: Implement the quorum check for commit safety"
-    Implement the quorum check: given follower ACK positions, determine if a position is committed.
-
-    Open `tutorial/cluster/log.zig` and implement:
-
-    ```zig
-    /// Quorum check for log replication.
-    /// Given an array of follower positions and a target position,
-    /// determine if a quorum (including the leader) has the target position.
-    pub fn isPositionCommitted(
-        follower_positions: []const i64,
-        target_position: i64,
-        cluster_size: u32,
-    ) bool {
-        // TODO: implement
-        @panic("TODO: isPositionCommitted");
-    }
-    ```
-
-    - [ ] Count followers with `position >= target_position`
-    - [ ] Add 1 for the leader (always has its own entries)
-    - [ ] Return true if total >= `(cluster_size / 2) + 1`
-    - [ ] Write a test: 3-node cluster, set follower positions [100, 100], verify position 100 is committed
-    - [ ] Write another test: 3-node cluster, set follower positions [100, 50], verify position 100 is NOT committed
-
-    **Hint:** Quorum size is `(cluster_size / 2) + 1`. For 3 nodes, that's 2. For 5 nodes, that's 3.
+> [!NOTE]
+> **Exercise: Implement the quorum check for commit safety**
+> Implement the quorum check: given follower ACK positions, determine if a position is committed.
+>
+> Open `tutorial/cluster/log.zig` and implement:
+>
+> ```zig
+> /// Quorum check for log replication.
+> /// Given an array of follower positions and a target position,
+> /// determine if a quorum (including the leader) has the target position.
+> pub fn isPositionCommitted(
+>     follower_positions: []const i64,
+>     target_position: i64,
+>     cluster_size: u32,
+> ) bool {
+>     // TODO: implement
+>     @panic("TODO: isPositionCommitted");
+> }
+> ```
+>
+> - [ ] Count followers with `position >= target_position`
+> - [ ] Add 1 for the leader (always has its own entries)
+> - [ ] Return true if total >= `(cluster_size / 2) + 1`
+> - [ ] Write a test: 3-node cluster, set follower positions [100, 100], verify position 100 is committed
+> - [ ] Write another test: 3-node cluster, set follower positions [100, 50], verify position 100 is NOT committed
+>
+> **Hint:** Quorum size is `(cluster_size / 2) + 1`. For 3 nodes, that's 2. For 5 nodes, that's 3.
 
 ## Check Your Work
 
@@ -320,11 +326,12 @@ make test-unit
 
 Look for tests named something like `test_log_replication_*` or `test_quorum_*`.
 
-!!! success "Key takeaways"
-    1. **Log replication is the heart of consensus**: entries must reach a majority before they're safe.
-    2. **Commit index lags append index**: appended entries are locally durable; committed entries are globally durable (survived leader failover).
-    3. **Quorum = majority**: (N/2)+1 nodes ensures that any two majorities overlap. If the leader crashes, the new leader is guaranteed to have all committed entries.
-    4. **Followers are passive**: they write entries and send ACKs; the leader does all the work of tracking who has what.
-    5. **In-flight tracking**: use an array indexed by member_id to track each follower's progress. Simple, O(N), and clear.
+> [!IMPORTANT]
+> **Key takeaways**
+> 1. **Log replication is the heart of consensus**: entries must reach a majority before they're safe.
+> 2. **Commit index lags append index**: appended entries are locally durable; committed entries are globally durable (survived leader failover).
+> 3. **Quorum = majority**: (N/2)+1 nodes ensures that any two majorities overlap. If the leader crashes, the new leader is guaranteed to have all committed entries.
+> 4. **Followers are passive**: they write entries and send ACKs; the leader does all the work of tracking who has what.
+> 5. **In-flight tracking**: use an array indexed by member_id to track each follower's progress. Simple, O(N), and clear.
 
 Next, we'll see how the conductor routes client messages through this log.

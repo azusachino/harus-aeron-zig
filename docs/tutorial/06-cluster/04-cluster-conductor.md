@@ -8,19 +8,21 @@ The **conductor** is the central dispatcher of a cluster node. It manages three 
 
 Think of it as a switchboard that routes inbound messages (from clients, from other nodes) through the consensus log and out to the service.
 
-!!! abstract "What you'll build"
-    A complete client session manager with role-aware routing:
-
-    - Client session lifecycle: connect → SessionConnectRequest → SessionEvent(ok) → messages → disconnect
-    - How cluster session messages wrap application messages (SessionMessageHeader)
-    - The redirect flow (when client connects to a follower, gets redirected to leader)
-    - How the service interface is invoked (function pointer callbacks)
-    - The difference between leader and follower conductors
+> [!NOTE]
+> **What you'll build**
+> A complete client session manager with role-aware routing:
+>
+> - Client session lifecycle: connect → SessionConnectRequest → SessionEvent(ok) → messages → disconnect
+> - How cluster session messages wrap application messages (SessionMessageHeader)
+> - The redirect flow (when client connects to a follower, gets redirected to leader)
+> - How the service interface is invoked (function pointer callbacks)
+> - The difference between leader and follower conductors
 
 ## Why It Works This Way (Aeron Concept)
 
-!!! info "Aeron concept: role-based client routing"
-    In a cluster, **there is one leader and many followers**. The conductor handles this asymmetry:
+> [!NOTE]
+> **Aeron concept: role-based client routing**
+> In a cluster, **there is one leader and many followers**. The conductor handles this asymmetry:
 
 **On the Leader**:
 - Accepts `SessionConnectRequest` from clients on the ingress channel
@@ -121,8 +123,9 @@ pub const ClusterConductor = struct {
 
 ## Zig Concept: `comptime` Function Pointer for Service Callbacks
 
-!!! info "Zig concept: zero-cost service abstraction via function pointers"
-    How do we invoke the service without tight coupling? We use **function pointers**.
+> [!NOTE]
+> **Zig concept: zero-cost service abstraction via function pointers**
+> How do we invoke the service without tight coupling? We use **function pointers**.
 
 ### Standalone Example
 
@@ -340,22 +343,23 @@ Notice:
 
 ## Exercise
 
-!!! question "Exercise: Implement ClusterConductor.serializeState"
-    Implement `serializeState`: serialize cluster sessions, terms, IDs, and committed log entries into a snapshot.
-
-    Open `tutorial/cluster/conductor.zig` and implement:
-
-    ```zig
-    /// Serialize durable recovery state (role, term/session ids, sessions, log) into a snapshot blob.
-    pub fn serializeState(self: *const ClusterConductor, allocator: std.mem.Allocator) ![]u8 {
-        // TODO: implement
-        @panic("TODO: implement ClusterConductor.serializeState");
-    }
-    ```
-
-    - [ ] `serializeState` encodes the current leadership term, session IDs, and commits.
-    - [ ] Stub panics with `TODO` until implemented.
-    - [ ] `make tutorial-check` compile-checks successfully.
+> [!NOTE]
+> **Exercise: Implement ClusterConductor.serializeState**
+> Implement `serializeState`: serialize cluster sessions, terms, IDs, and committed log entries into a snapshot.
+>
+> Open `tutorial/cluster/conductor.zig` and implement:
+>
+> ```zig
+> /// Serialize durable recovery state (role, term/session ids, sessions, log) into a snapshot blob.
+> pub fn serializeState(self: *const ClusterConductor, allocator: std.mem.Allocator) ![]u8 {
+>     // TODO: implement
+>     @panic("TODO: implement ClusterConductor.serializeState");
+> }
+> ```
+>
+> - [ ] `serializeState` encodes the current leadership term, session IDs, and commits.
+> - [ ] Stub panics with `TODO` until implemented.
+> - [ ] `make tutorial-check` compile-checks successfully.
 
 ## Check Your Work
 
@@ -366,11 +370,12 @@ make test-unit
 
 Look for tests named `test_conductor_*` or `test_session_*`.
 
-!!! success "Key takeaways"
-    1. **Conductor is the switchboard**: routes client ingress, monitors replication, delivers to service.
-    2. **Leaders and followers differ**: only leaders accept client connections; followers redirect.
-    3. **Sessions are stateful**: each client gets a unique `cluster_session_id` and a response channel.
-    4. **Service callbacks use function pointers**: no tight coupling, no overhead.
-    5. **Committed entries are safe to process**: if a service crashes and restarts, it replays from the committed log, recovering its state deterministically.
+> [!IMPORTANT]
+> **Key takeaways**
+> 1. **Conductor is the switchboard**: routes client ingress, monitors replication, delivers to service.
+> 2. **Leaders and followers differ**: only leaders accept client connections; followers redirect.
+> 3. **Sessions are stateful**: each client gets a unique `cluster_session_id` and a response channel.
+> 4. **Service callbacks use function pointers**: no tight coupling, no overhead.
+> 5. **Committed entries are safe to process**: if a service crashes and restarts, it replays from the committed log, recovering its state deterministically.
 
 Next, we'll see how all these pieces fit together in the ConsensusModule.

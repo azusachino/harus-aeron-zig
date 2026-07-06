@@ -2,13 +2,14 @@
 
 The Sender is a duty-cycle agent: once per scheduler tick it wakes up, scans every active publication, drains frames from the log buffer into UDP datagrams, and goes back to sleep. It never blocks on I/O. It has no locks. It does not read from the network.
 
-!!! abstract "What you'll build"
-    A precise mental model of how the Sender continuously drains the publisher's log buffer to the network:
-
-    - The lifecycle of a `NetworkPublication` — session, stream, address, and term buffers
-    - How `sender_position` and `publisher_limit` counters track the send window
-    - The four-step duty cycle: check window, send SETUP, drain DATA, process retransmits
-    - Why the busy-spin pattern achieves ultra-low latency
+> [!NOTE]
+> **What you'll build**
+> A precise mental model of how the Sender continuously drains the publisher's log buffer to the network:
+>
+> - The lifecycle of a `NetworkPublication` — session, stream, address, and term buffers
+> - How `sender_position` and `publisher_limit` counters track the send window
+> - The four-step duty cycle: check window, send SETUP, drain DATA, process retransmits
+> - Why the busy-spin pattern achieves ultra-low latency
 
 ## NetworkPublication
 
@@ -29,12 +30,13 @@ pub const NetworkPublication = struct {
 };
 ```
 
-!!! info "Aeron concept: sender position and publisher limit"
-    `sender_position` and `publisher_limit` are indices into a shared counter array — a
-    memory-mapped slab visible to both the media driver and the client library. The client
-    advances `publisher_limit` as it writes frames; the Sender advances `sender_position` as
-    it reads and transmits them. The range `[sender_pos, pub_limit)` is the live window of
-    bytes that have been committed but not yet sent.
+> [!NOTE]
+> **Aeron concept: sender position and publisher limit**
+> `sender_position` and `publisher_limit` are indices into a shared counter array — a
+> memory-mapped slab visible to both the media driver and the client library. The client
+> advances `publisher_limit` as it writes frames; the Sender advances `sender_position` as
+> it reads and transmits them. The range `[sender_pos, pub_limit)` is the live window of
+> bytes that have been committed but not yet sent.
 
 ## The doWork Loop
 
@@ -110,10 +112,11 @@ header.term_length     = publication.log_buffer.term_length;
 header.mtu             = publication.mtu;
 ```
 
-!!! tip "Late-joining subscribers benefit from periodic SETUP"
-    Because a receiver may start listening at any time, the Sender continues to broadcast
-    SETUP frames throughout the publication's lifetime. This allows new subscribers to
-    learn the stream geometry without waiting for a client-side timeout.
+> [!TIP]
+> **Late-joining subscribers benefit from periodic SETUP**
+> Because a receiver may start listening at any time, the Sender continues to broadcast
+> SETUP frames throughout the publication's lifetime. This allows new subscribers to
+> learn the stream geometry without waiting for a client-side timeout.
 
 ## The Retransmit Queue
 
@@ -155,10 +158,11 @@ fn senderThreadFunc(md: *MediaDriver) void {
 
 This is a pure busy-spin: no sleep, no condition variable, no epoll. Aeron's design trades CPU for latency. On production deployments the thread is pinned to an isolated core with `pthread_setaffinity_np`. The `running` flag is a `std.atomic.Value(bool)`, ensuring the stop signal crosses the memory model boundary correctly.
 
-!!! warning "Busy-spin uses one full core"
-    The Sender thread will consume 100% CPU in steady state. Production deployments isolate this
-    thread to its own dedicated core to prevent it from interfering with application workloads.
-    For development and testing, this is acceptable; just be aware when profiling or monitoring.
+> [!WARNING]
+> **Busy-spin uses one full core**
+> The Sender thread will consume 100% CPU in steady state. Production deployments isolate this
+> thread to its own dedicated core to prevent it from interfering with application workloads.
+> For development and testing, this is acceptable; just be aware when profiling or monitoring.
 
 ## Key File
 
@@ -181,10 +185,11 @@ Compare against the Java reference: [`sender.go`](https://github.com/aeron-io/ae
 | `onRemovePublication` | Remove publication by (session, stream) |
 | `onRetransmit` | Enqueue a NAK-requested retransmit |
 
-!!! success "Key takeaways"
-    - The Sender is a pure duty-cycle agent: no blocking I/O, no locks, no network reads.
-    - `sender_position` and `publisher_limit` counters define the live window of data to send.
-    - Each duty cycle: check window → send periodic SETUP → drain DATA frames → process retransmits.
-    - The busy-spin pattern sacrifices CPU for microsecond-scale latency.
+> [!IMPORTANT]
+> **Key takeaways**
+> - The Sender is a pure duty-cycle agent: no blocking I/O, no locks, no network reads.
+> - `sender_position` and `publisher_limit` counters define the live window of data to send.
+> - Each duty cycle: check window → send periodic SETUP → drain DATA frames → process retransmits.
+> - The busy-spin pattern sacrifices CPU for microsecond-scale latency.
 
 Next, we'll examine the Receiver — the mirror-image agent that decodes incoming UDP frames and detects gaps in the sequence.

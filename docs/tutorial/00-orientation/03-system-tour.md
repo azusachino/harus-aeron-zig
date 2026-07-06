@@ -3,14 +3,15 @@
 Before writing any code, build a mental model of the whole system. This chapter walks
 through every major component, how they are connected, and why the design is the way it is.
 
-!!! abstract "What you'll build"
-    A complete mental model of Aeron's architecture:
-
-    - The two-process boundary: client library vs Media Driver
-    - Five shared memory regions and their purposes
-    - Log buffer structure: terms, tail counters, frame layout
-    - Component relationships: Publication, Subscription, Conductor, Sender, Receiver
-    - Data flow: from `offer()` through the driver to `poll()`
+> [!NOTE]
+> **What you'll build**
+> A complete mental model of Aeron's architecture:
+>
+> - The two-process boundary: client library vs Media Driver
+> - Five shared memory regions and their purposes
+> - Log buffer structure: terms, tail counters, frame layout
+> - Component relationships: Publication, Subscription, Conductor, Sender, Receiver
+> - Data flow: from `offer()` through the driver to `poll()`
 
 ## The Two Process Boundary
 
@@ -21,23 +22,24 @@ regions backed by memory-mapped files in a directory called the `aeron.dir`
 
 The client library never touches a socket. All networking is the driver's responsibility.
 
-!!! info "The Five Shared Memory Regions"
-    Every channel between a client and the driver uses one or more of these regions:
-
-    ```
-    aeron.dir/
-      publications/<session-id>     ← publisher log buffer  (client writes, driver reads)
-      images/<session-id>           ← subscriber log buffer (driver writes, client reads)
-      cnc.dat                       ← CnC file: ring buffer + broadcast + counters
-    ```
-
-    | Region | Direction | Purpose |
-    |--------|-----------|---------|
-    | Publication log buffer | Client → Driver | Publisher writes frames; Sender reads and transmits |
-    | Image log buffer | Driver → Client | Receiver writes incoming frames; Subscriber polls |
-    | Ring buffer (in cnc.dat) | Client → Driver | Commands: add publication, add subscription, heartbeat |
-    | Broadcast buffer (in cnc.dat) | Driver → Client | Responses: on_publication_ready, on_image_ready, errors |
-    | Counters map (in cnc.dat) | Shared | Publisher limit, subscriber position, sender position |
+> [!NOTE]
+> **The Five Shared Memory Regions**
+> Every channel between a client and the driver uses one or more of these regions:
+>
+> ```
+> aeron.dir/
+>   publications/<session-id>     ← publisher log buffer  (client writes, driver reads)
+>   images/<session-id>           ← subscriber log buffer (driver writes, client reads)
+>   cnc.dat                       ← CnC file: ring buffer + broadcast + counters
+> ```
+>
+> | Region | Direction | Purpose |
+> |--------|-----------|---------|
+> | Publication log buffer | Client → Driver | Publisher writes frames; Sender reads and transmits |
+> | Image log buffer | Driver → Client | Receiver writes incoming frames; Subscriber polls |
+> | Ring buffer (in cnc.dat) | Client → Driver | Commands: add publication, add subscription, heartbeat |
+> | Broadcast buffer (in cnc.dat) | Driver → Client | Responses: on_publication_ready, on_image_ready, errors |
+> | Counters map (in cnc.dat) | Shared | Publisher limit, subscriber position, sender position |
 
 ## The Log Buffer in Detail
 
@@ -147,8 +149,9 @@ When the client receives `ON_PUBLICATION_READY`, it memory-maps the log buffer f
 creates a `Publication` object backed by that mapping. From that point, `offer()` writes
 directly to shared memory — no further IPC with the driver on the hot path.
 
-!!! success "What the Next Parts Build"
-    - **Part 1** — The primitives: frame codec, ring buffer, broadcast, counters, log buffer.
-    - **Part 2** — The data path: TermAppender (write), TermReader (read), frame reassembly.
-    - **Part 3** — The driver agents: Sender, Receiver, Conductor, and MediaDriver bootstrap.
-    - **Part 4** — The client library: Publication, Subscription, and Aeron context.
+> [!IMPORTANT]
+> **What the Next Parts Build**
+> - **Part 1** — The primitives: frame codec, ring buffer, broadcast, counters, log buffer.
+> - **Part 2** — The data path: TermAppender (write), TermReader (read), frame reassembly.
+> - **Part 3** — The driver agents: Sender, Receiver, Conductor, and MediaDriver bootstrap.
+> - **Part 4** — The client library: Publication, Subscription, and Aeron context.

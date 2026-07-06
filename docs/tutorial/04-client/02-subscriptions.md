@@ -2,14 +2,15 @@
 
 A `Subscription` is the read side of a (channel, stream_id) pair. It does not read from a socket directly; it polls a collection of `Image` objects, each representing one sender's view of the log buffer. This chapter covers the subscription model, the Image concept, and the poll loop.
 
-!!! abstract "What you'll build"
-    A mental model of the subscription read path from `poll()` to handler invocation:
-
-    - The `Image` concept: one sender = one read cursor
-    - The `Subscription` lifecycle: creation, dynamic Image management
-    - The poll loop: round-robin iteration over Images with fragment budgets
-    - Fragment reassembly: multi-frame messages across poll calls
-    - Handler invocation: type-safe context passing via `*anyopaque`
+> [!NOTE]
+> **What you'll build**
+> A mental model of the subscription read path from `poll()` to handler invocation:
+>
+> - The `Image` concept: one sender = one read cursor
+> - The `Subscription` lifecycle: creation, dynamic Image management
+> - The poll loop: round-robin iteration over Images with fragment budgets
+> - Fragment reassembly: multi-frame messages across poll calls
+> - Handler invocation: type-safe context passing via `*anyopaque`
 
 ```mermaid
 flowchart LR
@@ -24,23 +25,24 @@ flowchart LR
 
 ## The Image concept
 
-!!! info "Aeron concept: Image"
-    When a new sender is discovered on a subscribed channel, the driver creates an `Image` — a read cursor into that sender's log buffer partition. One sender equals one Image. If two publishers write to the same `(channel, stream_id)`, the subscription holds two Images.
-
-    ```zig
-    pub const Image = struct {
-        session_id: i32,
-        stream_id: i32,
-        initial_term_id: i32,
-        log_buffer: *logbuffer.LogBuffer,
-        subscriber_position: i64,
-        is_end_of_stream: bool,
-        is_closed: bool,
-        // ...
-    };
-    ```
-
-    `subscriber_position` is the byte offset this consumer has read up to. It is compared against the publisher's tail to determine how many bytes are available. The driver's Receiver Agent monitors `subscriber_position` values across all subscribers to compute the flow-control window it reports back to senders.
+> [!NOTE]
+> **Aeron concept: Image**
+> When a new sender is discovered on a subscribed channel, the driver creates an `Image` — a read cursor into that sender's log buffer partition. One sender equals one Image. If two publishers write to the same `(channel, stream_id)`, the subscription holds two Images.
+>
+> ```zig
+> pub const Image = struct {
+>     session_id: i32,
+>     stream_id: i32,
+>     initial_term_id: i32,
+>     log_buffer: *logbuffer.LogBuffer,
+>     subscriber_position: i64,
+>     is_end_of_stream: bool,
+>     is_closed: bool,
+>     // ...
+> };
+> ```
+>
+> `subscriber_position` is the byte offset this consumer has read up to. It is compared against the publisher's tail to determine how many bytes are available. The driver's Receiver Agent monitors `subscriber_position` values across all subscribers to compute the flow-control window it reports back to senders.
 
 ## Subscription struct
 
@@ -58,20 +60,21 @@ pub const Subscription = struct {
 
 ### `[]Image` vs `[]*Image`
 
-!!! tip "Zig slice patterns: values vs pointers"
-    Zig slices are fat pointers: a pointer and a length. `[]Image` would be a slice of Image values — copying them on resize. `[]*Image` is a slice of pointers to Images, which are stable in memory and can be passed to other threads without copying. Use `[]*T` when:
-
-    - `T` is large (an Image owns a reference to a log buffer),
-    - `T` has identity (you compare addresses, not values), or
-    - `T` must be mutated through the slice without copying back.
-
-    The `images()` function returns `[]*Image` — a slice of the internal ArrayList's pointer buffer:
-
-    ```zig
-    pub fn images(self: *const Subscription) []*image_mod.Image {
-        return self.image_list.items;
-    }
-    ```
+> [!TIP]
+> **Zig slice patterns: values vs pointers**
+> Zig slices are fat pointers: a pointer and a length. `[]Image` would be a slice of Image values — copying them on resize. `[]*Image` is a slice of pointers to Images, which are stable in memory and can be passed to other threads without copying. Use `[]*T` when:
+>
+> - `T` is large (an Image owns a reference to a log buffer),
+> - `T` has identity (you compare addresses, not values), or
+> - `T` must be mutated through the slice without copying back.
+>
+> The `images()` function returns `[]*Image` — a slice of the internal ArrayList's pointer buffer:
+>
+> ```zig
+> pub fn images(self: *const Subscription) []*image_mod.Image {
+>     return self.image_list.items;
+> }
+> ```
 
 ## poll() flow
 
@@ -95,25 +98,27 @@ pub fn poll(
 
 Each `img.poll` delegates to `TermReader.read`, which scans the term buffer from `subscriber_position` forward, calling `handler` once per frame, and returns the number of fragments consumed. After `TermReader` returns, the Image advances `subscriber_position` by the bytes consumed, which is visible to the Sender/Receiver agents via shared memory.
 
-!!! info "Zig concept: FragmentHandler"
-    `FragmentHandler` is a function pointer type:
-
-    ```zig
-    pub const FragmentHandler = *const fn (
-        header: *const frame.DataHeader,
-        data: []const u8,
-        ctx: *anyopaque,
-    ) void;
-    ```
-
-    `ctx` is an untyped context pointer — Zig's equivalent of a `void*` closure. The caller casts it to their state struct with `@ptrCast(@alignCast(ctx))`.
+> [!NOTE]
+> **Zig concept: FragmentHandler**
+> `FragmentHandler` is a function pointer type:
+>
+> ```zig
+> pub const FragmentHandler = *const fn (
+>     header: *const frame.DataHeader,
+>     data: []const u8,
+>     ctx: *anyopaque,
+> ) void;
+> ```
+>
+> `ctx` is an untyped context pointer — Zig's equivalent of a `void*` closure. The caller casts it to their state struct with `@ptrCast(@alignCast(ctx))`.
 
 ## Fragment reassembly
 
-!!! info "Aeron concept: fragment reassembly"
-    Large messages that exceed the MTU are split across multiple frames by `TermAppender.appendFragmented`. The first frame carries `BEGIN_FLAG`, intermediate frames carry no flag, and the last frame carries `END_FLAG`. `TermReader` detects this sequence and reassembles fragments before invoking the handler with the complete message. The reassembly buffer is held in the Image so it persists across `poll` calls.
-
-    At this stage the implementation delivers single-frame messages only (`BEGIN_FLAG | END_FLAG`). Multi-frame reassembly is plumbed but not yet exercised in the integration test.
+> [!NOTE]
+> **Aeron concept: fragment reassembly**
+> Large messages that exceed the MTU are split across multiple frames by `TermAppender.appendFragmented`. The first frame carries `BEGIN_FLAG`, intermediate frames carry no flag, and the last frame carries `END_FLAG`. `TermReader` detects this sequence and reassembles fragments before invoking the handler with the complete message. The reassembly buffer is held in the Image so it persists across `poll` calls.
+>
+> At this stage the implementation delivers single-frame messages only (`BEGIN_FLAG | END_FLAG`). Multi-frame reassembly is plumbed but not yet exercised in the integration test.
 
 ## isConnected()
 
@@ -154,7 +159,8 @@ pub fn removeImage(self: *Subscription, session_id: i32) void {
 
 `swapRemove` replaces the removed element with the last element and shrinks the list by one — O(1) with no shifting. Order is not preserved, which is acceptable because there is no defined ordering guarantee between Images.
 
-!!! success "Key takeaways"
-    - `std.ArrayList` stores its allocator externally in Zig 0.16+. Pass the allocator to `append`, `deinit`, etc. rather than storing it in the list.
-    - `*anyopaque` is Zig's type-safe `void*`. You must `@alignCast` before `@ptrCast` to satisfy the alignment checker.
-    - Fragment handlers must not block. The poll loop is single-threaded; a blocking handler stalls all Images.
+> [!IMPORTANT]
+> **Key takeaways**
+> - `std.ArrayList` stores its allocator externally in Zig 0.16+. Pass the allocator to `append`, `deinit`, etc. rather than storing it in the list.
+> - `*anyopaque` is Zig's type-safe `void*`. You must `@alignCast` before `@ptrCast` to satisfy the alignment checker.
+> - Fragment handlers must not block. The poll loop is single-threaded; a blocking handler stalls all Images.

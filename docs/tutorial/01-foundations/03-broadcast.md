@@ -4,14 +4,15 @@ The ring buffer in chapter 1.2 solves the client-to-driver direction: many write
 
 Aeron solves this with a broadcast buffer: `src/ipc/broadcast.zig`.
 
-!!! abstract "What you'll build"
-    A one-to-many notification system where each receiver maintains independent progress:
-
-    - Record layout: 12-byte header with type, length, and reserved field
-    - Write side: single writer advancing a shared tail cursor
-    - Read side: each receiver maintains its own head cursor, independent of others
-    - The latch: detecting torn reads and recovery from being lapped
-    - Callbacks in Zig: function pointers + opaque context
+> [!NOTE]
+> **What you'll build**
+> A one-to-many notification system where each receiver maintains independent progress:
+>
+> - Record layout: 12-byte header with type, length, and reserved field
+> - Write side: single writer advancing a shared tail cursor
+> - Read side: each receiver maintains its own head cursor, independent of others
+> - The latch: detecting torn reads and recovery from being lapped
+> - Callbacks in Zig: function pointers + opaque context
 
 ## One Writer, Many Independent Readers
 
@@ -65,14 +66,15 @@ pub fn aligned(length: usize) usize {
 
 ## Write Side: BroadcastTransmitter
 
-!!! info "Single writer claims and fills slots"
-    `BroadcastTransmitter` owns the buffer and the tail cursor. The `transmit` method:
-
-    1. Loads the current tail.
-    2. Computes the next tail after aligning the record.
-    3. Writes the record header (type, length, reserved) at the current tail offset.
-    4. Copies the payload bytes.
-    5. Advances the tail atomically with `.seq_cst` ordering.
+> [!NOTE]
+> **Single writer claims and fills slots**
+> `BroadcastTransmitter` owns the buffer and the tail cursor. The `transmit` method:
+>
+> 1. Loads the current tail.
+> 2. Computes the next tail after aligning the record.
+> 3. Writes the record header (type, length, reserved) at the current tail offset.
+> 4. Copies the payload bytes.
+> 5. Advances the tail atomically with `.seq_cst` ordering.
 
 The tail is a `*std.atomic.Value(usize)`, allocated just past the end of the data buffer so it shares the same allocation:
 
@@ -85,13 +87,15 @@ pub const BroadcastTransmitter = struct {
 };
 ```
 
-!!! tip "Sequential consistency for total order"
-    `seq_cst` (sequentially consistent) ordering is used here because broadcast correctness depends on all readers seeing writes in the same order as the transmitter produced them. This is stronger than required for a single-writer scenario but matches the Java reference implementation's `volatile` semantics.
+> [!TIP]
+> **Sequential consistency for total order**
+> `seq_cst` (sequentially consistent) ordering is used here because broadcast correctness depends on all readers seeing writes in the same order as the transmitter produced them. This is stronger than required for a single-writer scenario but matches the Java reference implementation's `volatile` semantics.
 
 ## Read Side: BroadcastReceiver
 
-!!! info "Each receiver tracks independent progress"
-    `BroadcastReceiver` holds a reference to the shared buffer and the transmitter's tail, plus its own private state:
+> [!NOTE]
+> **Each receiver tracks independent progress**
+> `BroadcastReceiver` holds a reference to the shared buffer and the transmitter's tail, plus its own private state:
 
 ```zig
     pub const BroadcastReceiver = struct {
@@ -117,55 +121,58 @@ pub const BroadcastTransmitter = struct {
 
 The caller then calls `typeId()`, `buffer()`, and `length()` to access the record. These are pure accessors with no shared state.
 
-!!! warning "Detecting and recovering from being lapped"
-    A fast-running transmitter can lap a slow receiver — writing new records over old ones the receiver has not yet read. The receiver detects it with the `lapped` method, which compares the transmitter's tail to the receiver's head.
-
-    In the full Aeron implementation, a version counter (written before and after each record) lets the receiver detect a torn read mid-access: if the version after reading differs from the version before, the record was overwritten during the read and must be discarded and retried.
-
-    The latch sequence on the write side looks like:
-
-    ```
-    version++  (odd = write in progress)
-    write header + payload
-    version++  (even = write complete)
-    ```
-
-    The read side:
-    ```
-    v1 = load version
-    read record
-    v2 = load version
-    if v1 != v2 or v1 is odd → torn read, retry
-    ```
-
-    This is not a lock — no thread ever waits. A receiver that is repeatedly lapped simply re-syncs its head to the transmitter's current tail and continues, at the cost of missing intervening records.
+> [!WARNING]
+> **Detecting and recovering from being lapped**
+> A fast-running transmitter can lap a slow receiver — writing new records over old ones the receiver has not yet read. The receiver detects it with the `lapped` method, which compares the transmitter's tail to the receiver's head.
+>
+> In the full Aeron implementation, a version counter (written before and after each record) lets the receiver detect a torn read mid-access: if the version after reading differs from the version before, the record was overwritten during the read and must be discarded and retried.
+>
+> The latch sequence on the write side looks like:
+>
+> ```
+> version++  (odd = write in progress)
+> write header + payload
+> version++  (even = write complete)
+> ```
+>
+> The read side:
+> ```
+> v1 = load version
+> read record
+> v2 = load version
+> if v1 != v2 or v1 is odd → torn read, retry
+> ```
+>
+> This is not a lock — no thread ever waits. A receiver that is repeatedly lapped simply re-syncs its head to the transmitter's current tail and continues, at the cost of missing intervening records.
 
 ## Callbacks in Zig: `*const fn` and `*anyopaque`
 
-!!! info "Function pointers without generics or heap allocation"
-    The term reader pattern used downstream passes a fragment handler as a function pointer plus a context pointer:
-
-    ```zig
-    pub const MessageHandler = *const fn (msg_type_id: i32, data: []const u8, ctx: *anyopaque) void;
-    ```
-
-    `*const fn(...)` is a typed function pointer — no vtable, no allocation. `*anyopaque` carries caller state without generics, keeping the interface simple. The caller casts:
-
-    ```zig
-    handler(type_id, record_data, @ptrCast(&my_state));
-    // inside handler:
-    const s: *MyState = @ptrCast(@alignCast(ctx));
-    ```
-
-    `@alignCast` inserts a runtime assertion (in debug builds) that the pointer is correctly aligned for `MyState`.
+> [!NOTE]
+> **Function pointers without generics or heap allocation**
+> The term reader pattern used downstream passes a fragment handler as a function pointer plus a context pointer:
+>
+> ```zig
+> pub const MessageHandler = *const fn (msg_type_id: i32, data: []const u8, ctx: *anyopaque) void;
+> ```
+>
+> `*const fn(...)` is a typed function pointer — no vtable, no allocation. `*anyopaque` carries caller state without generics, keeping the interface simple. The caller casts:
+>
+> ```zig
+> handler(type_id, record_data, @ptrCast(&my_state));
+> // inside handler:
+> const s: *MyState = @ptrCast(@alignCast(ctx));
+> ```
+>
+> `@alignCast` inserts a runtime assertion (in debug builds) that the pointer is correctly aligned for `MyState`.
 
 ## Key File
 
 `src/ipc/broadcast.zig` — `BroadcastTransmitter`, `BroadcastReceiver`, `RecordDescriptor`, and the `lapped` detection logic.
 
-!!! success "Key takeaways"
-    - Broadcast uses one shared tail (written by transmitter) and independent reader heads (never shared).
-    - Each receiver advances its own head without coordination — adding a subscriber is zero-cost to others.
-    - The transmitter uses `.seq_cst` ordering so all readers see records in the same order.
-    - The latch (version counter) detects torn reads and allows safe recovery without blocking.
-    - Function pointers + opaque context avoid heap allocation while allowing stateful callbacks.
+> [!IMPORTANT]
+> **Key takeaways**
+> - Broadcast uses one shared tail (written by transmitter) and independent reader heads (never shared).
+> - Each receiver advances its own head without coordination — adding a subscriber is zero-cost to others.
+> - The transmitter uses `.seq_cst` ordering so all readers see records in the same order.
+> - The latch (version counter) detects torn reads and allows safe recovery without blocking.
+> - Function pointers + opaque context avoid heap allocation while allowing stateful callbacks.

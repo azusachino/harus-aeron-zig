@@ -6,25 +6,27 @@ Aeron Cluster solves this with **Raft consensus**: a time-tested algorithm that 
 
 In this chapter, you'll learn the wire-level protocol that makes this happen — a set of fixed-size binary messages that divide cluster communication into three families: **client-facing**, **consensus**, and **service notifications**.
 
-!!! abstract "What you'll build"
-    A precise mental model of cluster message types and the Zig idioms that ensure wire safety:
-
-    - Why every Raft struct uses `extern struct` with explicit `_padding` fields
-    - The full message taxonomy: client (201–204), consensus (211–216), service (221)
-    - How type IDs route messages in the cluster conductor
-    - Session event codes and when each fires
+> [!NOTE]
+> **What you'll build**
+> A precise mental model of cluster message types and the Zig idioms that ensure wire safety:
+>
+> - Why every Raft struct uses `extern struct` with explicit `_padding` fields
+> - The full message taxonomy: client (201–204), consensus (211–216), service (221)
+> - How type IDs route messages in the cluster conductor
+> - Session event codes and when each fires
 
 ## Why It Works This Way (Aeron Concept)
 
-!!! info "Aeron concept: SBE and channel layering"
-    Real Aeron's cluster implementation (C++ driver + Java client) uses **Simple Binary Encoding (SBE)**, a schema-less codec where every message is either:
-    1. A fixed-size header that describes its own size
-    2. Followed by optional variable-length fields (like channel strings)
-
-    All cluster messages are transmitted over **Aeron Publications and Subscriptions** — the same shared-memory ring buffers and multicast channels used by regular clients. This means:
-    - A cluster node is also an Aeron client (it publishes and subscribes like any other app)
-    - Election messages go on the consensus channel; log replication on the log channel; client ingress on the ingress channel
-    - The same fragmentation, flow control, and NAK logic applies to cluster messages as to application messages
+> [!NOTE]
+> **Aeron concept: SBE and channel layering**
+> Real Aeron's cluster implementation (C++ driver + Java client) uses **Simple Binary Encoding (SBE)**, a schema-less codec where every message is either:
+> 1. A fixed-size header that describes its own size
+> 2. Followed by optional variable-length fields (like channel strings)
+>
+> All cluster messages are transmitted over **Aeron Publications and Subscriptions** — the same shared-memory ring buffers and multicast channels used by regular clients. This means:
+> - A cluster node is also an Aeron client (it publishes and subscribes like any other app)
+> - Election messages go on the consensus channel; log replication on the log channel; client ingress on the ingress channel
+> - The same fragmentation, flow control, and NAK logic applies to cluster messages as to application messages
 
 ### Message Families
 
@@ -79,8 +81,9 @@ sequenceDiagram
 
 ## Zig Concept: `extern struct` with Explicit `_padding` Fields
 
-!!! info "Zig concept: alignment and explicit padding"
-    In Zig, we match the C ABI exactly with `extern struct`. But cluster structs have a subtle alignment requirement: all 64-bit fields (like `leader_ship_term_id: i64`) must be 8-byte aligned for atomic operations and cache-line locality.
+> [!NOTE]
+> **Zig concept: alignment and explicit padding**
+> In Zig, we match the C ABI exactly with `extern struct`. But cluster structs have a subtle alignment requirement: all 64-bit fields (like `leader_ship_term_id: i64`) must be 8-byte aligned for atomic operations and cache-line locality.
 
 ### The Pattern
 
@@ -119,33 +122,34 @@ Notice the `= 0` default for `_padding`. This means you can construct the struct
 
 ### Standalone Example: Custom Alignment
 
-!!! tip "Explicit padding clarifies intent"
-    Here's a Zig-specific example before we get to Aeron:
-
-    ```zig
-    const std = @import("std");
-
-    pub fn main() void {
-        // Without explicit padding, the compiler inserts it invisibly
-        const Implicit = extern struct {
-            a: i64,
-            b: i32,
-        };
-
-        // With explicit padding, we control it
-        const Explicit = extern struct {
-            a: i64,
-            b: i32,
-            _pad: i32 = 0,
-        };
-
-        std.debug.print("Implicit size: {}\n", .{@sizeOf(Implicit)});    // 16
-        std.debug.print("Explicit size: {}\n", .{@sizeOf(Explicit)});    // 16
-        std.debug.print("Both match, but Explicit is clearer.\n", .{});
-    }
-    ```
-
-    Both structs end up 16 bytes. But with `Explicit`, anyone reading the code knows the padding is intentional, not accidental. In a cluster protocol, this clarity prevents subtle bugs when protocol specs change.
+> [!TIP]
+> **Explicit padding clarifies intent**
+> Here's a Zig-specific example before we get to Aeron:
+>
+> ```zig
+> const std = @import("std");
+>
+> pub fn main() void {
+>     // Without explicit padding, the compiler inserts it invisibly
+>     const Implicit = extern struct {
+>         a: i64,
+>         b: i32,
+>     };
+>
+>     // With explicit padding, we control it
+>     const Explicit = extern struct {
+>         a: i64,
+>         b: i32,
+>         _pad: i32 = 0,
+>     };
+>
+>     std.debug.print("Implicit size: {}\n", .{@sizeOf(Implicit)});    // 16
+>     std.debug.print("Explicit size: {}\n", .{@sizeOf(Explicit)});    // 16
+>     std.debug.print("Both match, but Explicit is clearer.\n", .{});
+> }
+> ```
+>
+> Both structs end up 16 bytes. But with `Explicit`, anyone reading the code knows the padding is intentional, not accidental. In a cluster protocol, this clarity prevents subtle bugs when protocol specs change.
 
 ## The Code
 
@@ -279,19 +283,20 @@ These assertions fire at compile-time if:
 
 ## Exercise
 
-!!! question "Exercise: Add comptime size assertions"
-    Implement comptime size assertions for the cluster protocol.
-
-    Open `src/cluster/protocol.zig` and add a `comptime` block that verifies:
-    1. `AppendRequestHeader` is exactly 32 bytes
-    2. `VoteHeader` is exactly 40 bytes
-    3. `NewLeadershipTermHeader` is exactly 40 bytes
-
-    You can copy the pattern from above; just add the `std.debug.assert` lines for each struct in a block at the end of the file.
-
-    - [ ] All three assertions pass at compile-time (no errors)
-    - [ ] `zig build` completes without errors
-    - [ ] You can explain why `AppendRequestHeader` must be 32 bytes (three 64-bit fields + one explicit 32-bit padding)
+> [!NOTE]
+> **Exercise: Add comptime size assertions**
+> Implement comptime size assertions for the cluster protocol.
+>
+> Open `src/cluster/protocol.zig` and add a `comptime` block that verifies:
+> 1. `AppendRequestHeader` is exactly 32 bytes
+> 2. `VoteHeader` is exactly 40 bytes
+> 3. `NewLeadershipTermHeader` is exactly 40 bytes
+>
+> You can copy the pattern from above; just add the `std.debug.assert` lines for each struct in a block at the end of the file.
+>
+> - [ ] All three assertions pass at compile-time (no errors)
+> - [ ] `zig build` completes without errors
+> - [ ] You can explain why `AppendRequestHeader` must be 32 bytes (three 64-bit fields + one explicit 32-bit padding)
 
 ## Check Your Work
 
@@ -302,11 +307,12 @@ zig build
 
 If the build succeeds, the assertions passed.
 
-!!! success "Key takeaways"
-    1. **Raft coordination is message-driven**: every state change (election, replication, commit) is signaled by a fixed-size binary message.
-    2. **extern struct + explicit _padding**: we use C ABI layout and make padding explicit, so multiplatform shared memory is safe and predictable.
-    3. **Three message families**: Client (201–204) for application ingress, Consensus (211–216) for cluster coordination, Service (221–230) for delivery to the service layer.
-    4. **Correlation IDs**: every client request gets an opaque ID that the server echoes back, enabling async multiplexing without a shared request queue.
-    5. **Variable-length fields**: like archive protocol, cluster messages use a length-prefixed pattern (channel string, log entries) to stay wire-compatible across languages.
+> [!IMPORTANT]
+> **Key takeaways**
+> 1. **Raft coordination is message-driven**: every state change (election, replication, commit) is signaled by a fixed-size binary message.
+> 2. **extern struct + explicit _padding**: we use C ABI layout and make padding explicit, so multiplatform shared memory is safe and predictable.
+> 3. **Three message families**: Client (201–204) for application ingress, Consensus (211–216) for cluster coordination, Service (221–230) for delivery to the service layer.
+> 4. **Correlation IDs**: every client request gets an opaque ID that the server echoes back, enabling async multiplexing without a shared request queue.
+> 5. **Variable-length fields**: like archive protocol, cluster messages use a length-prefixed pattern (channel string, log entries) to stay wire-compatible across languages.
 
 Next, we'll see how these messages drive the Raft election state machine.

@@ -2,22 +2,24 @@
 
 The Recorder captures live streams. The Replayer reads them back. To a subscriber, a replayed stream looks identical to a live stream — same fragmentation, same flow control, same publication semantics. The only difference is the data comes from disk instead of the network.
 
-!!! abstract "What you'll build"
-    A complete replay system:
+> [!NOTE]
+> **What you'll build**
+> A complete replay system:
+>
+> - **ReplaySession**: reads from a recorded segment file and publishes chunks to an Aeron Publication
+> - **Replayer**: manages multiple concurrent replay sessions and advances them via a duty cycle
+> - Back-pressure handling: when the Publication buffer is full, retry the same chunk next cycle
 
-    - **ReplaySession**: reads from a recorded segment file and publishes chunks to an Aeron Publication
-    - **Replayer**: manages multiple concurrent replay sessions and advances them via a duty cycle
-    - Back-pressure handling: when the Publication buffer is full, retry the same chunk next cycle
-
-!!! info "Aeron concept: Re-publication from disk with back-pressure"
-    Replaying a recording is just re-publishing the same bytes the archive captured. By feeding the
-    recorded data into a standard Aeron Publication, you reuse all the infrastructure: fragmentation,
-    retransmission (if configured), back-pressure, flow control. Subscribers to the replay stream don't
-    know (or care) that the data is from disk rather than live.
-
-    This design also naturally throttles replay speed. If a Publication's back-buffer fills up, `offer()`
-    returns a back-pressure code. The Replayer sees that and retries the chunk in the next duty cycle.
-    Net result: replay speed never exceeds what subscribers can consume.
+> [!NOTE]
+> **Aeron concept: Re-publication from disk with back-pressure**
+> Replaying a recording is just re-publishing the same bytes the archive captured. By feeding the
+> recorded data into a standard Aeron Publication, you reuse all the infrastructure: fragmentation,
+> retransmission (if configured), back-pressure, flow control. Subscribers to the replay stream don't
+> know (or care) that the data is from disk rather than live.
+>
+> This design also naturally throttles replay speed. If a Publication's back-buffer fills up, `offer()`
+> returns a back-pressure code. The Replayer sees that and retries the chunk in the next duty cycle.
+> Net result: replay speed never exceeds what subscribers can consume.
 
 ```mermaid
 sequenceDiagram
@@ -42,9 +44,10 @@ sequenceDiagram
     Subs-->>Pub: Flow control
 ```
 
-!!! info "Zig concept: File I/O and retry loops"
-    Replaying is the inverse of recording. Instead of append-only writes, you read chunks in order
-    and offer them to a Publication. Back-pressure means you need a retry loop.
+> [!NOTE]
+> **Zig concept: File I/O and retry loops**
+> Replaying is the inverse of recording. Instead of append-only writes, you read chunks in order
+> and offer them to a Publication. Back-pressure means you need a retry loop.
 
 ### ReplaySession Structure
 
@@ -94,8 +97,9 @@ pub const ReplaySession = struct {
     }
 };
 
-!!! note "Zig 0.16 file I/O"
-    The `file.read()` method now takes an `std.Io` as its first argument, obtained via `io_mod.io()`.
+> [!NOTE]
+> **Zig 0.16 file I/O**
+> The `file.read()` method now takes an `std.Io` as its first argument, obtained via `io_mod.io()`.
 
 The key detail is the `switch` on the publication result:
 - **`.ok`**: bytes were published, advance position.
@@ -188,23 +192,24 @@ The essential pattern is:
 5. If `offer()` returns back-pressure, retry next cycle.
 6. When done, close the file and remove the session.
 
-!!! question "Exercise"
-    Implement the back-pressure retry loop in `ReplaySession.doWork()`.
-
-    Your task:
-    1. Read a chunk from the file (up to `buffer.len` bytes, but not past `stop_position`).
-    2. Call `publication.offer(chunk)`.
-    3. If result is `.ok`, advance `current_position` and return false (still replaying).
-    4. If result is `.back_pressure`, return false (retry next cycle, don't advance position).
-    5. If we've read all bytes (position >= stop_position), return true (done).
-
-    Acceptance criteria:
-    - [ ] Chunks are offered in order, without skipping bytes
-    - [ ] Back-pressure is handled by not advancing position; the same chunk is retried
-    - [ ] When all bytes have been offered successfully, return true (EOS)
-    - [ ] The session stops at exactly `stop_position`, not before or after
-
-    Hint: Use `@min(buffer.len, stop_position - current_position)` to avoid reading past the end.
+> [!NOTE]
+> **Exercise**
+> Implement the back-pressure retry loop in `ReplaySession.doWork()`.
+>
+> Your task:
+> 1. Read a chunk from the file (up to `buffer.len` bytes, but not past `stop_position`).
+> 2. Call `publication.offer(chunk)`.
+> 3. If result is `.ok`, advance `current_position` and return false (still replaying).
+> 4. If result is `.back_pressure`, return false (retry next cycle, don't advance position).
+> 5. If we've read all bytes (position >= stop_position), return true (done).
+>
+> Acceptance criteria:
+> - [ ] Chunks are offered in order, without skipping bytes
+> - [ ] Back-pressure is handled by not advancing position; the same chunk is retried
+> - [ ] When all bytes have been offered successfully, return true (EOS)
+> - [ ] The session stops at exactly `stop_position`, not before or after
+>
+> Hint: Use `@min(buffer.len, stop_position - current_position)` to avoid reading past the end.
 
 ```bash
 cd /Users/azusachino/Projects/project-github/harus-aeron-zig
@@ -213,9 +218,10 @@ make test-unit
 
 Test scenario: write 1000 bytes to a recording, then replay it with a Publication that sometimes returns back-pressure. Verify all 1000 bytes are published in order.
 
-!!! success "Key takeaways"
-    - **Replay is re-publication**: recorded bytes go through the same Publication pipeline as live data.
-    - **Back-pressure throttles replay**: if subscribers are slow, the Publication buffer fills and `offer()` returns back-pressure, naturally slowing replay.
-    - **No copying**: read from file → offer to Publication → subscriber sees the bytes. Same chunks, moved once.
-    - **Duty cycle pattern**: `doWork()` returns true when a session is done (EOS), allowing the Replayer to clean up and remove it.
-    - **Segment handling**: if a recording spans multiple segment files, open each one in order and seek to the right offset within each.
+> [!IMPORTANT]
+> **Key takeaways**
+> - **Replay is re-publication**: recorded bytes go through the same Publication pipeline as live data.
+> - **Back-pressure throttles replay**: if subscribers are slow, the Publication buffer fills and `offer()` returns back-pressure, naturally slowing replay.
+> - **No copying**: read from file → offer to Publication → subscriber sees the bytes. Same chunks, moved once.
+> - **Duty cycle pattern**: `doWork()` returns true when a session is done (EOS), allowing the Replayer to clean up and remove it.
+> - **Segment handling**: if a recording spans multiple segment files, open each one in order and seek to the right offset within each.

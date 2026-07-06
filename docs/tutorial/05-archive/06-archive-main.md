@@ -2,24 +2,26 @@
 
 You now have Protocol (how to speak to the archive), Catalog (what was recorded), Recorder (capture streams), Replayer (replay them), and Conductor (route commands). The final piece is the top-level Archive — the context that owns and orchestrates all the components.
 
-!!! abstract "What you'll build"
-    The top-level archive service:
+> [!NOTE]
+> **What you'll build**
+> The top-level archive service:
+>
+> - **ArchiveContext**: configuration struct (channels, paths, segment sizes)
+> - **Archive**: owns the ArchiveConductor and exposes lifecycle methods (start/stop/doWork)
+> - Understand how the pieces fit together
+> - Wire up a standalone archive service or embed it in your application
 
-    - **ArchiveContext**: configuration struct (channels, paths, segment sizes)
-    - **Archive**: owns the ArchiveConductor and exposes lifecycle methods (start/stop/doWork)
-    - Understand how the pieces fit together
-    - Wire up a standalone archive service or embed it in your application
-
-!!! info "Aeron concept: Archive as a long-lived service"
-    The archive is a long-lived service. It starts, waits for commands, processes them, and stops only
-    when explicitly shut down or the process dies. The `Archive` struct encapsulates:
-
-    - **Configuration** (ArchiveContext): where to store recordings, which channels to listen on.
-    - **Lifecycle**: start/stop to control when it's active.
-    - **Duty cycle**: `doWork()` to be called repeatedly by the host application or a dedicated thread.
-
-    This design allows the archive to be embedded in your application or run as a separate service,
-    depending on your deployment needs.
+> [!NOTE]
+> **Aeron concept: Archive as a long-lived service**
+> The archive is a long-lived service. It starts, waits for commands, processes them, and stops only
+> when explicitly shut down or the process dies. The `Archive` struct encapsulates:
+>
+> - **Configuration** (ArchiveContext): where to store recordings, which channels to listen on.
+> - **Lifecycle**: start/stop to control when it's active.
+> - **Duty cycle**: `doWork()` to be called repeatedly by the host application or a dedicated thread.
+>
+> This design allows the archive to be embedded in your application or run as a separate service,
+> depending on your deployment needs.
 
 ```mermaid
 flowchart TD
@@ -38,10 +40,11 @@ flowchart TD
     L --> M["Deinit"]
 ```
 
-!!! info "Zig concept: Configuration structs with defaults"
-    Zig has no default parameter values in function signatures, so the convention is to pass a
-    configuration struct with optional fields. All fields have defaults, so callers can omit fields they
-    don't need to customize.
+> [!NOTE]
+> **Zig concept: Configuration structs with defaults**
+> Zig has no default parameter values in function signatures, so the convention is to pass a
+> configuration struct with optional fields. All fields have defaults, so callers can omit fields they
+> don't need to customize.
 
 ### ArchiveContext
 
@@ -198,17 +201,18 @@ Let's walk through what happens when you start the archive:
 
 The entire system is driven by `doWork()` calls in a loop. No threads (unless you add them), no callbacks (except subscription.poll handlers). Just a simple duty cycle.
 
-!!! question "Exercise"
-    Implement `ArchiveProxy.startRecording` in `tutorial/archive/archive.zig`.
-
-    Your task:
-    1. Implement the `startRecording(self: *ArchiveProxy, correlation_id: i64, stream_id: i32, channel: []const u8, source_identity: []const u8) !void` method.
-    2. Encode a start recording command and enqueue it toward the archive conductor.
-
-    Acceptance criteria:
-    - [ ] `startRecording` method is implemented.
-    - [ ] Stub panics with `TODO` until implemented.
-    - [ ] `make tutorial-check` compile-checks successfully.
+> [!NOTE]
+> **Exercise**
+> Implement `ArchiveProxy.startRecording` in `tutorial/archive/archive.zig`.
+>
+> Your task:
+> 1. Implement the `startRecording(self: *ArchiveProxy, correlation_id: i64, stream_id: i32, channel: []const u8, source_identity: []const u8) !void` method.
+> 2. Encode a start recording command and enqueue it toward the archive conductor.
+>
+> Acceptance criteria:
+> - [ ] `startRecording` method is implemented.
+> - [ ] Stub panics with `TODO` until implemented.
+> - [ ] `make tutorial-check` compile-checks successfully.
 
 ```bash
 cd /Users/azusachino/Projects/project-github/harus-aeron-zig
@@ -220,13 +224,14 @@ Look for tests in `src/archive/archive.zig` that demonstrate:
 - Starting, doing work, and stopping.
 - End-to-end: start recording, write some data, start replay, verify data is replayed.
 
-!!! success "Key takeaways"
-    - **Archive is a container**: it holds configuration and the conductor; all real work is delegated.
-    - **ArchiveContext for configuration**: defaults for channels, paths, and segment sizing.
-    - **Duty cycle**: `doWork()` is called repeatedly, advancing all state machines.
-    - **Embedded or standalone**: same Archive struct, different deployment.
-    - **Lifecycle management**: `init()`, `start()`, `doWork()`, `stop()`, `deinit()` — familiar patterns
-      from the media driver.
+> [!IMPORTANT]
+> **Key takeaways**
+> - **Archive is a container**: it holds configuration and the conductor; all real work is delegated.
+> - **ArchiveContext for configuration**: defaults for channels, paths, and segment sizing.
+> - **Duty cycle**: `doWork()` is called repeatedly, advancing all state machines.
+> - **Embedded or standalone**: same Archive struct, different deployment.
+> - **Lifecycle management**: `init()`, `start()`, `doWork()`, `stop()`, `deinit()` — familiar patterns
+>   from the media driver.
 
 ---
 

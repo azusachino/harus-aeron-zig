@@ -2,14 +2,15 @@
 
 The Receiver is the inbound counterpart to the Sender. It polls a UDP socket once per duty cycle, routes the arriving frame to the correct subscription image, and issues protocol responses (`StatusMessage`, `NAK`) to keep the flow-control loop running.
 
-!!! abstract "What you'll build"
-    A precise mental model of the Receiver's frame-dispatch and flow-control path:
-
-    - The `Image` struct — the Receiver's view of one publisher's stream
-    - How `subscriber_position` and `receiver_hwm` counters track consumption and arrival
-    - The receive duty cycle: poll socket → validate header → dispatch frame → handle gaps
-    - Why untrusted external data requires defensive error handling
-    - How `StatusMessage` and `NAK` frames drive flow control and retransmission
+> [!NOTE]
+> **What you'll build**
+> A precise mental model of the Receiver's frame-dispatch and flow-control path:
+>
+> - The `Image` struct — the Receiver's view of one publisher's stream
+> - How `subscriber_position` and `receiver_hwm` counters track consumption and arrival
+> - The receive duty cycle: poll socket → validate header → dispatch frame → handle gaps
+> - Why untrusted external data requires defensive error handling
+> - How `StatusMessage` and `NAK` frames drive flow control and retransmission
 
 ## The Image
 
@@ -29,10 +30,11 @@ pub const Image = struct {
 };
 ```
 
-!!! info "Aeron concept: receiver tracking"
-    `subscriber_position` is the highest byte offset that the application has consumed.
-    `receiver_hwm` (high-water mark) is the highest byte offset that has arrived from the wire.
-    The gap `receiver_hwm - rebuild_position` indicates missing data; any gap triggers NAK.
+> [!NOTE]
+> **Aeron concept: receiver tracking**
+> `subscriber_position` is the highest byte offset that the application has consumed.
+> `receiver_hwm` (high-water mark) is the highest byte offset that has arrived from the wire.
+> The gap `receiver_hwm - rebuild_position` indicates missing data; any gap triggers NAK.
 
 ## Frame Dispatch
 
@@ -128,10 +130,11 @@ The sender responds by re-queuing the named range for retransmission.
 
 ## Error Handling: Defensive UDP Reception
 
-!!! warning "The receive path handles untrusted external data"
-    The socket delivers bytes from arbitrary UDP sources on the network. Any field could be
-    truncated, malformed, or malicious. The Receiver must never panic, crash, or expose
-    undefined behavior. Following the project rule: **no `unreachable` in UDP receive paths**.
+> [!WARNING]
+> **The receive path handles untrusted external data**
+> The socket delivers bytes from arbitrary UDP sources on the network. Any field could be
+> truncated, malformed, or malicious. The Receiver must never panic, crash, or expose
+> undefined behavior. Following the project rule: **no `unreachable` in UDP receive paths**.
 
 The Receiver uses Zig's `!T` error union returns throughout, and the `doWork` caller degrades gracefully rather than panicking:
 
@@ -186,11 +189,12 @@ Compare against the Java reference: [`receiver.go`](https://github.com/aeron-io/
 | `Image.hasGap` | True if rebuild_position < receiver_hwm |
 | `Image.gapTermOffset` | Term-relative offset of the gap start |
 
-!!! success "Key takeaways"
-    - The Receiver is a pure polling agent: it wakes once per duty cycle, reads one UDP datagram, and returns.
-    - Each frame is routed to the correct `Image` by matching `session_id` and `stream_id`.
-    - `subscriber_position` and `receiver_hwm` counters drive gap detection and NAK generation.
-    - Untrusted external data requires defensive handling: no panics, no `unreachable`, graceful degradation.
-    - `StatusMessage` and `NAK` frames form the flow-control feedback loop to the publisher.
+> [!IMPORTANT]
+> **Key takeaways**
+> - The Receiver is a pure polling agent: it wakes once per duty cycle, reads one UDP datagram, and returns.
+> - Each frame is routed to the correct `Image` by matching `session_id` and `stream_id`.
+> - `subscriber_position` and `receiver_hwm` counters drive gap detection and NAK generation.
+> - Untrusted external data requires defensive handling: no panics, no `unreachable`, graceful degradation.
+> - `StatusMessage` and `NAK` frames form the flow-control feedback loop to the publisher.
 
 Next, we'll examine the Conductor — the brain that orchestrates the Sender and Receiver by managing publications, subscriptions, and inter-process communication through shared memory.
