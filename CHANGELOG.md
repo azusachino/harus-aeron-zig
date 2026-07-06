@@ -23,7 +23,7 @@ All notable changes to this project will be documented in this file.
 - Interop: closed the keepalive-timeout blocker — `make interop-smoke` now passes end-to-end against the Java `aeron@1.50.2` client (`ADD_SUBSCRIPTION` → `ON_SUBSCRIPTION_READY` round-trip, SETUP/DATA/STATUS, reconnect).
 - Cluster: completed the Zig 0.16 migration of `src/cluster/conductor.zig`, restoring a green build on `main`.
 
-## [1.0.0-rc2] - 2026-04-14
+## [0.9.0-rc2] - 2026-04-14
 
 ### Added
 - **Cluster**: Implemented passive members tracking and dynamic membership updates via `AddPassiveMember` (SBE id=70).
@@ -35,7 +35,7 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - **Cluster**: Fixed memory leaks during conductor deinit involving `passive_peers` strings.
 
-## [1.0.0] - 2026-04-11 — Test completeness and release gate
+## [0.9.0-rc1] - 2026-04-11 — Test completeness and release gate
 
 ### Added
 - **269 tests** across protocol, IPC, log buffer, driver, archive, cluster, integration, and soak suites

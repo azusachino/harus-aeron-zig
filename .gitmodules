@@ -1,0 +1,8 @@
+[submodule "vendor/aeron"]
+	path = vendor/aeron
+	url = https://github.com/aeron-io/aeron.git
+	branch = release/1.50.x
+[submodule "vendor/zig"]
+	path = vendor/zig
+	url = https://codeberg.org/ziglang/zig.git
+	branch = 0.16.x
