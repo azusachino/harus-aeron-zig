@@ -1,5 +1,5 @@
 FROM eclipse-temurin:21-jdk-alpine AS builder
-ARG AERON_VERSION=1.50.2
+ARG AERON_VERSION=1.50.4
 RUN wget -q -O /aeron-all.jar \
       "https://repo1.maven.org/maven2/io/aeron/aeron-all/${AERON_VERSION}/aeron-all-${AERON_VERSION}.jar"
 COPY InteropSmoke.java /src/InteropSmoke.java

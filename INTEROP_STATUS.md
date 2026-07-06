@@ -4,7 +4,7 @@ Goal: `make interop-smoke` passes (Zig driver ↔ Java client, real UDP path, 10
 
 ## Current Status: PASSING ✅ (2026-07-03)
 
-`make interop-smoke` against `aeron@1.50.2` completes with both containers exiting `0`:
+`make interop-smoke` against `aeron@1.50.4` completes with both containers exiting `0`:
 
 ```
 java-client-1  | Phase 2: OK
