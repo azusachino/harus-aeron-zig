@@ -4,8 +4,8 @@ FROM alpine:3.21 AS builder
 
 RUN apk add --no-cache curl xz
 
-# Install Zig 0.15.2
-ARG ZIG_VERSION=0.15.2
+# Install Zig 0.16.0
+ARG ZIG_VERSION=0.16.0
 ARG TARGETARCH
 RUN ARCH=$(uname -m) && \
     curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-${ARCH}-linux-${ZIG_VERSION}.tar.xz" \

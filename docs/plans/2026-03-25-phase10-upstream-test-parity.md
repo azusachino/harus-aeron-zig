@@ -6,7 +6,7 @@
 
 **Architecture:** Scenario tests live under `test/{protocol,driver,archive,cluster}/`, each importing the `aeron` Zig module. A `test-scenarios` build step runs all four layers. Two GHA workflows run on every PR; a Docker Compose file drives the Java interop smoke test in CI without k8s.
 
-**Tech Stack:** Zig 0.15.2, Nix devShell, GitHub Actions, Docker Compose v2, Java 21 (Temurin), Aeron 1.50.2, `std.testing` only.
+**Tech Stack:** Zig 0.16.0, Nix devShell, GitHub Actions, Docker Compose v2, Java 21 (Temurin), Aeron 1.50.2, `std.testing` only.
 
 ---
 
