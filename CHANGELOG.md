@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-06
+
+### Added
+- Completed Phase 11 release requirements.
+- **Task P11-1 (Ring Buffer Recovery)**: Added `ManyToOneRingBuffer.unblock()` to handle crashed writers holding negative sentinels or zero-value gaps in the ring buffer, fully integrated with driver conductor.
+- **Task P11-2 (Cluster Snapshotting & Recovery)**: Auto-wired `ClusterConductor` snapshotting on `handleSnapshotBegin` to serialize node state directly into the Aeron Archive catalog/data segments, plus recovery loading in `loadLastSnapshot()` during initialization.
+- **Task P11-4 (Wildcard/Ephemeral Bindings)**: Bound wildcard IP interfaces (`0.0.0.0` or `::`) and ephemeral ports (`:0`) dynamically, allocating type-14 local socket address status counters to propagate ports back to subscribers.
+- **Task P11-5 (Tutorial Complete)**: Created all missing code stubs in `tutorial/archive/` and `tutorial/cluster/`, aligned all prose chapters under `docs/tutorial/`, added a Workspace guide in `tutorial/README.md`, and validated using a custom lesson linter (`make check`).
+- **Release Baselines**: Verified complete Java-Zig interop smoke validation matrix and established performance baselines for throughput, round-trip latency, and fanout overhead.
+
+
 ## [0.9.0] - 2026-07-03
 
 ### Changed
