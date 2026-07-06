@@ -26,7 +26,10 @@ comptime {
     _ = @import("archive/recorder.zig");
     _ = @import("archive/replayer.zig");
     _ = @import("archive/conductor.zig");
+    _ = @import("archive/archive.zig");
     _ = @import("cluster/protocol.zig");
     _ = @import("cluster/election.zig");
     _ = @import("cluster/log.zig");
+    _ = @import("cluster/conductor.zig");
+    _ = @import("cluster/cluster.zig");
 }
