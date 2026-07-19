@@ -78,6 +78,8 @@ def run(mode: str, action: str) -> int:
     command = compose_command() + ["-f", str(path), compose_action]
     if action in ("up", "soak"):
         command += ["--build", "--abort-on-container-exit"]
+        if mode == "java":
+            command += ["java-node-0", "java-node-1", "java-node-2", "java-client"]
     elif action == "down":
         command += ["--remove-orphans"]
     environment = None
@@ -88,6 +90,8 @@ def run(mode: str, action: str) -> int:
             "START_DELAY_MS": os.environ.get("TRADING_SOAK_START_DELAY_MS", "5000"),
             "HOLD_OPEN_MS": os.environ.get("TRADING_SOAK_HOLD_OPEN_MS", "30000"),
             "OFFER_TIMEOUT_MS": os.environ.get("TRADING_SOAK_OFFER_TIMEOUT_MS", "600000"),
+            "RESPONSE_TIMEOUT_MS": os.environ.get("TRADING_SOAK_RESPONSE_TIMEOUT_MS", "600000"),
+            "CONNECT_MAX_ITERATIONS": os.environ.get("TRADING_SOAK_CONNECT_MAX_ITERATIONS", "10000000"),
             "QUIET": "1",
         }
     return subprocess.run(command, cwd=ROOT, env=environment, check=False).returncode

@@ -46,6 +46,9 @@ public final class JavaTradingClusterClient
             {
                 throw new IllegalArgumentException("ORDER_COUNT must be positive");
             }
+            final long offerTimeoutMs = envLong("OFFER_TIMEOUT_MS", 60_000);
+            final long offerDeadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(offerTimeoutMs);
+            final long publishStartNs = System.nanoTime();
             for (int index = 0; index < orderCount; index++)
             {
                 final long orderId = index + 1L;
@@ -57,11 +60,17 @@ public final class JavaTradingClusterClient
                 final int length = buffer.putStringWithoutLengthAscii(0, order);
                 while (cluster.offer(buffer, 0, length) < 0)
                 {
+                    if (System.nanoTime() >= offerDeadline)
+                    {
+                        throw new IllegalStateException("timed out offering BTC_USDT orders");
+                    }
                     Thread.yield();
                 }
             }
+            final long publishMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - publishStartNs);
 
-            final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            final long responseTimeoutMs = envLong("RESPONSE_TIMEOUT_MS", 30_000);
+            final long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(responseTimeoutMs);
             while (responses.get() < orderCount && System.nanoTime() < deadline)
             {
                 if (cluster.pollEgress() == 0)
@@ -73,7 +82,11 @@ public final class JavaTradingClusterClient
             {
                 throw new IllegalStateException("timed out waiting for BTC_USDT responses");
             }
-            System.out.println("JAVA_CLUSTER_CLIENT_OK responses=" + responses.get());
+            final long totalMs = publishMs + responseTimeoutMs - Math.max(0,
+                TimeUnit.NANOSECONDS.toMillis(deadline - System.nanoTime()));
+            final long throughput = Math.max(1, orderCount * 1_000L / Math.max(1, totalMs));
+            System.out.println("JAVA_CLUSTER_CLIENT_OK responses=" + responses.get() +
+                " publish_ms=" + publishMs + " total_ms=" + totalMs + " orders_per_sec=" + throughput);
             final long holdOpenMs = envLong("HOLD_OPEN_MS", 0);
             if (holdOpenMs > 0)
             {

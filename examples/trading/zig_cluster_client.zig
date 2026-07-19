@@ -58,6 +58,7 @@ pub fn main() !void {
         .ingress_channel = ingress_channel,
         .egress_channel = response_channel,
         .response_channel = response_channel,
+        .max_connect_iterations = envUsize("CONNECT_MAX_ITERATIONS", 100_000),
     });
     defer cluster.close();
 
@@ -66,6 +67,7 @@ pub fn main() !void {
     var responses = Responses{};
     const offer_timeout_ms = envUsize("OFFER_TIMEOUT_MS", 60_000);
     const offer_deadline = aeron.time.milliTimestamp() + @as(i64, @intCast(offer_timeout_ms));
+    const publish_start_ms = aeron.time.milliTimestamp();
     for (0..order_count) |index| {
         // Keep the Zig client namespace disjoint from the Java baseline client.
         const order_id = 1_000_001 + index;
@@ -91,12 +93,16 @@ pub fn main() !void {
             }
         }
     }
+    const publish_ms = @as(usize, @intCast(@max(0, aeron.time.milliTimestamp() - publish_start_ms)));
 
-    const deadline = aeron.time.milliTimestamp() + 30_000;
+    const response_timeout_ms = envUsize("RESPONSE_TIMEOUT_MS", 30_000);
+    const deadline = aeron.time.milliTimestamp() + @as(i64, @intCast(response_timeout_ms));
     while (responses.count < order_count and aeron.time.milliTimestamp() < deadline) {
         _ = client.doWork();
         _ = cluster.pollEgress(onResponse, @ptrCast(&responses), 10);
     }
     if (responses.count != order_count) return error.ResponseTimeout;
-    std.debug.print("ZIG_CLUSTER_CLIENT_OK responses={d}\n", .{responses.count});
+    const total_ms = publish_ms + response_timeout_ms -| @as(usize, @intCast(@max(0, deadline - aeron.time.milliTimestamp())));
+    const orders_per_sec = order_count * 1000 / @max(1, total_ms);
+    std.debug.print("ZIG_CLUSTER_CLIENT_OK responses={d} publish_ms={d} total_ms={d} orders_per_sec={d}\n", .{ responses.count, publish_ms, total_ms, orders_per_sec });
 }

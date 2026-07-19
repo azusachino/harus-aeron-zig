@@ -48,6 +48,8 @@ services:
       ORDER_COUNT: "${ORDER_COUNT:-3}"
       START_DELAY_MS: "${START_DELAY_MS:-0}"
       HOLD_OPEN_MS: "${HOLD_OPEN_MS:-0}"
+      OFFER_TIMEOUT_MS: "${OFFER_TIMEOUT_MS:-60000}"
+      RESPONSE_TIMEOUT_MS: "${RESPONSE_TIMEOUT_MS:-30000}"
       QUIET: "${QUIET:-0}"
     tmpfs:
       - /dev/shm:exec,size=1g
@@ -68,6 +70,8 @@ services:
       ORDER_COUNT: "${ORDER_COUNT:-3}"
       START_DELAY_MS: "${START_DELAY_MS:-0}"
       OFFER_TIMEOUT_MS: "${OFFER_TIMEOUT_MS:-60000}"
+      RESPONSE_TIMEOUT_MS: "${RESPONSE_TIMEOUT_MS:-30000}"
+      CONNECT_MAX_ITERATIONS: "${CONNECT_MAX_ITERATIONS:-100000}"
       QUIET: "${QUIET:-0}"
     tmpfs:
       - /dev/shm:exec,size=1g
