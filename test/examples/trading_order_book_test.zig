@@ -2,6 +2,7 @@ const std = @import("std");
 const trading = @import("trading");
 
 test "trading example exports a usable order book" {
+    try std.testing.expectEqualStrings("BTC_USDT", trading.SYMBOL);
     var book = trading.OrderBook.init(std.testing.allocator);
     defer book.deinit();
 

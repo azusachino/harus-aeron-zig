@@ -114,6 +114,7 @@ pub const Address = extern union {
     }
 
     pub fn resolveIp(host: []const u8, port: u16) !Address {
+        if (host.len == 0) return error.InvalidIPAddressFormat;
         if (std.Io.net.Ip4Address.parse(host, port)) |ip4| {
             return initIp4(ip4.bytes, ip4.port);
         } else |_| {}
@@ -122,6 +123,36 @@ pub const Address = extern union {
             return initIp6(ip6.bytes, ip6.port, ip6.flow, ip6.interface.index);
         } else |_| {}
 
+        // Aeron deployments commonly use DNS names for container and service endpoints.
+        // The old implementation stopped after literal IP parsing, which caused the
+        // conductor to silently fall back to 127.0.0.1 for valid Docker hostnames.
+        var host_buf: [256:0]u8 = undefined;
+        if (host.len >= host_buf.len) return error.InvalidIPAddressFormat;
+        @memcpy(host_buf[0..host.len], host);
+        host_buf[host.len] = 0;
+
+        var port_buf: [6:0]u8 = undefined;
+        const port_text = std.fmt.bufPrintZ(&port_buf, "{d}", .{port}) catch return error.InvalidIPAddressFormat;
+        const hints: std.posix.addrinfo = .{
+            .flags = .{},
+            .family = std.posix.AF.INET,
+            .socktype = std.posix.SOCK.DGRAM,
+            .protocol = std.posix.IPPROTO.UDP,
+            .canonname = null,
+            .addr = null,
+            .addrlen = 0,
+            .next = null,
+        };
+        var result: ?*std.posix.addrinfo = null;
+        const rc = std.posix.system.getaddrinfo(host_buf[0..host.len :0].ptr, port_text.ptr, &hints, &result);
+        if (@intFromEnum(rc) != 0) return error.InvalidIPAddressFormat;
+        defer if (result) |info| std.posix.system.freeaddrinfo(info);
+
+        const info = result orelse return error.InvalidIPAddressFormat;
+        const sockaddr = info.addr orelse return error.InvalidIPAddressFormat;
+        if (info.family == std.posix.AF.INET) {
+            return .{ .in = @as(*const std.posix.sockaddr.in, @ptrCast(@alignCast(sockaddr))).* };
+        }
         return error.InvalidIPAddressFormat;
     }
 

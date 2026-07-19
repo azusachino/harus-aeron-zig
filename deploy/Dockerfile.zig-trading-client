@@ -1,0 +1,4 @@
+FROM debian:bookworm-slim
+
+COPY zig-out/bin/zig-cluster-client /usr/local/bin/zig-cluster-client
+ENTRYPOINT ["/usr/local/bin/zig-cluster-client"]

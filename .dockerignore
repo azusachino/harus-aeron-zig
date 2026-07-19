@@ -3,7 +3,10 @@
 .claude
 .zig-cache
 .zig-global-cache
-zig-out
+zig-out/*
+!zig-out/
+!zig-out/bin/
+!zig-out/bin/zig-cluster-client
 vendor
 nix-shell.*
 result

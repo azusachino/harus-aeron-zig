@@ -237,3 +237,66 @@
   "aeron_version": "1.50.2",
   "status": "done"
 }
+{
+  "layer": "cluster",
+  "our_file": "test/cluster/client_protocol_test.zig",
+  "upstream_class": "AeronClusterTest",
+  "upstream_path": "aeron-cluster/src/test/java/io/aeron/cluster/client/AeronClusterTest.java",
+  "aeron_version": "1.50.4",
+  "status": "partial",
+  "note": "Session header and connect-request wire assertions adopted; lifecycle and redirect cases remain."
+}
+{
+  "layer": "cluster",
+  "our_file": "test/cluster/client_protocol_test.zig",
+  "upstream_class": "EgressPollerTest",
+  "upstream_path": "aeron-cluster/src/test/java/io/aeron/cluster/client/EgressPollerTest.java",
+  "aeron_version": "1.50.4",
+  "status": "partial",
+  "note": "Session event field decoding adopted; unknown-schema and controlled-poll behavior remain."
+}
+{
+  "layer": "cluster",
+  "our_file": "test/cluster/client_protocol_test.zig",
+  "upstream_class": "SessionEventCodecCompatibilityTest",
+  "upstream_path": "aeron-cluster/src/test/java/io/aeron/cluster/SessionEventCodecCompatibilityTest.java",
+  "aeron_version": "1.50.4",
+  "status": "partial",
+  "note": "Current schema fixture adopted; historical v5/v12 decoder compatibility remains."
+}
+{
+  "layer": "cluster",
+  "our_file": "test/cluster/client_protocol_test.zig",
+  "upstream_class": "IngressAdapterTest",
+  "upstream_path": "aeron-cluster/src/test/java/io/aeron/cluster/IngressAdapterTest.java",
+  "aeron_version": "1.50.4",
+  "status": "partial",
+  "note": "Connect request layout adopted; full delegate matrix requires a Zig ingress adapter."
+}
+{
+  "layer": "driver",
+  "our_file": "test/driver/udp_conformance_test.zig",
+  "upstream_class": "SenderTest / ReceiverTest",
+  "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/SenderTest.java + ReceiverTest.java",
+  "aeron_version": "1.50.2",
+  "status": "partial",
+  "note": "Raw SETUP/STATUS byte dispatch, packed datagram dispatch, and STATUS response address/layout coverage. Sender cadence remains in src/driver/sender.zig tests."
+}
+{
+  "layer": "driver",
+  "our_file": "test/driver/udp_conformance_test.zig",
+  "upstream_class": "FlowControlTest",
+  "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/FlowControlTest.java",
+  "aeron_version": "1.50.2",
+  "status": "partial",
+  "note": "Unicast position/window and multicast slowest-receiver/expiry semantics are covered directly."
+}
+{
+  "layer": "driver",
+  "our_file": "test/driver/udp_conformance_test.zig",
+  "upstream_class": "UdpChannelTest",
+  "upstream_path": "aeron-driver/src/test/java/io/aeron/driver/media/UdpChannelTest.java",
+  "aeron_version": "1.50.2",
+  "status": "partial",
+  "note": "Ephemeral endpoint bind and assigned-port propagation are covered; hostname and multicast matrices remain."
+}

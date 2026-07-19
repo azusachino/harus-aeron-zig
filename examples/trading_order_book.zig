@@ -8,6 +8,7 @@ const std = @import("std");
 const aeron = @import("aeron");
 
 pub const Side = enum { bid, ask };
+pub const SYMBOL = "BTC_USDT";
 
 pub const Order = struct {
     order_id: u64,
@@ -192,7 +193,7 @@ pub fn main() !void {
     if (book.bestAsk()) |ask| {
         std.debug.print("best ask: {d} x {d}\n", .{ ask.price, ask.quantity });
     }
-    std.debug.print("cluster log position: {d}\n", .{log.appendPosition()});
+    std.debug.print("symbol={s} cluster log position: {d}\n", .{ SYMBOL, log.appendPosition() });
 }
 
 test "order book happy path matches crossing orders" {

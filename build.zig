@@ -192,6 +192,21 @@ pub fn build(b: *std.Build) void {
     test_setup_parse.root_module.link_libc = true;
     const run_test_setup_parse = b.addRunArtifact(test_setup_parse);
 
+    // UDP wire and flow-control conformance tests — driver layer
+    const test_udp_conformance = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/driver/udp_conformance_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+                .{ .name = "agrona", .module = agrona_mod },
+            },
+        }),
+    });
+    test_udp_conformance.root_module.link_libc = true;
+    const run_test_udp_conformance = b.addRunArtifact(test_udp_conformance);
+
     // Publication lifecycle tests — driver layer
     const test_pub_lifecycle = b.addTest(.{
         .root_module = b.createModule(.{
@@ -226,6 +241,7 @@ pub fn build(b: *std.Build) void {
     test_driver_step.dependOn(&run_test_driver.step);
     test_driver_step.dependOn(&run_test_driver_ipc.step);
     test_driver_step.dependOn(&run_test_setup_parse.step);
+    test_driver_step.dependOn(&run_test_udp_conformance.step);
     test_driver_step.dependOn(&run_test_pub_lifecycle.step);
     test_driver_step.dependOn(&run_test_sub_lifecycle.step);
 
@@ -317,6 +333,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "basic-subscriber", .path = "examples/basic_subscriber.zig" },
         .{ .name = "throughput-example", .path = "examples/throughput.zig" },
         .{ .name = "trading-order-book", .path = "examples/trading_order_book.zig" },
+        .{ .name = "zig-cluster-client", .path = "examples/trading/zig_cluster_client.zig" },
     };
     const examples_step = b.step("examples", "Build all examples");
     for (example_files) |example| {

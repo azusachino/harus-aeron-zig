@@ -23,6 +23,8 @@ pub const archive = struct {
 };
 pub const cluster = struct {
     pub const protocol = @import("cluster/protocol.zig");
+    pub const client_codecs = @import("cluster/client_codecs.zig");
+    pub const client = @import("cluster/client.zig");
     pub const election = @import("cluster/election.zig");
     pub const log = @import("cluster/log.zig");
     pub const conductor = @import("cluster/conductor.zig");
@@ -59,6 +61,7 @@ pub const Aeron = struct {
 
     // Tracking
     publications: std.AutoHashMapUnmanaged(i64, *ExclusivePublication),
+    pending_publications: std.AutoHashMapUnmanaged(i64, i64) = .{},
     subscriptions: std.AutoHashMapUnmanaged(i64, *Subscription),
     pending_subscription_streams: std.AutoHashMapUnmanaged(i64, i32),
     embedded_driver: ?*driver.MediaDriver = null,
@@ -109,6 +112,7 @@ pub const Aeron = struct {
             .client_id = client_id,
             .last_keepalive_ms = 0,
             .publications = .{},
+            .pending_publications = .{},
             .subscriptions = .{},
             .pending_subscription_streams = .{},
         };
@@ -124,6 +128,7 @@ pub const Aeron = struct {
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.publications.deinit(self.allocator);
+        self.pending_publications.deinit(self.allocator);
 
         var sub_it = self.subscriptions.iterator();
         while (sub_it.next()) |entry| {
@@ -137,6 +142,10 @@ pub const Aeron = struct {
         }
         self.subscriptions.deinit(self.allocator);
         self.pending_subscription_streams.deinit(self.allocator);
+    }
+
+    pub fn clientId(self: *const Aeron) i64 {
+        return self.client_id;
     }
 
     fn openPublicationLogBuffer(self: *Aeron, log_file_name: []const u8, session_id: i32, stream_id: i32) ?PublicationLogHandle {
@@ -185,7 +194,21 @@ pub const Aeron = struct {
             const msg_type_id = self.to_clients_broadcast_receiver.typeId();
             const buffer = self.to_clients_broadcast_receiver.buffer();
 
-            if (msg_type_id == driver.conductor.RESPONSE_ON_IMAGE_READY) {
+            if (msg_type_id == driver.conductor.RESPONSE_ON_ERROR) {
+                if (buffer.len >= 16) {
+                    const correlation_id = std.mem.readInt(i64, buffer[0..8], .little);
+                    const error_code = std.mem.readInt(i32, buffer[8..12], .little);
+                    const message_length = std.mem.readInt(i32, buffer[12..16], .little);
+                    if (message_length >= 0 and buffer.len >= 16 + @as(usize, @intCast(message_length))) {
+                        std.debug.print("[AERON] driver error correlation={d} code={d}: {s}\n", .{
+                            correlation_id,
+                            error_code,
+                            buffer[16 .. 16 + @as(usize, @intCast(message_length))],
+                        });
+                    }
+                }
+                work += 1;
+            } else if (msg_type_id == driver.conductor.RESPONSE_ON_IMAGE_READY) {
                 const registration_id = std.mem.readInt(i64, buffer[0..8], .little);
                 const session_id = std.mem.readInt(i32, buffer[8..12], .little);
                 const stream_id = std.mem.readInt(i32, buffer[12..16], .little);
@@ -238,7 +261,9 @@ pub const Aeron = struct {
                 };
                 _ = self.pending_subscription_streams.remove(correlation_id);
                 work += 1;
-            } else if (msg_type_id == driver.conductor.RESPONSE_ON_PUBLICATION_READY) {
+            } else if (msg_type_id == driver.conductor.RESPONSE_ON_PUBLICATION_READY or
+                msg_type_id == driver.conductor.RESPONSE_ON_EXCLUSIVE_PUBLICATION_READY)
+            {
                 if (buffer.len < 36) continue;
 
                 const correlation_id = std.mem.readInt(i64, buffer[0..8], .little);
@@ -254,7 +279,6 @@ pub const Aeron = struct {
                 if (buffer.len < 36 + log_file_name_len) continue;
 
                 const log_file_name = buffer[36 .. 36 + log_file_name_len];
-                _ = correlation_id;
                 _ = channel_status_indicator_id;
 
                 if (self.openPublicationLogBuffer(log_file_name, session_id, stream_id)) |log_handle| {
@@ -285,6 +309,9 @@ pub const Aeron = struct {
                         self.allocator.destroy(pub_instance);
                         continue;
                     };
+                    self.pending_publications.put(self.allocator, correlation_id, registration_id) catch {};
+                } else {
+                    std.debug.print("[AERON] publication ready but log buffer open failed correlation={d} path={s}\n", .{ correlation_id, log_file_name });
                 }
                 work += 1;
             }
@@ -296,6 +323,12 @@ pub const Aeron = struct {
     }
 
     pub fn getPublication(self: *Aeron, registration_id: i64) ?*ExclusivePublication {
+        return self.publications.get(registration_id);
+    }
+
+    /// Resolve the publication created by an asynchronous addPublication request.
+    pub fn publicationForRequest(self: *Aeron, correlation_id: i64) ?*ExclusivePublication {
+        const registration_id = self.pending_publications.get(correlation_id) orelse correlation_id;
         return self.publications.get(registration_id);
     }
 
@@ -574,6 +607,7 @@ test "Aeron doWork parses full publication-ready payload and maps log buffer" {
             allocator.destroy(entry.value_ptr.*);
         }
         aeron.publications.deinit(allocator);
+        aeron.pending_publications.deinit(allocator);
         aeron.subscriptions.deinit(allocator);
         aeron.pending_subscription_streams.deinit(allocator);
     }
