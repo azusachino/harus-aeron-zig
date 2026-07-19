@@ -7,6 +7,9 @@ const std = @import("std");
 
 pub const SCHEMA_ID: u16 = 111;
 pub const SCHEMA_VERSION: u16 = 15;
+// Aeron Cluster's session-connect `version` field is a SemanticVersion (0.3.0),
+// distinct from the SBE schema version above.
+pub const PROTOCOL_SEMANTIC_VERSION: i32 = 0x000300;
 pub const MESSAGE_HEADER_LENGTH: usize = 8;
 pub const SESSION_MESSAGE_HEADER_LENGTH: usize = 24;
 pub const SESSION_HEADER_LENGTH: usize = MESSAGE_HEADER_LENGTH + SESSION_MESSAGE_HEADER_LENGTH;
@@ -200,10 +203,11 @@ fn read(comptime T: type, source: []const u8) T {
 
 test "upstream session connect request layout" {
     var buffer: [128]u8 = undefined;
-    const length = try encodeSessionConnectRequest(&buffer, 7, 10, 15, "aeron:udp?endpoint=client:0", &.{}, "zig-test");
+    const length = try encodeSessionConnectRequest(&buffer, 7, 10, PROTOCOL_SEMANTIC_VERSION, "aeron:udp?endpoint=client:0", &.{}, "zig-test");
     try std.testing.expectEqual(@as(u16, 16), read(u16, buffer[0..2]));
     try std.testing.expectEqual(@as(u16, 3), read(u16, buffer[2..4]));
     try std.testing.expectEqual(@as(u16, SCHEMA_ID), read(u16, buffer[4..6]));
+    try std.testing.expectEqual(PROTOCOL_SEMANTIC_VERSION, read(i32, buffer[20..24]));
     try std.testing.expectEqual(@as(i64, 7), read(i64, buffer[8..16]));
     try std.testing.expectEqual(@as(i32, 10), read(i32, buffer[16..20]));
     try std.testing.expectEqual(@as(u32, 27), read(u32, buffer[24..28]));

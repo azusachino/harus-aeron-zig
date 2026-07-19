@@ -48,9 +48,11 @@ pub fn main() !void {
     defer cluster.close();
 
     const orders = [_][]const u8{
-        "BTC_USDT|1|ASK|10100|10",
-        "BTC_USDT|2|BID|10100|4",
-        "BTC_USDT|3|BID|10050|8",
+        // Keep the Zig client namespace disjoint from the Java baseline client when both
+        // clients share one cluster service and order book.
+        "BTC_USDT|101|ASK|10100|10",
+        "BTC_USDT|102|BID|10100|4",
+        "BTC_USDT|103|BID|10050|8",
     };
     for (orders) |order| {
         while (true) {

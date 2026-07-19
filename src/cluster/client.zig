@@ -18,7 +18,7 @@ pub const Context = struct {
     egress_channel: []const u8,
     egress_stream_id: i32 = 102,
     response_channel: []const u8,
-    protocol_version: i32 = 15,
+    protocol_version: i32 = codecs.PROTOCOL_SEMANTIC_VERSION,
     client_info: []const u8 = "harus-aeron-zig",
     encoded_credentials: []const u8 = &.{},
     max_connect_iterations: usize = 100_000,
