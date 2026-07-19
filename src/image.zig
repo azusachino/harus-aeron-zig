@@ -3,6 +3,7 @@ const logbuffer = @import("logbuffer/log_buffer.zig");
 const term_reader = @import("logbuffer/term_reader.zig");
 const metadata = @import("logbuffer/metadata.zig");
 const frame = @import("protocol/frame.zig");
+const counters = @import("agrona").counters;
 
 pub const Image = struct {
     session_id: i32,
@@ -11,6 +12,8 @@ pub const Image = struct {
     term_length: i32,
     log_buffer: *logbuffer.LogBuffer,
     subscriber_position: i64,
+    subscriber_position_counter: ?*counters.CountersMap,
+    subscriber_position_counter_id: i32,
     is_eos: bool,
     owns_log_buffer: bool = false,
 
@@ -22,9 +25,19 @@ pub const Image = struct {
             .term_length = log_buffer.term_length,
             .log_buffer = log_buffer,
             .subscriber_position = 0,
+            .subscriber_position_counter = null,
+            .subscriber_position_counter_id = counters.NULL_COUNTER_ID,
             .is_eos = false,
             .owns_log_buffer = false,
         };
+    }
+
+    // The client publishes its consumed position through the counter advertised
+    // by IMAGE_READY so the driver can apply authentic subscriber flow control.
+    pub fn setSubscriberPositionCounter(self: *Image, counters_map: *counters.CountersMap, counter_id: i32) void {
+        self.subscriber_position_counter = counters_map;
+        self.subscriber_position_counter_id = counter_id;
+        counters_map.set(counter_id, self.subscriber_position);
     }
 
     pub fn deinit(self: *Image, allocator: std.mem.Allocator) void {
@@ -47,6 +60,9 @@ pub const Image = struct {
 
         const read_bytes = result.offset - term_offset;
         self.subscriber_position += read_bytes;
+        if (self.subscriber_position_counter) |counters_map| {
+            counters_map.set(self.subscriber_position_counter_id, self.subscriber_position);
+        }
 
         return result.fragments_read;
     }
@@ -100,4 +116,34 @@ test "Image poll reads from term buffer" {
     try std.testing.expectEqual(@as(i32, 1), fragments);
     try std.testing.expect(context.received);
     try std.testing.expectEqual(@as(i64, @intCast(aligned_length)), image.position());
+}
+
+test "Image poll publishes the client-owned subscriber position" {
+    const allocator = std.testing.allocator;
+    var meta: [counters.METADATA_LENGTH * 4]u8 = undefined;
+    var values: [counters.COUNTER_LENGTH * 4]u8 = undefined;
+    @memset(&meta, 0);
+    @memset(&values, 0);
+    var counters_map = counters.CountersMap.init(&meta, &values);
+    const position_handle = counters_map.allocate(counters.SUBSCRIBER_POSITION, "image-position");
+
+    const term_length = 64 * 1024;
+    var log_buf = try logbuffer.LogBuffer.init(allocator, term_length);
+    defer log_buf.deinit();
+    var image = Image.init(1, 2, 100, &log_buf);
+    image.setSubscriberPositionCounter(&counters_map, position_handle.counter_id);
+
+    const payload = "position";
+    const frame_length: i32 = @as(i32, @intCast(frame.DataHeader.LENGTH + payload.len));
+    const term0 = log_buf.termBuffer(0);
+    std.mem.writeInt(i32, term0[0..4], frame_length, .little);
+    std.mem.writeInt(u16, term0[6..8], @intFromEnum(frame.FrameType.data), .little);
+    @memcpy(term0[frame.DataHeader.LENGTH .. frame.DataHeader.LENGTH + payload.len], payload);
+
+    const handler = struct {
+        fn handle(_: *const frame.DataHeader, _: []const u8, _: *anyopaque) void {}
+    }.handle;
+    _ = image.poll(handler, undefined, 1);
+
+    try std.testing.expectEqual(image.position(), counters_map.get(position_handle.counter_id));
 }

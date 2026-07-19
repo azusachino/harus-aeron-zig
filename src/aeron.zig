@@ -229,6 +229,7 @@ pub const Aeron = struct {
                                 continue;
                             };
                             img.* = Image.init(session_id, stream_id, 0, log_handle.buffer);
+                            img.setSubscriberPositionCounter(&self.counters_map, subscriber_position_id);
                             img.owns_log_buffer = log_handle.owns_buffer;
                             sub.addImage(img) catch {
                                 if (log_handle.owns_buffer) {
@@ -241,7 +242,6 @@ pub const Aeron = struct {
                     }
                 }
                 _ = registration_id;
-                _ = subscriber_position_id;
                 work += 1;
             } else if (msg_type_id == driver.conductor.RESPONSE_ON_SUBSCRIPTION_READY) {
                 const correlation_id = std.mem.readInt(i64, buffer[0..8], .little);
