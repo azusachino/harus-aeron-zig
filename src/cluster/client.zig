@@ -10,6 +10,8 @@ const codecs = @import("client_codecs.zig");
 const publication_mod = @import("../publication.zig");
 const frame = @import("../protocol/frame.zig");
 
+const MESSAGE_KEEP_ALIVE_LENGTH: usize = codecs.MESSAGE_HEADER_LENGTH + 16;
+
 pub const Context = struct {
     aeron: *aeron_mod.Aeron,
     allocator: std.mem.Allocator,
@@ -40,6 +42,14 @@ pub const AeronCluster = struct {
     egress_invalid_template: usize = 0,
     egress_last_invalid_template: u16 = 0,
     egress_last_invalid_bytes: [16]u8 = [_]u8{0} ** 16,
+    egress_new_leader_events: usize = 0,
+    egress_last_ignored_template: u16 = 0,
+    egress_session_events: usize = 0,
+    egress_last_session_event: ?codecs.EventCode = null,
+    egress_last_session_detail: [128]u8 = [_]u8{0} ** 128,
+    egress_last_session_detail_len: usize = 0,
+    egress_reassembly: std.ArrayListUnmanaged(u8) = .empty,
+    session_closed: bool = false,
     closed: bool = false,
 
     const ConnectState = struct {
@@ -130,11 +140,32 @@ pub const AeronCluster = struct {
     }
 
     pub fn offer(self: *AeronCluster, payload: []const u8) !publication_mod.OfferResult {
+        if (self.session_closed) return error.ClusterSessionClosed;
         const buffer = try self.allocator.alloc(u8, codecs.SESSION_HEADER_LENGTH + payload.len);
         defer self.allocator.free(buffer);
         _ = try codecs.encodeSessionMessageHeader(buffer, self.leadership_term_id, self.cluster_session_id, 0);
         @memcpy(buffer[codecs.SESSION_HEADER_LENGTH..], payload);
         return self.ingress_publication.offer(buffer);
+    }
+
+    /// Refresh the cluster session while the application has no ingress message to send.
+    ///
+    /// Java Aeron clients send this message before the cluster session timeout expires. The
+    /// caller must continue polling egress while a keep-alive is back pressured.
+    pub fn sendKeepAlive(self: *AeronCluster) !bool {
+        if (self.session_closed) return error.ClusterSessionClosed;
+        var buffer: [MESSAGE_KEEP_ALIVE_LENGTH]u8 = undefined;
+        const length = try codecs.encodeSessionKeepAlive(
+            &buffer,
+            self.leadership_term_id,
+            self.cluster_session_id,
+        );
+        return switch (self.ingress_publication.offer(buffer[0..length])) {
+            .ok => true,
+            .not_connected, .back_pressure, .admin_action => false,
+            .closed => error.PublicationClosed,
+            .max_position_exceeded => error.MaxPositionExceeded,
+        };
     }
 
     pub fn pollEgress(self: *AeronCluster, handler: EgressHandler, ctx: *anyopaque, fragment_limit: i32) i32 {
@@ -171,11 +202,32 @@ pub const AeronCluster = struct {
         return self.egress_last_invalid_bytes;
     }
 
+    pub fn egressNewLeaderEventCount(self: *const AeronCluster) usize {
+        return self.egress_new_leader_events;
+    }
+
+    pub fn egressLastIgnoredTemplate(self: *const AeronCluster) u16 {
+        return self.egress_last_ignored_template;
+    }
+
+    pub fn egressSessionEventCount(self: *const AeronCluster) usize {
+        return self.egress_session_events;
+    }
+
+    pub fn egressLastSessionEvent(self: *const AeronCluster) ?codecs.EventCode {
+        return self.egress_last_session_event;
+    }
+
+    pub fn egressLastSessionDetail(self: *const AeronCluster) []const u8 {
+        return self.egress_last_session_detail[0..self.egress_last_session_detail_len];
+    }
+
     pub fn close(self: *AeronCluster) void {
         if (self.closed) return;
         self.closed = true;
         self.ingress_publication.close();
         if (self.aeron.getSubscription(self.egress_subscription_id)) |subscription| subscription.close();
+        self.egress_reassembly.deinit(self.allocator);
     }
 
     const PollState = struct { handler: EgressHandler, ctx: *anyopaque, cluster: *AeronCluster };
@@ -204,26 +256,74 @@ pub const AeronCluster = struct {
         }
     }
 
-    fn onEgressFragment(_: *const frame.DataHeader, buffer: []const u8, ctx_ptr: *anyopaque) void {
+    fn onEgressFragment(header: *const frame.DataHeader, buffer: []const u8, ctx_ptr: *anyopaque) void {
         const state: *PollState = @ptrCast(@alignCast(ctx_ptr));
-        const header = codecs.decodeMessageHeader(buffer) catch |err| {
+        const is_begin = (header.flags & frame.DataHeader.BEGIN_FLAG) != 0;
+        const is_end = (header.flags & frame.DataHeader.END_FLAG) != 0;
+
+        if (is_begin) state.cluster.egress_reassembly.clearRetainingCapacity();
+        if (!is_begin and state.cluster.egress_reassembly.items.len == 0) {
             state.cluster.egress_invalid += 1;
-            switch (err) {
-                error.BufferTooSmall => state.cluster.egress_buffer_too_small += 1,
-                error.InvalidTemplateId => {
-                    state.cluster.egress_invalid_template += 1;
-                    if (buffer.len >= 4) state.cluster.egress_last_invalid_template = std.mem.readInt(u16, buffer[2..4], .little);
-                    @memset(&state.cluster.egress_last_invalid_bytes, 0);
-                    @memcpy(state.cluster.egress_last_invalid_bytes[0..@min(buffer.len, 16)], buffer[0..@min(buffer.len, 16)]);
-                },
-            }
+            return;
+        }
+        state.cluster.egress_reassembly.appendSlice(state.cluster.allocator, buffer) catch {
+            state.cluster.egress_invalid += 1;
+            state.cluster.egress_reassembly.clearRetainingCapacity();
             return;
         };
-        if (header.template_id != .session_message_header or buffer.len < codecs.SESSION_HEADER_LENGTH) {
+        if (!is_end) return;
+
+        const message = state.cluster.egress_reassembly.items;
+        dispatchEgressMessage(state, message);
+        state.cluster.egress_reassembly.clearRetainingCapacity();
+    }
+
+    fn dispatchEgressMessage(state: *PollState, buffer: []const u8) void {
+        if (buffer.len < codecs.MESSAGE_HEADER_LENGTH) {
+            state.cluster.egress_invalid += 1;
+            state.cluster.egress_buffer_too_small += 1;
+            return;
+        }
+
+        const template_id = std.mem.readInt(u16, buffer[2..4], .little);
+        if (template_id == @intFromEnum(codecs.TemplateId.session_event)) {
+            const event = codecs.decodeSessionEvent(buffer) catch {
+                state.cluster.egress_invalid += 1;
+                return;
+            };
+            state.cluster.egress_session_events += 1;
+            state.cluster.egress_last_session_event = event.code;
+            if (event.cluster_session_id != state.cluster.cluster_session_id) return;
+            state.cluster.leadership_term_id = event.leadership_term_id;
+            state.cluster.leader_member_id = event.leader_member_id;
+            state.cluster.egress_last_session_detail_len = @min(event.detail.len, state.cluster.egress_last_session_detail.len);
+            @memcpy(state.cluster.egress_last_session_detail[0..state.cluster.egress_last_session_detail_len], event.detail[0..state.cluster.egress_last_session_detail_len]);
+            if (event.code == .closed) state.cluster.session_closed = true;
+            return;
+        }
+        if (template_id == @intFromEnum(codecs.TemplateId.new_leader_event)) {
+            const event = codecs.decodeNewLeaderEvent(buffer) catch {
+                state.cluster.egress_invalid += 1;
+                return;
+            };
+            if (event.cluster_session_id != state.cluster.cluster_session_id) return;
+            state.cluster.leadership_term_id = event.leadership_term_id;
+            state.cluster.leader_member_id = event.leader_member_id;
+            state.cluster.egress_new_leader_events += 1;
+            return;
+        }
+        if (template_id != @intFromEnum(codecs.TemplateId.session_message_header)) {
             state.cluster.egress_ignored += 1;
+            state.cluster.egress_last_ignored_template = template_id;
+            return;
+        }
+        if (buffer.len < codecs.SESSION_HEADER_LENGTH) {
+            state.cluster.egress_invalid += 1;
+            state.cluster.egress_buffer_too_small += 1;
             return;
         }
         const cluster_session_id = readI64(buffer[16..24]);
+        if (cluster_session_id != state.cluster.cluster_session_id) return;
         const timestamp = readI64(buffer[24..32]);
         state.handler(cluster_session_id, timestamp, buffer[codecs.SESSION_HEADER_LENGTH..], state.ctx);
     }

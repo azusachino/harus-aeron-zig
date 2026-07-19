@@ -95,6 +95,7 @@ pub fn main() !void {
     const publish_start_ms = aeron.time.milliTimestamp();
     var retry_started_ms: i64 = 0;
     var last_stall_report_ms = publish_start_ms;
+    var last_keep_alive_ms = publish_start_ms;
     for (0..order_count) |index| {
         // Keep the Zig client namespace disjoint from the Java baseline client.
         const order_id = 1_000_001 + index;
@@ -119,6 +120,11 @@ pub fn main() !void {
                 perf.poll_fragments += @intCast(@max(poll_count, 0));
                 perf.poll_ns += aeron.time.nanoTimestamp() - poll_start_ns;
             }
+            const now_ms = aeron.time.milliTimestamp();
+            if (now_ms - last_keep_alive_ms >= 1_000) {
+                _ = try cluster.sendKeepAlive();
+                last_keep_alive_ms = now_ms;
+            }
             const offer_start_ns = if (trace_perf) aeron.time.nanoTimestamp() else 0;
             const offer_result = try cluster.offer(order);
             if (trace_perf) {
@@ -130,10 +136,10 @@ pub fn main() !void {
                 else => true,
             };
             if (trace_perf and is_retry) {
-                const now_ms = aeron.time.milliTimestamp();
-                if (retry_started_ms == 0) retry_started_ms = now_ms;
-                if (now_ms - last_stall_report_ms >= 1_000) {
-                    std.debug.print("ZIG_CLUSTER_CLIENT_STALL sent={d} result={s} responses={d} ingress_position={d} publisher_limit={d} egress_position={d} invalid_egress={d} buffer_too_small={d} invalid_template={d} last_invalid_template={d} last_invalid_bytes={any} ignored_egress={d} status_sent={d} connected={any} retry_ms={d}\n", .{
+                const report_now_ms = aeron.time.milliTimestamp();
+                if (retry_started_ms == 0) retry_started_ms = report_now_ms;
+                if (report_now_ms - last_stall_report_ms >= 1_000) {
+                    std.debug.print("ZIG_CLUSTER_CLIENT_STALL sent={d} result={s} responses={d} ingress_position={d} publisher_limit={d} egress_position={d} invalid_egress={d} buffer_too_small={d} invalid_template={d} last_invalid_template={d} last_invalid_bytes={any} ignored_egress={d} last_ignored_template={d} session_events={d} last_session_event={any} session_detail={s} new_leader_events={d} status_sent={d} connected={any} retry_ms={d}\n", .{
                         index + 1,
                         @tagName(offer_result),
                         responses.count,
@@ -146,11 +152,16 @@ pub fn main() !void {
                         cluster.egressLastInvalidTemplate(),
                         cluster.egressLastInvalidBytes(),
                         cluster.egressIgnoredCount(),
+                        cluster.egressLastIgnoredTemplate(),
+                        cluster.egressSessionEventCount(),
+                        cluster.egressLastSessionEvent(),
+                        cluster.egressLastSessionDetail(),
+                        cluster.egressNewLeaderEventCount(),
                         driver.receiver_agent.statusMessagesSent(),
                         cluster.ingress_publication.isConnected(),
-                        now_ms - retry_started_ms,
+                        report_now_ms - retry_started_ms,
                     });
-                    last_stall_report_ms = now_ms;
+                    last_stall_report_ms = report_now_ms;
                 }
             }
             switch (offer_result) {
@@ -192,7 +203,7 @@ pub fn main() !void {
     }
     if (responses.count != order_count) {
         if (trace_perf) {
-            std.debug.print("ZIG_CLUSTER_CLIENT_RESPONSE_TIMEOUT responses={d} expected={d} egress_position={d} invalid_egress={d} buffer_too_small={d} invalid_template={d} last_invalid_template={d} last_invalid_bytes={any} ignored_egress={d}\n", .{
+            std.debug.print("ZIG_CLUSTER_CLIENT_RESPONSE_TIMEOUT responses={d} expected={d} egress_position={d} invalid_egress={d} buffer_too_small={d} invalid_template={d} last_invalid_template={d} last_invalid_bytes={any} ignored_egress={d} last_ignored_template={d}\n", .{
                 responses.count,
                 order_count,
                 cluster.egressPosition(),
@@ -202,6 +213,7 @@ pub fn main() !void {
                 cluster.egressLastInvalidTemplate(),
                 cluster.egressLastInvalidBytes(),
                 cluster.egressIgnoredCount(),
+                cluster.egressLastIgnoredTemplate(),
             });
         }
         return error.ResponseTimeout;
