@@ -38,6 +38,7 @@ pub const Image = struct {
     subscriber_position: counters.CounterHandle, // client-owned image position counter
     rebuild_position: i64, // tracks gap filling progress
     last_status_position: i64,
+    term_ids: [metadata.PARTITION_COUNT]i32,
     source_address: net.Address,
     nak_state: NakState,
     last_activity_ns: i64,
@@ -58,6 +59,9 @@ pub const Image = struct {
         // doesn't stall waiting for data in an earlier (empty) partition.
         const term_count = @as(i64, active_term_id - initial_term_id);
         const initial_rebuild_position = term_count * @as(i64, term_length);
+        var term_ids = [_]i32{std.math.minInt(i32)} ** metadata.PARTITION_COUNT;
+        const active_partition = @as(usize, @intCast(@mod(active_term_id - initial_term_id, @as(i32, @intCast(metadata.PARTITION_COUNT)))));
+        term_ids[active_partition] = active_term_id;
         if (builtin.mode == .Debug) {
             std.debug.print("[IMAGE] init: session={d} stream={d} initial_term_id={d} active_term_id={d} rebuild_start={d}\n", .{ session_id, stream_id, initial_term_id, active_term_id, initial_rebuild_position });
         }
@@ -72,6 +76,7 @@ pub const Image = struct {
             .subscriber_position = subscriber_position,
             .rebuild_position = initial_rebuild_position,
             .last_status_position = 0,
+            .term_ids = term_ids,
             .source_address = source_address,
             .nak_state = NakState.init(log_buffer.allocator, stream_id),
             .last_activity_ns = @as(i64, @intCast(time.nanoTimestamp())),
@@ -88,6 +93,17 @@ pub const Image = struct {
         return @as(i64, term_count) * self.term_length + term_offset;
     }
 
+    fn prepareTerm(self: *Image, partition: usize, term_id: i32) []u8 {
+        const term_buffer = self.log_buffer.termBuffer(partition);
+        if (self.term_ids[partition] != term_id) {
+            // A partition is reused after three terms. Clear old commit markers
+            // before the new term can be considered contiguous by rebuild scan.
+            @memset(term_buffer, 0);
+            self.term_ids[partition] = term_id;
+        }
+        return term_buffer;
+    }
+
     // Write an incoming DATA frame into the log buffer at the correct partition+offset
     // Returns true if written, false if out-of-bounds or duplicate
     pub fn insertFrame(self: *Image, counters_map: *counters.CountersMap, header: *const protocol.DataHeader, payload: []const u8) bool {
@@ -97,7 +113,7 @@ pub const Image = struct {
         const partition = @as(usize, @intCast(@mod(term_count, 3)));
 
         const frame_offset = @as(usize, @intCast(header.term_offset));
-        const term_buffer = self.log_buffer.termBuffer(partition);
+        const term_buffer = self.prepareTerm(partition, header.term_id);
 
         // Bounds check: frame_offset + DataHeader.LENGTH + payload.len <= term_buffer.len
         const total_frame_len = protocol.DataHeader.LENGTH + payload.len;
@@ -139,7 +155,7 @@ pub const Image = struct {
         const partition = @as(usize, @intCast(@mod(term_count, @as(i32, @intCast(metadata.PARTITION_COUNT)))));
         const frame_offset = @as(usize, @intCast(header.term_offset));
         const padding_length = header.frame_length;
-        const term_buffer = self.log_buffer.termBuffer(partition);
+        const term_buffer = self.prepareTerm(partition, header.term_id);
 
         if (padding_length < @as(i32, @intCast(protocol.DataHeader.LENGTH)) or
             frame_offset + @as(usize, @intCast(padding_length)) > term_buffer.len)
@@ -833,6 +849,39 @@ test "Image insertFrame writes data at correct offset" {
     try std.testing.expect(hwm > 0);
     try std.testing.expectEqual(hwm, image.rebuild_position);
     try std.testing.expectEqual(@as(i64, 0), counters_map.get(sub_pos_handle.counter_id));
+}
+
+test "Image clears a reused term partition before rebuilding" {
+    const allocator = std.testing.allocator;
+    var meta_buffer align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
+    var values_buffer align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
+    var counters_map = counters.CountersMap.init(&meta_buffer, &values_buffer);
+    var log_buf = try logbuffer.LogBuffer.init(allocator, 64 * 1024);
+    defer log_buf.deinit();
+
+    const hwm_handle = counters_map.allocate(counters.RECEIVER_HWM, "wrap-hwm");
+    const sub_pos_handle = counters_map.allocate(counters.SUBSCRIBER_POSITION, "wrap-sub");
+    var image = Image.init(1, 2, 64 * 1024, 1500, 0, 0, &log_buf, hwm_handle, sub_pos_handle, undefined);
+
+    var header: protocol.DataHeader = undefined;
+    header.frame_length = @as(i32, @intCast(protocol.DataHeader.LENGTH + 3));
+    header.version = protocol.VERSION;
+    header.flags = 0;
+    header.type = @intFromEnum(protocol.FrameType.data);
+    header.term_offset = 0;
+    header.session_id = 1;
+    header.stream_id = 2;
+    header.term_id = 0;
+    header.reserved_value = 0;
+    try std.testing.expect(image.insertFrame(&counters_map, &header, "old"));
+
+    image.rebuild_position = 3 * @as(i64, image.term_length);
+    header.term_id = 3;
+    try std.testing.expect(image.insertFrame(&counters_map, &header, "new"));
+
+    const term_buffer = log_buf.termBuffer(0);
+    try std.testing.expectEqualStrings("new", term_buffer[protocol.DataHeader.LENGTH .. protocol.DataHeader.LENGTH + 3]);
+    try std.testing.expectEqual(@as(i32, 3), image.term_ids[0]);
 }
 
 test "Image insertPadding advances rebuild position across a term" {
