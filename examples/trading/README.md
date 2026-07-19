@@ -59,6 +59,19 @@ multi-hour soak evidence is still part of the unreleased 0.9 hardening work.
 Both clients report `publish_ms`, `total_ms`, and `orders_per_sec`. Compare
 those values only between runs with the same order count and topology.
 
+Current performance evidence on the local host:
+
+| scenario | orders | publish | total | throughput | result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Java cluster + Java client | 10,000 | 20 ms | 231 ms | 43,290/s | pass |
+| Java cluster + Java client | 100,000 | 126 ms | 731 ms | 136,798/s | pass |
+| Java cluster + Zig client | 10,000 | 11,447 ms | 11,528 ms | 867/s | pass, severe slowdown |
+| Java cluster + Zig client | 100,000 | not emitted | publish completed, 99,939/100,000 responses | — | fail |
+
+The 100,000-order Zig run completed publishing but stalled with 61 missing
+responses despite a 10-minute response deadline. This is an open 0.9
+interop/performance gap, not evidence of acceptable parity.
+
 For larger runs, the soak runner gives the Zig client a 10-minute batch offer
 deadline and 10 million connect iterations by default. Override
 `TRADING_SOAK_OFFER_TIMEOUT_MS`, `TRADING_SOAK_RESPONSE_TIMEOUT_MS`, or
