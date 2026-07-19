@@ -282,12 +282,41 @@ pub fn build(b: *std.Build) void {
     const tutorial_check_step = b.step("tutorial-check", "Compile-check tutorial stubs");
     tutorial_check_step.dependOn(&tutorial_check.step);
 
+    // Example behavior tests
+    const trading_example_mod = b.createModule(.{
+        .root_source_file = b.path("examples/trading_order_book.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "aeron", .module = aeron_mod },
+            .{ .name = "agrona", .module = agrona_mod },
+        },
+    });
+    const test_examples = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("test/examples/trading_order_book_test.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "aeron", .module = aeron_mod },
+                .{ .name = "agrona", .module = agrona_mod },
+                .{ .name = "trading", .module = trading_example_mod },
+            },
+        }),
+    });
+    test_examples.root_module.link_libc = true;
+    const run_test_examples = b.addRunArtifact(test_examples);
+    const test_examples_step = b.step("test-examples", "Run example behavior tests");
+    test_examples_step.dependOn(&run_test_examples.step);
+    test_step.dependOn(test_examples_step);
+
     // Examples
     const example_files = [_]struct { name: []const u8, path: []const u8 }{
         .{ .name = "cluster-demo", .path = "examples/cluster_demo.zig" },
         .{ .name = "basic-publisher", .path = "examples/basic_publisher.zig" },
         .{ .name = "basic-subscriber", .path = "examples/basic_subscriber.zig" },
         .{ .name = "throughput-example", .path = "examples/throughput.zig" },
+        .{ .name = "trading-order-book", .path = "examples/trading_order_book.zig" },
     };
     const examples_step = b.step("examples", "Build all examples");
     for (example_files) |example| {

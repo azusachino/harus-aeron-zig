@@ -11,6 +11,9 @@ ZIG_UPSTREAM_REF ?= 0.16.x
 ZIG_UPSTREAM_DIR ?= vendor/zig
 INTEROP_ZIG_BUILD_ENV_IMAGE ?= harus-aeron-zig-build-env:latest
 DOCS_PORT ?= 8000
+SOAK_ITERS ?= 1000000
+SOAK_OPTIMIZE ?= ReleaseFast
+INTEROP_SOAK_MESSAGES ?= 1000
 
 .DEFAULT_GOAL := help
 
@@ -22,10 +25,10 @@ endif
 
 .PHONY: help fmt fmt-check build test lint check clean run tutorial-check lesson-lint \
        docs docs-serve docs-build \
-       fuzz bench stress \
+       fuzz bench stress soak-0.9 interop-soak-0.9 \
        nix-image k8s-up k8s-down k8s-status k8s-logs colima-up colima-down \
        setup setup-interop setup-interop-base setup-upstream-aeron setup-upstream-zig \
-       interop interop-smoke interop-status interop-preflight test-protocol test-driver test-archive test-cluster test-scenarios examples status
+       interop interop-smoke interop-status interop-preflight test-protocol test-driver test-archive test-cluster test-scenarios test-examples examples status
 
 help:  ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\n"} \
@@ -71,6 +74,9 @@ test-cluster:  ## Run cluster scenario tests
 
 test-scenarios: test-protocol test-driver test-archive test-cluster  ## Run all scenario tests
 
+test-examples:  ## Run happy/evil/edge behavior tests for examples
+	$(NIX_RUN) zig build test-examples
+
 examples:  ## Build all examples
 	$(NIX_RUN) zig build examples
 
@@ -79,7 +85,7 @@ lint: fmt-check
 lesson-lint:  ## Verify all LESSON annotation slugs have a matching docs/tutorial/ chapter file
 	bash scripts/lesson-lint.sh
 
-check: fmt-check build test test-scenarios lesson-lint  ## Full check: fmt + build + all tests
+check: fmt-check build test test-scenarios test-examples examples lesson-lint  ## Full check: fmt + build + all tests
 
 docs: docs-serve  ## Preview tutorial/docs site locally
 
@@ -196,6 +202,9 @@ bench:  ## Run benchmarks (ReleaseFast)
 stress:  ## Run stress tests
 	$(NIX_RUN) zig build stress
 
+soak-0.9:  ## Run the long 0.9 local soak suite (override SOAK_ITERS)
+	SOAK_ITERS=$(SOAK_ITERS) $(NIX_RUN) zig build stress -Doptimize=$(SOAK_OPTIMIZE)
+
 # =============================================================================
 # Interop Testing
 # =============================================================================
@@ -235,6 +244,11 @@ interop-smoke:  ## Run quick smoke interop test (10 messages, CI-friendly)
 	@$(MAKE) interop-preflight
 	@$(MAKE) setup-interop-base
 	AERON_VERSION=$(AERON_VERSION) ZIG_BUILD_ENV_IMAGE=$(INTEROP_ZIG_BUILD_ENV_IMAGE) MSG_COUNT=10 $(COMPOSE) -f deploy/docker-compose.ci.yml up --build --abort-on-container-exit --exit-code-from java-client
+
+interop-soak-0.9:  ## Run an extended 0.9 Java↔Zig interop soak (override INTEROP_SOAK_MESSAGES)
+	@$(MAKE) interop-preflight
+	@$(MAKE) setup-interop-base
+	AERON_VERSION=$(AERON_VERSION) ZIG_BUILD_ENV_IMAGE=$(INTEROP_ZIG_BUILD_ENV_IMAGE) MSG_COUNT=$(INTEROP_SOAK_MESSAGES) $(COMPOSE) -f deploy/docker-compose.ci.yml up --build --abort-on-container-exit --exit-code-from java-client
 
 interop-status:  ## Show status of running interop jobs
 	@echo "=== Interop Jobs ==="

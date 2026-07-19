@@ -5,12 +5,8 @@ const std = @import("std");
 const aeron = @import("aeron");
 
 fn getSoakIterations() usize {
-    if (std.process.getEnvVarOwned(std.testing.allocator, "SOAK_ITERS")) |env| {
-        defer std.testing.allocator.free(env);
-        return std.fmt.parseInt(usize, env, 10) catch 50;
-    } else |_| {
-        return 50;
-    }
+    const ptr = std.c.getenv("SOAK_ITERS") orelse return 50;
+    return std.fmt.parseInt(usize, std.mem.span(ptr), 10) catch 50;
 }
 
 test "pubsub_churn: add and remove publications across N cycles" {
@@ -18,7 +14,7 @@ test "pubsub_churn: add and remove publications across N cycles" {
     const iterations = getSoakIterations();
     const channel = "aeron:udp?endpoint=localhost:20125";
 
-    const ring_buf = try allocator.alloc(u8, 16384);
+    const ring_buf = try allocator.alignedAlloc(u8, .@"8", 16384);
     defer allocator.free(ring_buf);
     var rb = aeron.ipc.ring_buffer.ManyToOneRingBuffer.init(ring_buf);
 
@@ -33,12 +29,12 @@ test "pubsub_churn: add and remove publications across N cycles" {
     @memset(values_buf, 0);
     var cm = aeron.ipc.counters.CountersMap.init(meta_buf, values_buf);
 
-    const sock = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
-    defer std.posix.close(sock);
+    const sock = try aeron.net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM, std.posix.IPPROTO.UDP);
+    defer aeron.net.closeSocket(sock);
 
     var recv_ep = aeron.transport.ReceiveChannelEndpoint{
         .socket = sock,
-        .bound_address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+        .bound_address = aeron.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
     };
     var send_endpoint = aeron.transport.SendChannelEndpoint{ .socket = sock };
     var sender = try aeron.driver.Sender.init(allocator, &send_endpoint, &cm);

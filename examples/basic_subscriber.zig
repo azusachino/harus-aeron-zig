@@ -6,6 +6,14 @@ const Aeron = aeron.Aeron;
 const MediaDriver = aeron.driver.MediaDriver;
 const frame = aeron.protocol;
 
+fn sleepNs(nanoseconds: u64) void {
+    var ts: std.c.timespec = .{
+        .sec = @intCast(nanoseconds / std.time.ns_per_s),
+        .nsec = @intCast(nanoseconds % std.time.ns_per_s),
+    };
+    _ = std.c.nanosleep(&ts, null);
+}
+
 // ZIG: This context is passed to the fragment handler as a pointer.
 // AERON: Use this to track count of received fragments or accumulate large messages.
 const SubscriberContext = struct {
@@ -52,11 +60,11 @@ pub fn main() !void {
 
     // ZIG: Wait for the Conductor to confirm subscription readiness.
     var subscription: ?*aeron.Subscription = null;
-    var timer_ready = try std.time.Timer.start();
-    while (subscription == null and timer_ready.read() < 10 * std.time.ns_per_s) {
+    const ready_start_ms = aeron.time.milliTimestamp();
+    while (subscription == null and aeron.time.milliTimestamp() - ready_start_ms < 10_000) {
         _ = client.doWork();
         subscription = client.getSubscription(registration_id);
-        std.Thread.sleep(1 * std.time.ns_per_ms);
+        sleepNs(1 * std.time.ns_per_ms);
     }
 
     if (subscription == null) {
@@ -69,21 +77,20 @@ pub fn main() !void {
     var sub_ctx = SubscriberContext{};
 
     // Poll until 100 messages received or timeout
-    var timer = try std.time.Timer.start();
-    const timeout_ns = 30 * std.time.ns_per_s;
+    const receive_start_ms = aeron.time.milliTimestamp();
 
-    while (sub_ctx.received < 100 and timer.read() < timeout_ns) {
+    while (sub_ctx.received < 100 and aeron.time.milliTimestamp() - receive_start_ms < 30_000) {
         // ZIG: poll() executes the reader duty cycle over all assigned Images.
         // AERON: poll() takes a fragment_limit to ensure a single subscriber doesn't hog the thread.
         _ = client.doWork(); // Discover new images/publishers
         const fragments = sub.poll(fragmentHandler, &sub_ctx, 10);
 
         if (fragments == 0) {
-            std.Thread.sleep(10 * std.time.ns_per_ms);
+            sleepNs(10 * std.time.ns_per_ms);
         }
     }
 
-    const elapsed = timer.read();
+    const elapsed = aeron.time.milliTimestamp() - receive_start_ms;
     std.debug.print("\n=== Subscription Complete ===\n", .{});
-    std.debug.print("Received: {d} messages in {d}ms\n\n", .{ sub_ctx.received, elapsed / std.time.ns_per_ms });
+    std.debug.print("Received: {d} messages in {d}ms\n\n", .{ sub_ctx.received, @divTrunc(elapsed, std.time.ns_per_ms) });
 }

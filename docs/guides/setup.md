@@ -25,6 +25,31 @@ make fmt
 make check
 ```
 
+## 0.9 Validation Runs
+
+The current line is unreleased 0.9 development. The tutorial TODOs are intentional
+learner exercises and are checked separately from the production implementation.
+
+Run the default local stress suite with a long iteration budget:
+
+```bash
+make soak-0.9                 # 1,000,000 iterations, ReleaseFast by default
+SOAK_ITERS=10000000 make soak-0.9
+SOAK_OPTIMIZE=Debug SOAK_ITERS=10000 make soak-0.9
+```
+
+Run an extended Java Aeron interoperability soak when a Compose-compatible runtime is
+available:
+
+```bash
+make interop-smoke            # short 10-message gate
+make interop-soak-0.9         # 1,000 messages by default
+INTEROP_SOAK_MESSAGES=10000 make interop-soak-0.9
+```
+
+Do not describe these runs as a v1.0 release gate until the sustained results have been
+recorded and reviewed.
+
 ## Running the Media Driver
 
 ```bash

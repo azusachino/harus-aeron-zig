@@ -866,7 +866,7 @@ Dependencies:
 2. P7-9 archive restart and catalog fidelity.
 3. P7-8 cluster failure and rejoin correctness.
 
-These are the highest-payoff follow-ups after the 1.0.0 baseline because they turn the release into a reproducible external check, then tighten the archive and cluster behavior that still carries the most product risk.
+These are the highest-payoff follow-ups on the unreleased 0.9 line because they turn the current implementation into a reproducible external check, then tighten the archive and cluster behavior that still carries the most product risk.
 
 ### Suggested Sequence
 
@@ -876,7 +876,7 @@ These are the highest-payoff follow-ups after the 1.0.0 baseline because they tu
 4. P7-7 protocol breadth and codec parity.
 5. P7-11 throughput baseline and perf hygiene.
 
-This order uses the already-promising 1.0.0 transport baseline to lock in repeatable interop first, then closes the stateful gaps before broadening the protocol surface and perf work.
+This order uses the current transport baseline to lock in repeatable interop first, then closes the stateful gaps before broadening the protocol surface and performance work.
 
 ---
 
@@ -1118,15 +1118,15 @@ This order front-loads the compatibility surface that every other subsystem depe
 
 ---
 
-## Phase 11 — Release 1.0.0 (The Final Step)
+## Phase 11 — 0.9 Hardening Before Any 1.0 Release
 
-Goal: Move from a high-parity implementation to a production-ready 1.0.0 release by closing the last operational gaps and completing the educational layer.
+Goal: Stabilize the unreleased 0.9 line through long-running interop, smoke, soak, and educational validation. A 1.0 release is explicitly out of scope until these gates are backed by sustained evidence.
 
 Exit criteria for the phase:
 - `make check` passes 100%.
-- `make interop` passes all Java/Zig cross-language scenarios (Pub/Sub, Archive, Cluster).
+- `make interop` and an extended `make interop-soak-0.9` run pass the Java/Zig cross-language scenarios (Pub/Sub, Archive, Cluster).
 - All 24 tutorial chapters are functionally complete as stubs in `tutorial/`.
-- Throughput and latency baseline established and documented for 1.0.0.
+- Throughput and latency baseline established and documented for 0.9.
 
 ---
 
@@ -1203,7 +1203,7 @@ Implement:
 
 ---
 
-### Task P11-6: 1.0.0 Quality Gate & Release
+### Task P11-6: 0.9 Quality Gate Before Release Planning
 
 **File**: `build.zig.zon`, `CHANGELOG.md`, `Makefile`
 
@@ -1213,8 +1213,8 @@ Tasks:
 - Run full `make interop` matrix.
 - Establish performance baseline: `make bench` (throughput, latency, fanout).
 - Fix any remaining high-priority bugs discovered during soak tests.
-- Bump version to `1.0.0` and update `CHANGELOG.md`.
-- Final audit: `docs/audits/1.0.0-release-audit.md`.
+- Keep `build.zig.zon` at `0.9.0`.
+- Record sustained smoke/soak evidence and remaining gaps before opening a 1.0 release plan.
 
 ---
 
@@ -1225,4 +1225,3 @@ Tasks:
 3. **P11-2** & **P11-3** (hardens cluster).
 4. **P11-5** (completes educational layer).
 5. **P11-6** (release sign-off).
-

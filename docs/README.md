@@ -15,6 +15,7 @@ The course is designed for systems engineers who want both sides of the stack:
 | [System Tour](tutorial/00-orientation/03-system-tour.md) | First pass through the architecture |
 | [Frame Codec](tutorial/01-foundations/01-frame-codec.md) | First implementation chapter |
 | [Architecture Guide](guides/architecture.md) | Reference view of the finished system |
+| [Examples and Scenario Tests](guides/examples.md) | Executable pub/sub, cluster, and trading-state fixtures |
 
 ## Work Loop
 

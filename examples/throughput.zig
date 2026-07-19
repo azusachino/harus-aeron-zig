@@ -9,6 +9,14 @@ const Image = aeron.Image;
 const ExclusivePublication = aeron.ExclusivePublication;
 const Subscription = aeron.Subscription;
 
+fn sleepNs(nanoseconds: u64) void {
+    var ts: std.c.timespec = .{
+        .sec = @intCast(nanoseconds / std.time.ns_per_s),
+        .nsec = @intCast(nanoseconds % std.time.ns_per_s),
+    };
+    _ = std.c.nanosleep(&ts, null);
+}
+
 const ThroughputContext = struct {
     messages_received: i64 = 0,
     bytes_received: i64 = 0,
@@ -148,11 +156,10 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(msg);
     @memset(msg, 'X');
 
-    // ZIG: std.time.Timer provides high-resolution monotonic time.
-    var timer = try std.time.Timer.start();
-    const test_duration_ns = opts.duration_s * std.time.ns_per_s;
-    var stat_timer = try std.time.Timer.start();
-    const stat_interval_ns = 1 * std.time.ns_per_s;
+    const timer_start_ms = aeron.time.milliTimestamp();
+    const test_duration_ms = opts.duration_s * std.time.ms_per_s;
+    var stat_start_ms = timer_start_ms;
+    const stat_interval_ms = std.time.ms_per_s;
 
     var total_sent: i64 = 0;
     var total_received: i64 = 0;
@@ -164,7 +171,7 @@ pub fn main(init: std.process.Init) !void {
 
     var last_total_received: i64 = 0;
     var last_total_bytes: i64 = 0;
-    while (timer.read() < test_duration_ns) {
+    while (aeron.time.milliTimestamp() - timer_start_ms < test_duration_ms) {
         // AERON: offer() writes the message and advances the tail cursor via CAS.
         // Reset the single-term IPC log when it fills so the example does not stall permanently.
         switch (publication.offer(msg)) {
@@ -182,8 +189,8 @@ pub fn main(init: std.process.Init) !void {
         total_bytes += ctx.bytes_received;
 
         // ZIG: Periodic stats output.
-        if (stat_timer.read() >= stat_interval_ns) {
-            const elapsed_sec: i64 = @intCast(timer.read() / std.time.ns_per_s);
+        if (aeron.time.milliTimestamp() - stat_start_ms >= stat_interval_ms) {
+            const elapsed_sec: i64 = @divTrunc(aeron.time.milliTimestamp() - timer_start_ms, std.time.ms_per_s);
             const msg_per_sec = total_received - last_total_received;
             const bytes_per_sec = total_bytes - last_total_bytes;
             last_total_received = total_received;
@@ -194,17 +201,17 @@ pub fn main(init: std.process.Init) !void {
                 .{ elapsed_sec, msg_per_sec, bytes_per_sec, total_sent, total_received },
             );
 
-            stat_timer = try std.time.Timer.start();
+            stat_start_ms = aeron.time.milliTimestamp();
         }
 
         // ZIG: Yield if no work was done to be good to the OS scheduler.
         if (fragments == 0) {
-            std.Thread.sleep(100);
+            sleepNs(100);
         }
     }
 
     // Final summary
-    const elapsed_sec: i64 = @intCast(timer.read() / std.time.ns_per_s);
+    const elapsed_sec: i64 = @divTrunc(aeron.time.milliTimestamp() - timer_start_ms, std.time.ms_per_s);
     const final_msg_sec = if (elapsed_sec > 0) @divTrunc(total_received, elapsed_sec) else 0;
     const final_bytes_sec = if (elapsed_sec > 0) @divTrunc(total_bytes, elapsed_sec) else 0;
 

@@ -162,10 +162,11 @@ pub const ManyToOneRingBuffer = struct {
 
     pub fn read(self: *ManyToOneRingBuffer, handler: MessageHandler, ctx: *anyopaque, limit: i32) i32 {
         var head = self.loadHead();
+        const tail = self.loadTail();
         var fragments_read: i32 = 0;
 
         var i: i32 = 0;
-        while (i < limit) {
+        while (i < limit and head < tail) {
             const index = @as(usize, @intCast(head)) % self.capacity;
 
             const record_addr = self.buffer.ptr + index;
