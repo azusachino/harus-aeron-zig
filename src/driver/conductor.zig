@@ -394,6 +394,19 @@ pub const DriverConductor = struct {
             work += 1;
         }
 
+        const nak_messages = self.receiver.drainPendingNakMessages();
+        defer if (nak_messages.len > 0) self.allocator.free(nak_messages);
+        for (nak_messages) |nak| {
+            self.sender.onRetransmit(
+                nak.session_id,
+                nak.stream_id,
+                nak.term_id,
+                nak.term_offset,
+                nak.length,
+            ) catch {};
+            work += 1;
+        }
+
         return work;
     }
 

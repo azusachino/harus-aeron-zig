@@ -233,6 +233,14 @@ pub const StatusSignal = struct {
     receiver_id: i64,
 };
 
+pub const NakSignal = struct {
+    session_id: i32,
+    stream_id: i32,
+    term_id: i32,
+    term_offset: i32,
+    length: i32,
+};
+
 const NAK_DELAY_NS: i64 = 1_000_000; // 1ms
 
 pub const GapRange = struct { offset: i32, length: i32 };
@@ -292,6 +300,7 @@ pub const Receiver = struct {
     images: std.ArrayListUnmanaged(*Image),
     pending_setups: std.ArrayListUnmanaged(SetupSignal) = .empty,
     pending_status_messages: std.ArrayListUnmanaged(StatusSignal) = .empty,
+    pending_nak_messages: std.ArrayListUnmanaged(NakSignal) = .empty,
     recv_endpoint: *transport.ReceiveChannelEndpoint,
     send_endpoint: *transport.SendChannelEndpoint,
     counters_map: *counters.CountersMap,
@@ -348,6 +357,7 @@ pub const Receiver = struct {
         self.images.deinit(self.allocator);
         self.pending_setups.deinit(self.allocator);
         self.pending_status_messages.deinit(self.allocator);
+        self.pending_nak_messages.deinit(self.allocator);
     }
 
     pub fn drainPendingSetups(self: *Receiver) []SetupSignal {
@@ -362,6 +372,12 @@ pub const Receiver = struct {
         defer self.mutex.unlock();
         const slice = self.pending_status_messages.toOwnedSlice(self.allocator) catch return &.{};
         return slice;
+    }
+
+    pub fn drainPendingNakMessages(self: *Receiver) []NakSignal {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.pending_nak_messages.toOwnedSlice(self.allocator) catch return &.{};
     }
 
     pub fn processDatagram(self: *Receiver, data: []const u8, src_addr: net.Address) i32 {
@@ -537,8 +553,21 @@ pub const Receiver = struct {
                 }) catch {};
                 self.mutex.unlock();
                 work += 1;
+            } else if (frame_type_raw == @intFromEnum(protocol.FrameType.nak)) {
+                if (frame_data.len >= protocol.NakHeader.LENGTH) {
+                    const nak = @as(*const protocol.NakHeader, @ptrCast(@alignCast(&frame_data[0])));
+                    self.mutex.lock();
+                    self.pending_nak_messages.append(self.allocator, .{
+                        .session_id = nak.session_id,
+                        .stream_id = nak.stream_id,
+                        .term_id = nak.term_id,
+                        .term_offset = nak.term_offset,
+                        .length = nak.length,
+                    }) catch {};
+                    self.mutex.unlock();
+                    work += 1;
+                }
             }
-            // nak and other types: skip
 
             offset += aligned_advance;
         }
@@ -1041,4 +1070,42 @@ test "Receiver queues STATUS messages for sender flow control" {
     try std.testing.expectEqual(@as(i32, 1001), pending[0].stream_id);
     try std.testing.expectEqual(@as(i32, 2048), pending[0].consumption_term_offset);
     try std.testing.expectEqual(@as(i32, 4096), pending[0].receiver_window);
+}
+
+test "Receiver queues NAK messages for sender retransmission" {
+    const allocator = std.testing.allocator;
+    var meta_buffer align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
+    var values_buffer align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
+    var counters_map = counters.CountersMap.init(&meta_buffer, &values_buffer);
+
+    const dummy_socket: net.socket_t = undefined;
+    var recv_endpoint = transport.ReceiveChannelEndpoint{
+        .socket = dummy_socket,
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+    };
+    var send_endpoint = transport.SendChannelEndpoint{ .socket = dummy_socket };
+    var receiver = try Receiver.init(allocator, &recv_endpoint, &send_endpoint, &counters_map, null);
+    defer receiver.deinit();
+
+    var nak: protocol.NakHeader = undefined;
+    nak.frame_length = protocol.NakHeader.LENGTH;
+    nak.version = protocol.VERSION;
+    nak.flags = 0;
+    nak.type = @intFromEnum(protocol.FrameType.nak);
+    nak.session_id = 9;
+    nak.stream_id = 1001;
+    nak.term_id = 7;
+    nak.term_offset = 2048;
+    nak.length = 4096;
+
+    const bytes = @as([*]const u8, @ptrCast(&nak))[0..protocol.NakHeader.LENGTH];
+    try std.testing.expectEqual(@as(i32, 1), receiver.processDatagram(bytes, net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123)));
+
+    const pending = receiver.drainPendingNakMessages();
+    defer allocator.free(pending);
+    try std.testing.expectEqual(@as(usize, 1), pending.len);
+    try std.testing.expectEqual(@as(i32, 9), pending[0].session_id);
+    try std.testing.expectEqual(@as(i32, 7), pending[0].term_id);
+    try std.testing.expectEqual(@as(i32, 2048), pending[0].term_offset);
+    try std.testing.expectEqual(@as(i32, 4096), pending[0].length);
 }

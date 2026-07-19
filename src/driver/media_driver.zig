@@ -44,6 +44,7 @@ pub const MediaDriverContext = struct {
     image_liveness_timeout_ns: i64 = 5_000_000_000,
     publication_connection_timeout_ns: i64 = 5_000_000_000,
     listen_port: u16 = 0, // 0 = ephemeral, non-zero = bind to specific port
+    socket_receive_buffer_length: i32 = 4 * 1024 * 1024,
     conductor_idle_strategy: ?IdleStrategy = null,
     sender_idle_strategy: ?IdleStrategy = null,
     receiver_idle_strategy: ?IdleStrategy = null,
@@ -155,6 +156,7 @@ pub const MediaDriver = struct {
         // Create dummy endpoints for sender/receiver
         const recv_fd = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
         errdefer net.closeSocket(recv_fd);
+        try net.setSockOpt(recv_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, &std.mem.toBytes(ctx_.socket_receive_buffer_length));
         // Aeron UDP flow control replies (STATUS) target the source port of SETUP/DATA.
         // Sending and receiving on separate unbound sockets advertises one port and polls
         // another, so an external Java driver can never advance the publisher limit.
@@ -243,6 +245,7 @@ pub const MediaDriver = struct {
 
         const recv_fd = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
         errdefer net.closeSocket(recv_fd);
+        try net.setSockOpt(recv_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, &std.mem.toBytes(ctx_.socket_receive_buffer_length));
         const send_fd = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
         errdefer net.closeSocket(send_fd);
 
