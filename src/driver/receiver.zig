@@ -131,6 +131,34 @@ pub const Image = struct {
         return true;
     }
 
+    // LESSON(receiver): Padding is part of the reliable term stream; storing it locally lets rebuild position and STATUS cross the ring boundary. See docs/tutorial/03-driver/02-receiver.md
+    pub fn insertPadding(self: *Image, counters_map: *counters.CountersMap, header: *const protocol.DataHeader) bool {
+        const term_count = header.term_id - self.initial_term_id;
+        const partition = @as(usize, @intCast(@mod(term_count, @as(i32, @intCast(metadata.PARTITION_COUNT)))));
+        const frame_offset = @as(usize, @intCast(header.term_offset));
+        const padding_length = header.frame_length;
+        const term_buffer = self.log_buffer.termBuffer(partition);
+
+        if (padding_length < @as(i32, @intCast(protocol.DataHeader.LENGTH)) or
+            frame_offset + @as(usize, @intCast(padding_length)) > term_buffer.len)
+        {
+            return false;
+        }
+
+        const header_ptr = @as(*protocol.DataHeader, @ptrCast(@alignCast(&term_buffer[frame_offset])));
+        header_ptr.* = header.*;
+        const len_ptr = @as(*i32, @ptrCast(@alignCast(&term_buffer[frame_offset])));
+        @atomicStore(i32, len_ptr, padding_length, .release);
+
+        const new_hwm = self.positionFor(header.term_id, header.term_offset + padding_length);
+        const current_hwm = counters_map.get(self.receiver_hwm.counter_id);
+        if (new_hwm > current_hwm) {
+            counters_map.set(self.receiver_hwm.counter_id, new_hwm);
+        }
+        self.advanceRebuildPosition(counters_map);
+        return true;
+    }
+
     fn advanceRebuildPosition(self: *Image, counters_map: *counters.CountersMap) void {
         _ = counters_map;
         var position = self.rebuild_position;
@@ -425,6 +453,30 @@ pub const Receiver = struct {
                     };
                 }
 
+                work += 1;
+            } else if (frame_type_raw == @intFromEnum(protocol.FrameType.padding)) {
+                if (frame_data.len < protocol.DataHeader.LENGTH) break;
+                const header = @as(*const protocol.DataHeader, @ptrCast(@alignCast(&frame_data[0])));
+
+                self.mutex.lock();
+                var image_for_status: ?*Image = null;
+                for (self.images.items) |image| {
+                    if (image.session_id == header.session_id and image.stream_id == header.stream_id) {
+                        if (image.insertPadding(self.counters_map, header)) {
+                            image.last_activity_ns = @as(i64, @intCast(time.nanoTimestamp()));
+                            image_for_status = image;
+                        }
+                        break;
+                    }
+                }
+                self.mutex.unlock();
+
+                if (image_for_status) |img| {
+                    self.sendStatus(img) catch |err| switch (err) {
+                        error.WouldBlock => {},
+                        else => std.log.err("receiver padding STATUS send failed session_id={} stream_id={} err={}", .{ img.session_id, img.stream_id, err }),
+                    };
+                }
                 work += 1;
             } else if (frame_type_raw == @intFromEnum(protocol.FrameType.setup)) {
                 if (frame_data.len < protocol.SetupHeader.LENGTH) {
@@ -742,6 +794,37 @@ test "Image insertFrame writes data at correct offset" {
     try std.testing.expect(hwm > 0);
     try std.testing.expectEqual(hwm, image.rebuild_position);
     try std.testing.expectEqual(@as(i64, 0), counters_map.get(sub_pos_handle.counter_id));
+}
+
+test "Image insertPadding advances rebuild position across a term" {
+    const allocator = std.testing.allocator;
+
+    var meta_buffer align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
+    var values_buffer align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
+    var counters_map = counters.CountersMap.init(&meta_buffer, &values_buffer);
+
+    var log_buf = try logbuffer.LogBuffer.init(allocator, 64 * 1024);
+    defer log_buf.deinit();
+
+    const hwm_handle = counters_map.allocate(counters.RECEIVER_HWM, "test-padding-hwm");
+    const sub_pos_handle = counters_map.allocate(counters.SUBSCRIBER_POSITION, "test-padding-sub");
+    var image = Image.init(1, 2, 64 * 1024, 1500, 0, 0, &log_buf, hwm_handle, sub_pos_handle, undefined);
+    image.rebuild_position = 64 * 1024 - 32;
+
+    var header: protocol.DataHeader = undefined;
+    header.frame_length = 32;
+    header.version = protocol.VERSION;
+    header.flags = protocol.DataHeader.PADDING_FLAG;
+    header.type = @intFromEnum(protocol.FrameType.padding);
+    header.term_offset = 64 * 1024 - 32;
+    header.session_id = 1;
+    header.stream_id = 2;
+    header.term_id = 0;
+    header.reserved_value = 0;
+
+    try std.testing.expect(image.insertPadding(&counters_map, &header));
+    try std.testing.expectEqual(@as(i64, 64 * 1024), image.rebuild_position);
+    try std.testing.expectEqual(@as(i64, 64 * 1024), counters_map.get(hwm_handle.counter_id));
 }
 
 test "Image hasGap detects missing frame" {

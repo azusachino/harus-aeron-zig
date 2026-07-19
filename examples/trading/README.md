@@ -49,9 +49,12 @@ stress case:
 TRADING_SOAK_MESSAGES=1000 uv run scripts/trading.py soak --mode java
 ```
 
-It currently exposes the embedded Zig media-driver flow-control ceiling near
-600 accepted ingress messages (`OfferTimeout`); this is tracked as a 0.9
-maturity gap rather than treated as a passing soak.
+The publisher now rotates terms and the sender follows rotated partitions, so
+the run advances past the earlier ~600-order ingress ceiling. The current
+remaining gap is on the Zig client's Java-cluster egress path: responses stop
+at about 681 orders and the client eventually reports `OfferTimeout` or
+`ResponseTimeout`. This remains an explicit 0.9 maturity gap rather than a
+passing soak.
 
 Matching rules are deterministic:
 

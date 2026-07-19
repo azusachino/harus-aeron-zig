@@ -84,6 +84,39 @@ pub const ExclusivePublication = struct {
         return self.publisher_limit;
     }
 
+    // LESSON(publications): A term boundary is completed with padding, then the next ring partition is initialized and published through activeTermCount. See docs/tutorial/04-client/01-publications.md
+    fn rotateTerm(self: *ExclusivePublication, term_id: i32, active_term_count: i32) OfferResult {
+        var meta = self.log_buffer.metaData();
+        const current_partition = metadata.activePartitionIndex(active_term_count);
+        const current_raw_tail = meta.rawTailVolatile(current_partition);
+        const current_offset = metadata.termOffset(current_raw_tail, self.term_length);
+
+        if (current_offset < self.term_length) {
+            const current_buffer = self.log_buffer.termBuffer(current_partition);
+            const current_tail_offset = metadata.TERM_TAIL_COUNTERS_OFFSET + (current_partition * @sizeOf(i64));
+            const current_tail_ptr: *i64 = @ptrCast(@alignCast(&meta.buffer[current_tail_offset]));
+            var current_appender = term_appender.TermAppender.init(current_buffer, current_tail_ptr);
+            switch (current_appender.appendPadding(0)) {
+                .padding_applied => {},
+                .admin_action => return .admin_action,
+                .tripped => return .admin_action,
+                .ok => return .admin_action,
+            }
+        }
+
+        const next_term_count = active_term_count + 1;
+        const next_partition = metadata.activePartitionIndex(next_term_count);
+        const next_term_id = term_id +% 1;
+        meta.setRawTailVolatile(next_partition, term_appender.TermAppender.packTail(next_term_id, 0));
+        meta.setActiveTermCount(next_term_count);
+
+        const next_buffer = self.log_buffer.termBuffer(next_partition);
+        const next_tail_offset = metadata.TERM_TAIL_COUNTERS_OFFSET + (next_partition * @sizeOf(i64));
+        const next_tail_ptr: *i64 = @ptrCast(@alignCast(&meta.buffer[next_tail_offset]));
+        self.appender = term_appender.TermAppender.init(next_buffer, next_tail_ptr);
+        return .admin_action;
+    }
+
     // LESSON(publications): offer() reads volatile tail (term_id || offset), computes stream position, checks publisher_limit for back_pressure. See docs/tutorial/04-client/01-publications.md
     pub fn offer(self: *ExclusivePublication, data: []const u8) OfferResult {
         if (self.is_closed) return .closed;
@@ -100,6 +133,10 @@ pub const ExclusivePublication = struct {
 
         if (current_position >= publisher_limit) {
             return .back_pressure;
+        }
+
+        if (term_offset >= self.term_length) {
+            return self.rotateTerm(term_id, self.log_buffer.metaData().activeTermCount());
         }
 
         // LESSON(publications): Single-frame messages use BEGIN_FLAG | END_FLAG; multi-frame fragmentation uses BEGIN/no-flag/END across appends. See docs/tutorial/04-client/01-publications.md
@@ -122,7 +159,7 @@ pub const ExclusivePublication = struct {
                 const new_position = @as(i64, term_id - self.initial_term_id) * self.term_length + offset + @as(i64, @intCast(aligned_len));
                 return .{ .ok = new_position };
             },
-            .tripped => .back_pressure,
+            .tripped => self.rotateTerm(term_id, self.log_buffer.metaData().activeTermCount()),
             .admin_action => .admin_action,
             .padding_applied => .admin_action,
         };
@@ -178,6 +215,35 @@ test "ExclusivePublication offer writes to log buffer" {
     const expected_unaligned_len = @as(i32, @intCast(frame.DataHeader.LENGTH + test_payload.len));
     try std.testing.expectEqual(expected_unaligned_len, frame_length);
     try std.testing.expectEqualSlices(u8, test_payload, term0[frame.DataHeader.LENGTH .. frame.DataHeader.LENGTH + test_payload.len]);
+}
+
+test "ExclusivePublication rotates after term is full" {
+    const allocator = std.testing.allocator;
+    const term_length = 64 * 1024;
+    var log_buf = try logbuffer.LogBuffer.init(allocator, term_length);
+    defer log_buf.deinit();
+
+    var pub_instance = ExclusivePublication.init(1, 2, 100, term_length, 1408, &log_buf);
+    pub_instance.publisher_limit = 1024 * 1024;
+
+    const payload = [_]u8{'x'} ** 1000;
+    var saw_rotation = false;
+    var offers: usize = 0;
+    while (offers < 100) : (offers += 1) {
+        switch (pub_instance.offer(&payload)) {
+            .ok => {},
+            .admin_action => {
+                saw_rotation = true;
+                offers -= 1;
+            },
+            else => return error.UnexpectedResult,
+        }
+    }
+
+    try std.testing.expect(saw_rotation);
+    try std.testing.expectEqual(@as(i32, 1), log_buf.metaData().activeTermCount());
+    try std.testing.expectEqual(@as(i32, 101), metadata.termId(log_buf.metaData().rawTailVolatile(1)));
+    try std.testing.expect(metadata.termOffset(log_buf.metaData().rawTailVolatile(1), term_length) > 0);
 }
 
 test "offer: first message succeeds when publisher_limit equals term_length" {

@@ -220,15 +220,14 @@ pub const Sender = struct {
         var work_count: i32 = 0;
         var current_pos: i64 = sender_pos;
 
-        // Get metadata and active partition
-        const meta = publication.log_buffer.metaData();
-        const term_count = meta.activeTermCount();
-        const active_partition = metadata.activePartitionIndex(term_count);
-        const term_buffer = publication.log_buffer.termBuffer(active_partition);
         const term_length = publication.log_buffer.term_length;
 
         while (current_pos < pub_limit) {
-            // Compute position within active term
+            // Follow the stream position across rotating term partitions. The active
+            // partition is not necessarily the partition containing sender_pos.
+            const term_count = @as(i32, @intCast(@divTrunc(current_pos, @as(i64, term_length))));
+            const partition = metadata.activePartitionIndex(term_count);
+            const term_buffer = publication.log_buffer.termBuffer(partition);
             const term_offset = @as(i32, @intCast(@mod(current_pos, @as(i64, term_length))));
             const buffer_offset = @as(usize, @intCast(term_offset));
 
