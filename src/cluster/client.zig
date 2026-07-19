@@ -36,6 +36,10 @@ pub const AeronCluster = struct {
     leader_member_id: i32,
     egress_invalid: usize = 0,
     egress_ignored: usize = 0,
+    egress_buffer_too_small: usize = 0,
+    egress_invalid_template: usize = 0,
+    egress_last_invalid_template: u16 = 0,
+    egress_last_invalid_bytes: [16]u8 = [_]u8{0} ** 16,
     closed: bool = false,
 
     const ConnectState = struct {
@@ -151,6 +155,22 @@ pub const AeronCluster = struct {
         return self.egress_ignored;
     }
 
+    pub fn egressBufferTooSmallCount(self: *const AeronCluster) usize {
+        return self.egress_buffer_too_small;
+    }
+
+    pub fn egressInvalidTemplateCount(self: *const AeronCluster) usize {
+        return self.egress_invalid_template;
+    }
+
+    pub fn egressLastInvalidTemplate(self: *const AeronCluster) u16 {
+        return self.egress_last_invalid_template;
+    }
+
+    pub fn egressLastInvalidBytes(self: *const AeronCluster) [16]u8 {
+        return self.egress_last_invalid_bytes;
+    }
+
     pub fn close(self: *AeronCluster) void {
         if (self.closed) return;
         self.closed = true;
@@ -186,8 +206,17 @@ pub const AeronCluster = struct {
 
     fn onEgressFragment(_: *const frame.DataHeader, buffer: []const u8, ctx_ptr: *anyopaque) void {
         const state: *PollState = @ptrCast(@alignCast(ctx_ptr));
-        const header = codecs.decodeMessageHeader(buffer) catch {
+        const header = codecs.decodeMessageHeader(buffer) catch |err| {
             state.cluster.egress_invalid += 1;
+            switch (err) {
+                error.BufferTooSmall => state.cluster.egress_buffer_too_small += 1,
+                error.InvalidTemplateId => {
+                    state.cluster.egress_invalid_template += 1;
+                    if (buffer.len >= 4) state.cluster.egress_last_invalid_template = std.mem.readInt(u16, buffer[2..4], .little);
+                    @memset(&state.cluster.egress_last_invalid_bytes, 0);
+                    @memcpy(state.cluster.egress_last_invalid_bytes[0..@min(buffer.len, 16)], buffer[0..@min(buffer.len, 16)]);
+                },
+            }
             return;
         };
         if (header.template_id != .session_message_header or buffer.len < codecs.SESSION_HEADER_LENGTH) {

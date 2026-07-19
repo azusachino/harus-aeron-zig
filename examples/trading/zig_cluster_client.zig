@@ -133,13 +133,18 @@ pub fn main() !void {
                 const now_ms = aeron.time.milliTimestamp();
                 if (retry_started_ms == 0) retry_started_ms = now_ms;
                 if (now_ms - last_stall_report_ms >= 1_000) {
-                    std.debug.print("ZIG_CLUSTER_CLIENT_STALL sent={d} result={s} responses={d} ingress_position={d} publisher_limit={d} egress_position={d} connected={any} retry_ms={d}\n", .{
+                    std.debug.print("ZIG_CLUSTER_CLIENT_STALL sent={d} result={s} responses={d} ingress_position={d} publisher_limit={d} egress_position={d} invalid_egress={d} buffer_too_small={d} invalid_template={d} ignored_egress={d} status_sent={d} connected={any} retry_ms={d}\n", .{
                         index + 1,
                         @tagName(offer_result),
                         responses.count,
                         cluster.ingress_publication.position(),
                         cluster.ingress_publication.publisherLimit(),
                         cluster.egressPosition(),
+                        cluster.egressInvalidCount(),
+                        cluster.egressBufferTooSmallCount(),
+                        cluster.egressInvalidTemplateCount(),
+                        cluster.egressIgnoredCount(),
+                        driver.receiver_agent.statusMessagesSent(),
                         cluster.ingress_publication.isConnected(),
                         now_ms - retry_started_ms,
                     });
@@ -185,11 +190,15 @@ pub fn main() !void {
     }
     if (responses.count != order_count) {
         if (trace_perf) {
-            std.debug.print("ZIG_CLUSTER_CLIENT_RESPONSE_TIMEOUT responses={d} expected={d} egress_position={d} invalid_egress={d} ignored_egress={d}\n", .{
+            std.debug.print("ZIG_CLUSTER_CLIENT_RESPONSE_TIMEOUT responses={d} expected={d} egress_position={d} invalid_egress={d} buffer_too_small={d} invalid_template={d} last_invalid_template={d} last_invalid_bytes={any} ignored_egress={d}\n", .{
                 responses.count,
                 order_count,
                 cluster.egressPosition(),
                 cluster.egressInvalidCount(),
+                cluster.egressBufferTooSmallCount(),
+                cluster.egressInvalidTemplateCount(),
+                cluster.egressLastInvalidTemplate(),
+                cluster.egressLastInvalidBytes(),
                 cluster.egressIgnoredCount(),
             });
         }

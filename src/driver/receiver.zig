@@ -312,6 +312,7 @@ pub const Receiver = struct {
     // Diagnostic counters (atomic for cross-thread visibility)
     data_frames_total: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     data_frames_before_image: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    status_messages_sent: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -378,6 +379,10 @@ pub const Receiver = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
         return self.pending_nak_messages.toOwnedSlice(self.allocator) catch return &.{};
+    }
+
+    pub fn statusMessagesSent(self: *const Receiver) u64 {
+        return self.status_messages_sent.load(.monotonic);
     }
 
     pub fn processDatagram(self: *Receiver, data: []const u8, src_addr: net.Address) i32 {
@@ -706,6 +711,7 @@ pub const Receiver = struct {
 
         const status_bytes = @as([*]const u8, @ptrCast(&status))[0..protocol.StatusMessage.LENGTH];
         _ = try self.send_endpoint.send(image.source_address, status_bytes);
+        _ = self.status_messages_sent.fetchAdd(1, .monotonic);
         image.last_status_position = consumption_position;
     }
 };
