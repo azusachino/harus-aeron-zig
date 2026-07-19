@@ -79,7 +79,7 @@ def run(mode: str, action: str) -> int:
     if action in ("up", "soak"):
         command += ["--build", "--abort-on-container-exit"]
         if mode == "java":
-            command += ["java-node-0", "java-node-1", "java-node-2", "java-client"]
+            command += ["java-node-0", "java-node-1", "java-node-2", "java-client", "zig-client"]
     elif action == "down":
         command += ["--remove-orphans"]
     environment = None

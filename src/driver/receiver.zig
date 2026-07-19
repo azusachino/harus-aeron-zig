@@ -587,13 +587,10 @@ pub const Receiver = struct {
     pub fn doWork(self: *Receiver) i32 {
         var src_addr: net.Address = undefined;
         const bytes_read = self.recv_endpoint.recv(&self.recv_buf, &src_addr) catch |err| {
-            if (err == error.WouldBlock) {
-                return self.refreshSubscriberStatuses();
-            }
-            if (builtin.mode == .Debug) {
+            if (err != error.WouldBlock and builtin.mode == .Debug) {
                 std.debug.print("[RECEIVER] recv error: {any}\n", .{err});
             }
-            return 0;
+            return self.refreshSubscriberStatuses();
         };
 
         if (bytes_read == 0) {

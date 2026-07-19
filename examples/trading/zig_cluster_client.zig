@@ -102,8 +102,8 @@ pub fn main() !void {
         const side: []const u8 = if (index % 2 == 0) "ASK" else "BID";
         const price: usize = if (index % 2 == 0) 10100 else 10050;
         const quantity: usize = if (index % 2 == 0) 10 else 4;
-        const order = try std.fmt.allocPrint(allocator, "BTC_USDT|{d}|{s}|{d}|{d}", .{ order_id, side, price, quantity });
-        defer allocator.free(order);
+        var order_buf: [64]u8 = undefined;
+        const order = try std.fmt.bufPrint(&order_buf, "BTC_USDT|{d}|{s}|{d}|{d}", .{ order_id, side, price, quantity });
         while (true) {
             if (aeron.time.milliTimestamp() >= offer_deadline) return error.OfferTimeout;
             const work_start_ns = if (trace_perf) aeron.time.nanoTimestamp() else 0;
