@@ -88,7 +88,12 @@ pub fn sendTo(fd: socket_t, data: []const u8, flags: u32, dest: *const std.posix
 
 pub fn recvFrom(fd: socket_t, buf: []u8, flags: u32, src: *std.posix.sockaddr, addrlen: *std.posix.socklen_t) !usize {
     const rc = std.posix.system.recvfrom(fd, buf.ptr, buf.len, flags, src, addrlen);
-    if (std.posix.errno(rc) != .SUCCESS) return error.WouldBlock;
+    if (std.posix.errno(rc) != .SUCCESS) {
+        return switch (std.posix.errno(rc)) {
+            .AGAIN => error.WouldBlock,
+            else => error.ReceiveFailed,
+        };
+    }
     return @intCast(rc);
 }
 
