@@ -52,6 +52,9 @@ pub const ExclusivePublication = struct {
         // Initialize metadata with the starting term_id (offset starts at 0)
         meta.setRawTailVolatile(partition, term_appender.TermAppender.packTail(term_id, 0));
 
+        var appender = term_appender.TermAppender.init(term_buffer, raw_tail_ptr);
+        appender.setPaddingIdentity(session_id, stream_id);
+
         return .{
             .session_id = session_id,
             .stream_id = stream_id,
@@ -64,7 +67,7 @@ pub const ExclusivePublication = struct {
             .publisher_limit_counter_id = counters.NULL_COUNTER_ID,
             .is_closed = false,
             .owns_log_buffer = false,
-            .appender = term_appender.TermAppender.init(term_buffer, raw_tail_ptr),
+            .appender = appender,
         };
     }
 
@@ -96,6 +99,7 @@ pub const ExclusivePublication = struct {
             const current_tail_offset = metadata.TERM_TAIL_COUNTERS_OFFSET + (current_partition * @sizeOf(i64));
             const current_tail_ptr: *i64 = @ptrCast(@alignCast(&meta.buffer[current_tail_offset]));
             var current_appender = term_appender.TermAppender.init(current_buffer, current_tail_ptr);
+            current_appender.setPaddingIdentity(self.session_id, self.stream_id);
             switch (current_appender.appendPadding(0)) {
                 .padding_applied => {},
                 .admin_action => return .admin_action,
@@ -114,6 +118,7 @@ pub const ExclusivePublication = struct {
         const next_tail_offset = metadata.TERM_TAIL_COUNTERS_OFFSET + (next_partition * @sizeOf(i64));
         const next_tail_ptr: *i64 = @ptrCast(@alignCast(&meta.buffer[next_tail_offset]));
         self.appender = term_appender.TermAppender.init(next_buffer, next_tail_ptr);
+        self.appender.setPaddingIdentity(self.session_id, self.stream_id);
         return .admin_action;
     }
 

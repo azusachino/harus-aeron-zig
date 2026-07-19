@@ -14,6 +14,8 @@ pub const TermAppender = struct {
     term_buffer: []u8,
     term_length: i32,
     raw_tail: *i64, // pointer to packed tail in shared mmap metadata
+    padding_session_id: i32,
+    padding_stream_id: i32,
 
     /// Initialize a TermAppender with a buffer and pointer to raw_tail in metadata.
     pub fn init(term_buffer: []u8, raw_tail_ptr: *i64) TermAppender {
@@ -21,7 +23,14 @@ pub const TermAppender = struct {
             .term_buffer = term_buffer,
             .term_length = @as(i32, @intCast(term_buffer.len)),
             .raw_tail = raw_tail_ptr,
+            .padding_session_id = 0,
+            .padding_stream_id = 0,
         };
+    }
+
+    pub fn setPaddingIdentity(self: *TermAppender, session_id: i32, stream_id: i32) void {
+        self.padding_session_id = session_id;
+        self.padding_stream_id = stream_id;
     }
 
     /// Pack term_id and term_offset into a 64-bit value: high 32 = term_id, low 32 = offset.
@@ -144,8 +153,8 @@ pub const TermAppender = struct {
         padding_header.flags = frame.DataHeader.PADDING_FLAG;
         padding_header.type = @intFromEnum(frame.FrameType.padding);
         padding_header.term_offset = current_offset;
-        padding_header.session_id = 0;
-        padding_header.stream_id = 0;
+        padding_header.session_id = self.padding_session_id;
+        padding_header.stream_id = self.padding_stream_id;
         padding_header.term_id = current_term_id;
         padding_header.reserved_value = 0;
 
@@ -279,4 +288,20 @@ test "TermAppender appendPadding fills to end of term" {
     // Now append padding
     const result2 = appender.appendPadding(0);
     try std.testing.expectEqual(AppendResult.padding_applied, result2);
+}
+
+test "TermAppender padding preserves stream identity" {
+    const allocator = std.testing.allocator;
+    const term_buffer = try allocator.alloc(u8, 1024);
+    defer allocator.free(term_buffer);
+    @memset(term_buffer, 0);
+
+    var raw_tail: i64 = TermAppender.packTail(10, 0);
+    var appender = TermAppender.init(term_buffer, &raw_tail);
+    appender.setPaddingIdentity(42, 77);
+
+    try std.testing.expectEqual(AppendResult.padding_applied, appender.appendPadding(0));
+    const header = @as(*const frame.DataHeader, @ptrCast(@alignCast(&term_buffer[0])));
+    try std.testing.expectEqual(@as(i32, 42), header.session_id);
+    try std.testing.expectEqual(@as(i32, 77), header.stream_id);
 }
