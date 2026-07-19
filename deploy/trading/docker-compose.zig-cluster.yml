@@ -13,7 +13,7 @@ services:
       # is implemented.
       INTERNAL_PORT: "9010"
       AERON_DIR: /dev/shm/aeron
-      CLUSTER_JOURNAL_PATH: /data/orders.log
+      CLUSTER_ARCHIVE_DIR: /data/archive
       CLUSTER_ENDPOINTS: "0=zig-node-0:9010,1=zig-node-1:9011,2=zig-node-2:9012"
       CLUSTER_INTERNAL_ENDPOINTS: "0=zig-node-0:9010,1=zig-node-1:9011,2=zig-node-2:9012"
     tmpfs:
@@ -31,7 +31,7 @@ services:
       INGRESS_PORT: "9011"
       INTERNAL_PORT: "9011"
       AERON_DIR: /dev/shm/aeron
-      CLUSTER_JOURNAL_PATH: /data/orders.log
+      CLUSTER_ARCHIVE_DIR: /data/archive
       CLUSTER_ENDPOINTS: "0=zig-node-0:9010,1=zig-node-1:9011,2=zig-node-2:9012"
       CLUSTER_INTERNAL_ENDPOINTS: "0=zig-node-0:9010,1=zig-node-1:9011,2=zig-node-2:9012"
     volumes:
@@ -46,7 +46,7 @@ services:
       INGRESS_PORT: "9012"
       INTERNAL_PORT: "9012"
       AERON_DIR: /dev/shm/aeron
-      CLUSTER_JOURNAL_PATH: /data/orders.log
+      CLUSTER_ARCHIVE_DIR: /data/archive
       CLUSTER_ENDPOINTS: "0=zig-node-0:9010,1=zig-node-1:9011,2=zig-node-2:9012"
       CLUSTER_INTERNAL_ENDPOINTS: "0=zig-node-0:9010,1=zig-node-1:9011,2=zig-node-2:9012"
     volumes:

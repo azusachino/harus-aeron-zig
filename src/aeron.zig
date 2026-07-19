@@ -20,6 +20,8 @@ pub const archive = struct {
     pub const conductor = @import("archive/conductor.zig");
     pub const recorder = @import("archive/recorder.zig");
     pub const replayer = @import("archive/replayer.zig");
+    pub const Archive = @import("archive/archive.zig").Archive;
+    pub const ArchiveContext = @import("archive/archive.zig").ArchiveContext;
 };
 pub const cluster = struct {
     pub const protocol = @import("cluster/protocol.zig");

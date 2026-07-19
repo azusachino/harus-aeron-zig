@@ -16,6 +16,7 @@ const election_mod = aeron.cluster.election;
 const Election = election_mod.Election;
 const log_mod = aeron.cluster.log;
 const cluster_protocol = aeron.cluster.protocol;
+const order_store = @import("order_store.zig");
 const trading = @import("trading");
 
 const INGRESS_STREAM_ID: i32 = 101;
@@ -30,12 +31,15 @@ const INTERNAL_APPEND_REQUEST: u8 = 6;
 const INTERNAL_APPEND_POSITION: u8 = 7;
 const INTERNAL_COMMIT_POSITION: u8 = 8;
 const CLUSTER_SIZE: u32 = 3;
-const JOURNAL_MAX_ORDER_LENGTH: usize = 16 * 1024;
 // LESSON(log-replication): AppendPosition acks and idle retransmission both run
 // on this cadence; slower than the leader heartbeat so retransmission only
 // fires once a gap has had time to be closed by a normal in-order append.
 const APPEND_ACK_INTERVAL_MS: i64 = 200;
 const RETRANSMIT_INTERVAL_MS: i64 = 250;
+// LESSON(archive-snapshot): a snapshot lets restart skip replaying every
+// order-log recording from position zero; the interval only trades disk
+// I/O for replay time on restart, so it can be coarse.
+const SNAPSHOT_INTERVAL_MS: i64 = 30_000;
 // Cap entries resent per peer per tick so a badly lagging follower cannot
 // make the leader flood the internal channel in one duty cycle.
 const MAX_RETRANSMIT_ENTRIES: usize = 64;
@@ -176,76 +180,6 @@ const Session = struct {
     publication_request_id: i64,
 };
 
-/// Journal — append-only durable order input for the process-boundary sample.
-///
-/// The journal is intentionally small and explicit: every accepted order is
-/// length-prefixed, flushed, and replayed before the node announces readiness.
-/// It makes the sample's persistent volume meaningful without pretending to be
-/// Aeron Archive or a production snapshot format.
-const Journal = struct {
-    allocator: std.mem.Allocator,
-    file: std.Io.File,
-    replayed_orders: usize = 0,
-
-    fn init(allocator: std.mem.Allocator, book: *trading.OrderBook, log: *log_mod.ClusterLog, path: []const u8) !Journal {
-        try std.Io.Dir.cwd().createDirPath(aeron.io.io(), std.fs.path.dirname(path) orelse ".");
-        var file = std.Io.Dir.cwd().openFile(aeron.io.io(), path, .{ .mode = .read_write }) catch |err| switch (err) {
-            error.FileNotFound => try std.Io.Dir.cwd().createFile(aeron.io.io(), path, .{ .read = true, .truncate = false }),
-            else => return err,
-        };
-        errdefer file.close(aeron.io.io());
-
-        const file_size = @as(usize, @intCast(try file.length(aeron.io.io())));
-        if (file_size > 0) {
-            const bytes = try allocator.alloc(u8, file_size);
-            defer allocator.free(bytes);
-            const read_length = try file.readPositionalAll(aeron.io.io(), bytes, 0);
-            if (read_length != file_size) return error.IncompleteJournal;
-
-            var replayed_orders: usize = 0;
-            var offset: usize = 0;
-            while (offset < bytes.len) {
-                if (bytes.len - offset < 4) return error.IncompleteJournal;
-                const order_length = @as(usize, @intCast(read(u32, bytes[offset..][0..4])));
-                offset += 4;
-                if (order_length == 0 or order_length > JOURNAL_MAX_ORDER_LENGTH or order_length > bytes.len - offset) {
-                    return error.CorruptJournal;
-                }
-                const order_payload = bytes[offset .. offset + order_length];
-                const order = parseOrder(order_payload) catch return error.CorruptJournal;
-                _ = book.submit(order) catch return error.CorruptJournal;
-                // Replay drives the replication log to the same byte position
-                // a live AppendRequest would have reached, so a restarted
-                // member reports the correct log_position to peers immediately.
-                _ = log.append(order_payload, 0) catch return error.CorruptJournal;
-                replayed_orders += 1;
-                offset += order_length;
-            }
-            var writer_buffer: [1]u8 = undefined;
-            var writer = file.writer(aeron.io.io(), &writer_buffer);
-            try writer.seekTo(file_size);
-            return .{ .allocator = allocator, .file = file, .replayed_orders = replayed_orders };
-        }
-        var writer_buffer: [1]u8 = undefined;
-        var writer = file.writer(aeron.io.io(), &writer_buffer);
-        try writer.seekTo(file_size);
-        return .{ .allocator = allocator, .file = file };
-    }
-
-    fn append(self: *Journal, order_payload: []const u8) !void {
-        if (order_payload.len == 0 or order_payload.len > JOURNAL_MAX_ORDER_LENGTH) return error.OrderTooLarge;
-        var length: [4]u8 = undefined;
-        std.mem.writeInt(u32, &length, @intCast(order_payload.len), .little);
-        try self.file.writeStreamingAll(aeron.io.io(), &length);
-        try self.file.writeStreamingAll(aeron.io.io(), order_payload);
-        try self.file.sync(aeron.io.io());
-    }
-
-    fn deinit(self: *Journal) void {
-        self.file.close(aeron.io.io());
-    }
-};
-
 fn parseOrder(order_payload: []const u8) !trading.Order {
     var fields = std.mem.splitScalar(u8, order_payload, '|');
     const symbol = fields.next() orelse return error.InvalidOrder;
@@ -266,8 +200,7 @@ const Node = struct {
     last_election_state: election_mod.ElectionState = .init,
     endpoints: []const u8,
     book: trading.OrderBook,
-    journal: Journal,
-    replaying: bool = false,
+    store: order_store.OrderStore,
     outputs: std.ArrayListUnmanaged(Output) = .empty,
     sessions: std.ArrayListUnmanaged(Session) = .empty,
     peer_publications: std.ArrayListUnmanaged(PeerPublication) = .empty,
@@ -287,6 +220,7 @@ const Node = struct {
     log: log_mod.ClusterLog,
     last_append_ack_sent_ms: i64 = 0,
     last_commit_broadcast_position: i64 = -1,
+    last_snapshot_ms: i64 = 0,
 
     fn handleFragment(self: *Node, payload: []const u8) !void {
         const header = try codecs.decodeMessageHeader(payload);
@@ -595,7 +529,7 @@ const Node = struct {
     fn applyOrder(self: *Node, order_payload: []const u8) !trading.SubmitResult {
         const order = try parseOrder(order_payload);
         const result = try self.book.submit(order);
-        if (!self.replaying) try self.journal.append(order_payload);
+        try self.store.append(order_payload);
         _ = try self.log.append(order_payload, nowNs());
         self.election.log_position += 1;
         return result;
@@ -678,6 +612,14 @@ const Node = struct {
             self.last_append_ack_sent_ms = now_ms;
             try self.sendAppendPositionAck(self.election.leaderMemberId());
         }
+
+        // Every member (not just the leader) periodically snapshots its own
+        // durable book + log state so a restart can skip replaying every
+        // order-log recording from the beginning of time.
+        if (now_ms - self.last_snapshot_ms >= SNAPSHOT_INTERVAL_MS) {
+            self.last_snapshot_ms = now_ms;
+            try self.store.takeSnapshot(self.member_id, &self.book, &self.log, self.next_session_id);
+        }
     }
 
     fn queueResponse(self: *Node, session_id: i64, order_id: u64, result: []const u8) !void {
@@ -750,7 +692,7 @@ const Node = struct {
         for (self.internal_outputs.items) |output| self.allocator.free(output.buffer);
         self.internal_outputs.deinit(self.allocator);
         self.peer_publications.deinit(self.allocator);
-        self.journal.deinit();
+        self.store.deinit();
         self.book.deinit();
         self.election.deinit();
         self.log.deinit();
@@ -784,7 +726,7 @@ pub fn main() !void {
     defer allocator.free(ingress_channel);
     const internal_channel = try std.fmt.allocPrint(allocator, "aeron:udp?endpoint=0.0.0.0:{d}", .{internal_port});
     defer allocator.free(internal_channel);
-    const journal_path = env("CLUSTER_JOURNAL_PATH", "/data/orders.log");
+    const archive_dir = env("CLUSTER_ARCHIVE_DIR", "/data/archive");
 
     try waitForPeerEndpoints(member_id, internal_endpoints);
 
@@ -820,11 +762,11 @@ pub fn main() !void {
     errdefer book.deinit();
     var log = log_mod.ClusterLog.init(allocator);
     errdefer log.deinit();
-    var journal = try Journal.init(allocator, &book, &log, journal_path);
-    errdefer journal.deinit();
+    var store = try order_store.OrderStore.init(allocator, member_id, archive_dir, &book, &log, 1_000, parseOrder);
+    errdefer store.deinit();
     var election = try Election.init(allocator, member_id, CLUSTER_SIZE);
     errdefer election.deinit();
-    election.log_position = @intCast(journal.replayed_orders);
+    election.log_position = @intCast(store.replayed_orders);
     var node = Node{
         .allocator = allocator,
         .aeron = &client,
@@ -832,14 +774,15 @@ pub fn main() !void {
         .election = election,
         .endpoints = endpoints,
         .book = book,
-        .journal = journal,
+        .store = store,
         .peer_publications = peer_publications,
         .internal_subscription_request_id = internal_subscription_request,
         .log = log,
+        .next_session_id = store.next_session_id,
     };
     defer node.deinit();
 
-    std.debug.print("ZIG_CLUSTER_REPLAY member={d} orders={d} path={s}\n", .{ member_id, journal.replayed_orders, journal_path });
+    std.debug.print("ZIG_CLUSTER_REPLAY member={d} orders={d} archive_dir={s}\n", .{ member_id, store.replayed_orders, archive_dir });
     std.debug.print("ZIG_CLUSTER_READY member={d} leader={d} ingress={s} internal={s}\n", .{ member_id, node.election.leaderMemberId(), ingress_channel, internal_channel });
     while (true) {
         _ = client.doWork();

@@ -30,10 +30,15 @@ real three-process topology and both client-language smokes. It wires peer
 publications and heartbeat/order frames, and the source-aware receiver path
 passes the three-member failover smoke: after node 0 stops, node 1 becomes
 leader, node 2 follows node 1's heartbeat, and failover orders are observed on
-node 2. Each member now appends accepted orders to `/data/orders.log` and
-replays that journal before readiness; a restart proof restored six orders on
-node 1 (`ZIG_CLUSTER_REPLAY ... orders=6`). This is durable sample replay, not
-Aeron Archive/snapshot or full Raft/consensus parity. Mixed now has a
+node 2. Each member now records accepted orders into a real Aeron Archive
+recording under `/data/archive` (catalog + segmented `.dat` files) and replays
+it before readiness; a restart proof restored six orders on node 1
+(`ZIG_CLUSTER_REPLAY ... orders=6`). Members also take periodic Archive-backed
+snapshots of book + log state so a restart can skip straight past
+already-snapshotted order recordings instead of replaying from the beginning.
+Log replication between members (append/commit position tracking and gap
+retransmission) is also wired over the internal channel; this is durable
+sample replay and replication, not full Raft/consensus parity. Mixed now has a
 canonical two-Java/one-Zig consensus smoke: the Zig member receives Java
 RequestVote, returns Vote, and consumes NewLeadershipTerm, AppendPosition,
 CommitPosition, CatchupPosition, and StopCatchup. The follower now emits a

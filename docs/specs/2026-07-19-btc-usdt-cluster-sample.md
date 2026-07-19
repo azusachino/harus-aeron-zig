@@ -76,11 +76,15 @@ publications and internal heartbeat/order framing are wired. The source-aware re
 verified with a three-member smoke: node 1 becomes leader after node 0 stops,
 node 2 follows node 1's heartbeat, and replicated orders are observed on node
 2. This is deterministic sample-level failover, not Raft/consensus parity.
-Each Zig member now persists accepted order inputs to its named Compose volume
-at `/data/orders.log` and replays them before `ZIG_CLUSTER_READY`; a restart
-proof restored six replicated orders on member 1. This is an explicit durable
-sample journal, not Aeron Archive replay or a snapshot format. Durable
-snapshots are still not implemented in this sample. The three-process smoke does support multiple concurrent client
+Each Zig member now persists accepted order inputs into a real Aeron Archive
+recording under `/data/archive` on its named Compose volume (catalog +
+segmented `.dat` files, not a private flat file) and replays it before
+`ZIG_CLUSTER_READY`; a restart proof restored six replicated orders on member
+1. Members also take periodic Archive-backed snapshots of book + log state,
+so restart replay only needs to cover order recordings newer than the latest
+snapshot rather than the full order history, and crash recovery (no graceful
+shutdown) still replays durably-written orders by reading the still-open
+recording's real on-disk size. The three-process smoke does support multiple concurrent client
 sessions and follower-to-leader redirect. The Java Compose topology remains the
 upstream reference; mixed mode now has a consensus/client smoke, while Zig
 member-to-member log application, catchup, archive, ingress ownership, and
@@ -100,8 +104,9 @@ TRADING_SOAK_MESSAGES=3 uv run scripts/trading.py replay-proof --mode zig
 ```
 
 The runner restarts member 1 without removing its named volume and requires
-`ZIG_CLUSTER_REPLAY member=1 orders=6` before it passes. This proves the sample
-journal boundary, not Aeron Archive or snapshot parity.
+`ZIG_CLUSTER_REPLAY member=1 orders=6` before it passes. This proves Archive-
+backed durable replay across a restart, including the still-open recording
+case where no graceful shutdown ran.
 
 Once a topology is real, use `--mode zig`, `--mode java`, or `--mode mixed`
 with `config`, `up`, and `down`.
