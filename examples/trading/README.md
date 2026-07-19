@@ -19,9 +19,39 @@ clients:
 - `mixed`: two Java members and one Zig member plus both client languages.
 
 The Java files now include a working three-member Aeron Cluster baseline and
-client smoke. Zig and mixed remain blocked until their three-process cluster
-topologies and client failover assertions exist. See
+client smoke. The Java topology also exercises the Zig client against a real
+Java cluster, including the follower-to-leader redirect. Zig and mixed remain
+blocked until their three-process cluster topologies and client failover
+assertions exist. See
 `docs/specs/2026-07-19-btc-usdt-cluster-sample.md` for the acceptance matrix.
+
+Run the baseline tests with `uv run scripts/trading.py test --mode java` and
+run the sustained Java-cluster smoke with:
+
+```bash
+uv run scripts/trading.py soak --mode java
+```
+
+`soak` clears stale Compose containers, builds the Zig examples as
+`ReleaseFast`, starts three Java cluster members, and runs both Java and Zig
+clients. The default is 500 orders; `TRADING_SOAK_MESSAGES` changes it and
+`TRADING_SOAK_START_DELAY_MS` controls the client startup delay (default
+5,000 ms). The Java client remains alive for a 30-second grace period by
+default (`TRADING_SOAK_HOLD_OPEN_MS`) so the faster client cannot tear down
+the cluster while Zig is still draining its orders. Java order IDs start at
+`1`, while Zig IDs start at `1_000_001`, so the two clients can run
+concurrently without collisions.
+
+The 500-order soak is currently green. A 1,000-order run is an explicit
+stress case:
+
+```bash
+TRADING_SOAK_MESSAGES=1000 uv run scripts/trading.py soak --mode java
+```
+
+It currently exposes the embedded Zig media-driver flow-control ceiling near
+600 accepted ingress messages (`OfferTimeout`); this is tracked as a 0.9
+maturity gap rather than treated as a passing soak.
 
 Matching rules are deterministic:
 

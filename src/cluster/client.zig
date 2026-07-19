@@ -42,13 +42,17 @@ pub const AeronCluster = struct {
         leader_member_id: i32 = 0,
         event_code: ?codecs.EventCode = null,
         failed: bool = false,
+        redirect_endpoint: [256]u8 = undefined,
+        redirect_endpoint_len: usize = 0,
     };
 
     pub fn connect(ctx: Context) !AeronCluster {
         const subscription_id = try ctx.aeron.addSubscription(ctx.egress_channel, ctx.egress_stream_id);
         errdefer ctx.aeron.removeSubscription(subscription_id) catch {};
-        const publication_request_id = try ctx.aeron.addPublication(ctx.ingress_channel, ctx.ingress_stream_id);
+        var publication_request_id = try ctx.aeron.addPublication(ctx.ingress_channel, ctx.ingress_stream_id);
         errdefer ctx.aeron.removePublication(publication_request_id) catch {};
+        var redirected_channel: ?[]u8 = null;
+        defer if (redirected_channel) |channel| ctx.allocator.free(channel);
 
         var state = ConnectState{};
         var request_buffer: [4096]u8 = undefined;
@@ -97,6 +101,22 @@ pub const AeronCluster = struct {
                         .leader_member_id = state.leader_member_id,
                     };
                 }
+                if (event_code == .redirect) {
+                    const endpoint = state.redirect_endpoint[0..state.redirect_endpoint_len];
+                    const channel = try ctx.allocator.alloc(u8, "aeron:udp?endpoint=".len + endpoint.len);
+                    errdefer ctx.allocator.free(channel);
+                    @memcpy(channel[0.."aeron:udp?endpoint=".len], "aeron:udp?endpoint=");
+                    @memcpy(channel["aeron:udp?endpoint=".len..], endpoint);
+
+                    ctx.aeron.removePublication(publication_request_id) catch {};
+                    publication_request_id = try ctx.aeron.addPublication(channel, ctx.ingress_stream_id);
+                    if (redirected_channel) |old_channel| ctx.allocator.free(old_channel);
+                    redirected_channel = channel;
+                    state.event_code = null;
+                    state.redirect_endpoint_len = 0;
+                    request_sent = false;
+                    continue;
+                }
                 return error.ClusterSessionRejected;
             }
         }
@@ -135,6 +155,18 @@ pub const AeronCluster = struct {
         state.leadership_term_id = event.leadership_term_id;
         state.leader_member_id = event.leader_member_id;
         state.event_code = event.code;
+        if (event.code == .redirect) {
+            const endpoint = redirectEndpoint(event.detail, event.leader_member_id) orelse {
+                state.failed = true;
+                return;
+            };
+            if (endpoint.len > state.redirect_endpoint.len) {
+                state.failed = true;
+                return;
+            }
+            @memcpy(state.redirect_endpoint[0..endpoint.len], endpoint);
+            state.redirect_endpoint_len = endpoint.len;
+        }
     }
 
     fn onEgressFragment(_: *const frame.DataHeader, buffer: []const u8, ctx_ptr: *anyopaque) void {
@@ -160,8 +192,27 @@ pub const AeronCluster = struct {
         const prefix = ctx.response_channel[0 .. colon + 1];
         return std.fmt.bufPrint(buffer, "{s}{d}", .{ prefix, port }) catch ctx.response_channel;
     }
+
+    fn redirectEndpoint(detail: []const u8, leader_member_id: i32) ?[]const u8 {
+        var fallback: ?[]const u8 = null;
+        var entries = std.mem.splitScalar(u8, detail, ',');
+        while (entries.next()) |entry| {
+            const equals = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
+            const start = equals + 1;
+            if (start >= entry.len) continue;
+            if (fallback == null) fallback = entry[start..];
+            const member_id = std.fmt.parseInt(i32, entry[0..equals], 10) catch continue;
+            if (member_id == leader_member_id) return entry[start..];
+        }
+        return fallback;
+    }
 };
 
 test "client exports upstream session header length" {
     try std.testing.expectEqual(@as(usize, 32), codecs.SESSION_HEADER_LENGTH);
+}
+
+test "client selects the leader endpoint from a redirect event" {
+    const detail = "0=java-node-0:9010,1=java-node-1:9010";
+    try std.testing.expectEqualStrings("java-node-1:9010", AeronCluster.redirectEndpoint(detail, 1).?);
 }

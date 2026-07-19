@@ -9,6 +9,7 @@ three-member Compose topology before `up` is allowed to run.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -46,25 +47,56 @@ def require_topology(mode: str) -> Path:
 
 def run(mode: str, action: str) -> int:
     path = require_topology(mode)
-    if mode == "java" and action == "up":
+    if action == "soak":
+        cleanup = subprocess.run(
+            compose_command() + ["-f", str(path), "down", "--remove-orphans"],
+            cwd=ROOT,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    if mode == "java" and action in ("up", "soak"):
+        build_command = [
+            "nix",
+            "develop",
+            "--command",
+            "zig",
+            "build",
+            "-Dtarget=aarch64-linux",
+        ]
+        if action == "soak":
+            build_command.append("-Doptimize=ReleaseFast")
+        build_command.append("examples")
         build = subprocess.run(
-            ["nix", "develop", "--command", "zig", "build", "-Dtarget=aarch64-linux", "examples"],
+            build_command,
             cwd=ROOT,
             check=False,
         )
         if build.returncode != 0:
             return build.returncode
-    command = compose_command() + ["-f", str(path), action]
-    if action == "up":
+    compose_action = "up" if action == "soak" else action
+    command = compose_command() + ["-f", str(path), compose_action]
+    if action in ("up", "soak"):
         command += ["--build", "--abort-on-container-exit"]
     elif action == "down":
         command += ["--remove-orphans"]
-    return subprocess.run(command, cwd=ROOT, check=False).returncode
+    environment = None
+    if action == "soak":
+        environment = {
+            **os.environ,
+            "ORDER_COUNT": os.environ.get("TRADING_SOAK_MESSAGES", "500"),
+            "START_DELAY_MS": os.environ.get("TRADING_SOAK_START_DELAY_MS", "5000"),
+            "HOLD_OPEN_MS": os.environ.get("TRADING_SOAK_HOLD_OPEN_MS", "30000"),
+            "QUIET": "1",
+        }
+    return subprocess.run(command, cwd=ROOT, env=environment, check=False).returncode
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="BTC_USDT cluster sample runner")
-    parser.add_argument("action", choices=("plan", "test", "up", "down", "config"))
+    parser = argparse.ArgumentParser(
+        description="BTC_USDT cluster sample runner; soak uses ReleaseFast and configurable message counts"
+    )
+    parser.add_argument("action", choices=("plan", "test", "up", "soak", "down", "config"))
     parser.add_argument("--mode", choices=MODES, default=None)
     args = parser.parse_args()
 
