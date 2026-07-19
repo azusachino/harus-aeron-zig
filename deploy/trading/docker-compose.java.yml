@@ -72,6 +72,7 @@ services:
       OFFER_TIMEOUT_MS: "${OFFER_TIMEOUT_MS:-60000}"
       RESPONSE_TIMEOUT_MS: "${RESPONSE_TIMEOUT_MS:-30000}"
       CONNECT_MAX_ITERATIONS: "${CONNECT_MAX_ITERATIONS:-100000}"
+      TRACE_PERF: "${TRACE_PERF:-0}"
       QUIET: "${QUIET:-0}"
     tmpfs:
       - /dev/shm:exec,size=1g

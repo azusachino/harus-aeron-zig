@@ -72,6 +72,13 @@ The 100,000-order Zig run completed publishing but stalled with 61 missing
 responses despite a 10-minute response deadline. This is an open 0.9
 interop/performance gap, not evidence of acceptable parity.
 
+Enable low-noise client tracing with `TRACE_PERF=1` in the Zig container. The
+10,000-order trace attributed 11,137 ms of an 11,446 ms publish phase to
+`Aeron.doWork`; offer encoding/publication took 94 ms, egress polling 8 ms,
+with zero back-pressure retries. The default client backoff currently parks
+on empty `doWork` polls, so the next fix is to provide an application-loop
+idle policy that does not sleep once per order.
+
 For larger runs, the soak runner gives the Zig client a 10-minute batch offer
 deadline and 10 million connect iterations by default. Override
 `TRADING_SOAK_OFFER_TIMEOUT_MS`, `TRADING_SOAK_RESPONSE_TIMEOUT_MS`, or
