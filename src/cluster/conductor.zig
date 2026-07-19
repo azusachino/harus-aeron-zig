@@ -1,131 +1,44 @@
 // Aeron Cluster Conductor — session management and log replication
 // Routes cluster commands from clients to distributed log and session state.
+// Reference: https://github.com/aeron-io/aeron/blob/master/aeron-cluster/src/main/java/io/aeron/cluster/ClusterConductor.java
+//
+// Types live in conductor/types.zig, snapshot take/load/serialize in
+// conductor/snapshot.zig, and peer/member-list handling in
+// conductor/members.zig — this file owns the ClusterConductor struct and
+// its core command-processing loop.
+
 const protocol_mod = @import("protocol.zig");
 const QueryMemberList = protocol_mod.QueryMemberList;
-// Reference: https://github.com/aeron-io/aeron/blob/master/aeron-cluster/src/main/java/io/aeron/cluster/ClusterConductor.java
 
 const std = @import("std");
 const log_mod = @import("log.zig");
-const time = @import("../time.zig");
 const archive_mod = @import("../archive/archive.zig");
-const recorder_mod = @import("../archive/recorder.zig");
-const io_mod = @import("../io.zig");
+const types = @import("conductor/types.zig");
+const snapshot = @import("conductor/snapshot.zig");
+const members = @import("conductor/members.zig");
 
-// =============================================================================
-// Role Enum
-// =============================================================================
-
-/// ClusterRole — the current role of this cluster member.
-pub const ClusterRole = enum {
-    leader,
-    follower,
-    candidate,
-};
-
-// =============================================================================
-// Session State
-// =============================================================================
-
-/// SessionState — tracks open client session metadata.
-pub const SessionState = struct {
-    cluster_session_id: i64,
-    response_stream_id: i32,
-    response_channel: []u8,
-    is_open: bool = true,
-};
-
-/// ClusterConductorState — owned snapshot of conductor recovery state.
-pub const ClusterConductorState = struct {
-    role: ClusterRole,
-    leader_member_id: i32,
-    leader_ship_term_id: i64,
-    next_session_id: i64,
-    commit_position: i64,
-    sessions: []SessionState,
-    log_state: log_mod.ClusterLogState,
-
-    pub fn deinit(self: *ClusterConductorState, allocator: std.mem.Allocator) void {
-        for (self.sessions) |session| {
-            allocator.free(session.response_channel);
-        }
-        allocator.free(self.sessions);
-        self.sessions = &.{};
-        self.log_state.deinit(allocator);
-    }
-};
-
-// =============================================================================
-// Command Payloads
-// =============================================================================
-
-/// SessionConnectCmd — parameters for opening a new client session.
-pub const SessionConnectCmd = struct {
-    correlation_id: i64,
-    cluster_session_id: i64,
-    response_stream_id: i32,
-    response_channel: []const u8,
-};
-
-/// SessionCloseCmd — parameters for closing a client session.
-pub const SessionCloseCmd = struct {
-    cluster_session_id: i64,
-};
-
-/// SessionMessageCmd — a message from client to be committed to log.
-pub const SessionMessageCmd = struct {
-    cluster_session_id: i64,
-    timestamp: i64,
-    data: []const u8,
-};
-
-/// AppendPositionCmd — replication message from leader to follower.
-pub const AppendPositionCmd = struct {
-    leader_ship_term_id: i64,
-    log_position: i64,
-    follower_member_id: i32,
-};
-
-/// CommitPositionCmd — commit notification from leader to followers.
-pub const CommitPositionCmd = struct {
-    leader_ship_term_id: i64,
-    log_position: i64,
-};
-
-/// AddPassiveMemberCmd — add a node to the passive (non-voting) member list.
-/// Matches the intent of SBE AddPassiveMember (id=70) from aeron-cluster-codecs.xml.
-/// member_endpoints is a borrowed slice in the format "ingress,consensus,log,catchup,archive".
-pub const AddPassiveMemberCmd = struct {
-    member_id: i32,
-    /// Five-endpoint comma-separated string: ingress,consensus,log,catchup,archive.
-    /// Not owned by this struct — caller must ensure it outlives the command.
-    member_endpoints: []const u8,
-};
-
-/// SnapshotBeginCmd — leader signals start of snapshot.
-pub const SnapshotBeginCmd = struct {
-    leadership_term_id: i64,
-    log_position: i64,
-    timestamp: i64,
-    member_id: i32,
-};
-
-/// SnapshotEndCmd — leader signals snapshot is complete.
-pub const SnapshotEndCmd = struct {
-    leadership_term_id: i64,
-    log_position: i64,
-    member_id: i32,
-};
+pub const ClusterRole = types.ClusterRole;
+pub const SessionState = types.SessionState;
+pub const ClusterConductorState = types.ClusterConductorState;
+pub const SnapshotState = types.SnapshotState;
+pub const SessionConnectCmd = types.SessionConnectCmd;
+pub const SessionCloseCmd = types.SessionCloseCmd;
+pub const SessionMessageCmd = types.SessionMessageCmd;
+pub const AppendPositionCmd = types.AppendPositionCmd;
+pub const CommitPositionCmd = types.CommitPositionCmd;
+pub const AddPassiveMemberCmd = types.AddPassiveMemberCmd;
+pub const SnapshotBeginCmd = types.SnapshotBeginCmd;
+pub const SnapshotEndCmd = types.SnapshotEndCmd;
+pub const SessionEventResponse = types.SessionEventResponse;
+pub const ErrorResponse = types.ErrorResponse;
+pub const CommitPositionResponse = types.CommitPositionResponse;
+pub const RedirectResponse = types.RedirectResponse;
+pub const ActiveMember = types.ActiveMember;
+pub const ClusterMembersResponse = types.ClusterMembersResponse;
 
 // =============================================================================
 // Command Union
 // =============================================================================
-
-/// SnapshotState — tracks the progress of a local snapshot operation.
-pub const SnapshotState = enum {
-    none,
-    taking,
-    completed,
-};
 
 /// Command — union of all possible cluster control commands.
 pub const Command = union(enum) {
@@ -144,83 +57,8 @@ pub const Command = union(enum) {
 };
 
 // =============================================================================
-// Response Payloads
-// =============================================================================
-
-/// SessionEventResponse — notifies client of session state change.
-pub const SessionEventResponse = struct {
-    cluster_session_id: i64,
-    correlation_id: i64,
-    event_code: i32,
-};
-
-/// ErrorResponse — notifies client of error.
-pub const ErrorResponse = struct {
-    correlation_id: i64,
-    error_code: i32,
-    message: []const u8,
-};
-
-/// CommitPositionResponse — confirms log position committed on leader.
-pub const CommitPositionResponse = struct {
-    leader_ship_term_id: i64,
-    log_position: i64,
-};
-
-/// RedirectResponse — notifies client to reconnect to the current leader.
-/// Matches Aeron SessionEvent with event_code = redirect (2).
-pub const RedirectResponse = struct {
-    cluster_session_id: i64,
-    correlation_id: i64,
-    leader_member_id: i32,
-};
-
-// =============================================================================
 // Response Union
 // =============================================================================
-
-/// ActiveMember — per-member data in a ClusterMembersExtendedResponse.
-/// Matches the SBE activeMembers group in aeron-cluster-codecs.xml (id=43).
-pub const ActiveMember = struct {
-    leadership_term_id: i64,
-    log_position: i64,
-    time_of_last_append_ns: i64,
-    member_id: i32,
-    ingress_endpoint: []const u8,
-    consensus_endpoint: []const u8,
-    log_endpoint: []const u8,
-    catchup_endpoint: []const u8,
-    archive_endpoint: []const u8,
-
-    pub fn deinit(self: *ActiveMember, allocator: std.mem.Allocator) void {
-        allocator.free(self.ingress_endpoint);
-        allocator.free(self.consensus_endpoint);
-        allocator.free(self.log_endpoint);
-        allocator.free(self.catchup_endpoint);
-        allocator.free(self.archive_endpoint);
-    }
-};
-
-/// ClusterMembersResponse — in-memory representation of ClusterMembersExtendedResponse.
-/// Matches SBE message id=43 in aeron-cluster-codecs.xml (activeMembers + passiveMembers groups).
-/// active_members and passive_members are caller-owned; call deinit to free.
-pub const ClusterMembersResponse = struct {
-    correlation_id: i64,
-    current_time_ns: i64,
-    leader_member_id: i32,
-    member_id: i32,
-    active_members: []ActiveMember,
-    passive_members: []ActiveMember,
-
-    pub fn deinit(self: *ClusterMembersResponse, allocator: std.mem.Allocator) void {
-        for (self.active_members) |*m| m.deinit(allocator);
-        allocator.free(self.active_members);
-        self.active_members = &.{};
-        for (self.passive_members) |*m| m.deinit(allocator);
-        allocator.free(self.passive_members);
-        self.passive_members = &.{};
-    }
-};
 
 /// Response — union of all possible cluster responses.
 pub const Response = union(enum) {
@@ -277,49 +115,13 @@ pub const ClusterConductor = struct {
 
     /// Register a known peer member. Replaces any existing entry for the same member_id.
     pub fn addPeer(self: *ClusterConductor, peer: ActiveMember) !void {
-        for (self.peers.items) |*existing| {
-            if (existing.member_id == peer.member_id) {
-                existing.deinit(self.allocator);
-                existing.* = peer;
-                return;
-            }
-        }
-        try self.peers.append(self.allocator, peer);
+        try members.addPeer(self, peer);
     }
 
     /// Add peers from a static clusterMemberEndpoints string.
     /// Format: "0,ingress:port,consensus:port,log:port,catchup:port,archive:port|1,..."
-    /// Matches vendor/aeron io.aeron.cluster.ClusterMember.parse().
     pub fn addPeersFromConfig(self: *ClusterConductor, endpoints_string: []const u8) !void {
-        var member_iter = std.mem.splitScalar(u8, endpoints_string, '|');
-        while (member_iter.next()) |member_str| {
-            if (member_str.len == 0) continue;
-
-            var field_iter = std.mem.splitScalar(u8, member_str, ',');
-            const id_str = field_iter.next() orelse return error.InvalidClusterMember;
-            const ingress = field_iter.next() orelse return error.InvalidClusterMember;
-            const consensus = field_iter.next() orelse return error.InvalidClusterMember;
-            const log_ep = field_iter.next() orelse return error.InvalidClusterMember;
-            const catchup = field_iter.next() orelse return error.InvalidClusterMember;
-            const archive = field_iter.next() orelse return error.InvalidClusterMember;
-
-            const parsed_member_id = try std.fmt.parseInt(i32, id_str, 10);
-
-            // Skip self — we don't add ourselves to the peer list
-            if (parsed_member_id == self.member_id) continue;
-
-            try self.addPeer(.{
-                .leadership_term_id = 0,
-                .log_position = 0,
-                .time_of_last_append_ns = 0,
-                .member_id = parsed_member_id,
-                .ingress_endpoint = try self.allocator.dupe(u8, ingress),
-                .consensus_endpoint = try self.allocator.dupe(u8, consensus),
-                .log_endpoint = try self.allocator.dupe(u8, log_ep),
-                .catchup_endpoint = try self.allocator.dupe(u8, catchup),
-                .archive_endpoint = try self.allocator.dupe(u8, archive),
-            });
-        }
+        try members.addPeersFromConfig(self, endpoints_string);
     }
 
     /// Free all conductor resources.
@@ -487,195 +289,28 @@ pub const ClusterConductor = struct {
     /// Handle snapshot_begin command.
     /// Mark snapshot in progress and capture current conductor state.
     pub fn handleSnapshotBegin(self: *ClusterConductor, cmd: SnapshotBeginCmd) !void {
-        self.snapshot_state = .taking;
-        if (self.pending_snapshot) |*old| old.deinit(self.allocator);
-        self.pending_snapshot = try self.captureState(self.allocator);
-
-        // If an archive is wired, serialize the state and write it directly to the archive directory
-        if (self.archive) |arc| {
-            const blob = try self.serializeState(self.allocator);
-            defer self.allocator.free(blob);
-
-            const rec = arc.conductor.recorder orelse return error.RecorderNotInitialized;
-            const timestamp = time.milliTimestamp();
-            const recording_id = try rec.onStartRecording(
-                cmd.member_id,
-                2, // stream_id
-                "aeron:ipc?stream-id=2", // channel
-                "snapshot", // source_identity
-                .{
-                    .initial_term_id = 0,
-                    .segment_file_length = 128 * 1024 * 1024,
-                    .term_buffer_length = 65536,
-                    .mtu_length = 1408,
-                    .start_position = 0,
-                    .start_timestamp = timestamp,
-                },
-            );
-
-            // Find the active recording session and write the blob directly to it
-            var written = false;
-            for (rec.sessions.items) |*session| {
-                if (session.recording_id == recording_id) {
-                    try session.onFragment(blob);
-                    written = true;
-                    break;
-                }
-            }
-            if (!written) return error.RecordingSessionNotFound;
-
-            // Stop recording
-            try rec.onStopRecording(recording_id, time.milliTimestamp());
-
-            std.log.info("ClusterConductor member={d} successfully wrote snapshot to recording_id={d}", .{ self.member_id, recording_id });
-        }
+        try snapshot.handleBegin(self, cmd);
     }
 
     /// Handle snapshot_end command.
     /// Snapshot complete — clear pending snapshot and resume normal operation.
     pub fn handleSnapshotEnd(self: *ClusterConductor, cmd: SnapshotEndCmd) !void {
-        _ = cmd;
-        self.snapshot_state = .completed;
-        if (self.pending_snapshot) |*snap| {
-            snap.deinit(self.allocator);
-            self.pending_snapshot = null;
-        }
+        try snapshot.handleEnd(self, cmd);
     }
 
     /// Load the last successful snapshot from the Archive, if wired up.
     pub fn loadLastSnapshot(self: *ClusterConductor) !void {
-        const arc = self.archive orelse return;
-        if (arc.conductor.catalog.findLastMatchingRecording(0, "aeron:ipc?stream-id=2", 2)) |recording_id| {
-            const path = try recorder_mod.RecordingWriter.segmentFilePath(self.allocator, arc.ctx.archive_dir, recording_id, 0);
-            defer self.allocator.free(path);
-
-            var file = std.Io.Dir.cwd().openFile(io_mod.io(), path, .{}) catch |err| switch (err) {
-                error.FileNotFound => null,
-                else => return err,
-            };
-            if (file) |*f| {
-                defer f.close(io_mod.io());
-                const size = @as(usize, @intCast(try f.length(io_mod.io())));
-                if (size > 0) {
-                    const buf = try self.allocator.alloc(u8, size);
-                    defer self.allocator.free(buf);
-                    const read_len = try f.readPositionalAll(io_mod.io(), buf, 0);
-                    if (read_len == size) {
-                        try self.loadSnapshot(buf);
-                        std.log.info("ClusterConductor member={d} successfully restored snapshot from recording_id={d}", .{ self.member_id, recording_id });
-                    }
-                }
-            }
-        }
+        try snapshot.loadLast(self);
     }
 
     /// Handle add_passive_member command.
-    /// Parses the 5 comma-separated endpoints and adds the node to the passive_peers list.
     pub fn handleAddPassiveMember(self: *ClusterConductor, cmd: AddPassiveMemberCmd) !void {
-        if (cmd.member_id == self.member_id) return; // Don't add self to passive list
-
-        var field_iter = std.mem.splitScalar(u8, cmd.member_endpoints, ',');
-        const ingress = field_iter.next() orelse return error.InvalidClusterMember;
-        const consensus = field_iter.next() orelse return error.InvalidClusterMember;
-        const log_ep = field_iter.next() orelse return error.InvalidClusterMember;
-        const catchup = field_iter.next() orelse return error.InvalidClusterMember;
-        const archive = field_iter.next() orelse return error.InvalidClusterMember;
-
-        const peer = ActiveMember{
-            .leadership_term_id = self.leader_ship_term_id,
-            .log_position = self.commit_position,
-            .time_of_last_append_ns = @truncate(time.nanoTimestamp()),
-            .member_id = cmd.member_id,
-            .ingress_endpoint = try self.allocator.dupe(u8, ingress),
-            .consensus_endpoint = try self.allocator.dupe(u8, consensus),
-            .log_endpoint = try self.allocator.dupe(u8, log_ep),
-            .catchup_endpoint = try self.allocator.dupe(u8, catchup),
-            .archive_endpoint = try self.allocator.dupe(u8, archive),
-        };
-
-        for (self.passive_peers.items) |*existing| {
-            if (existing.member_id == cmd.member_id) {
-                existing.deinit(self.allocator);
-                existing.* = peer;
-                return;
-            }
-        }
-        try self.passive_peers.append(self.allocator, peer);
+        try members.handleAddPassiveMember(self, cmd);
     }
 
     /// Handle query_member_list command.
-    /// Returns a ClusterMembersResponse matching SBE ClusterMembersExtendedResponse (id=43).
-    /// Passive members are included as per SBE spec.
     pub fn handleQueryMemberList(self: *ClusterConductor, cmd: QueryMemberList) !void {
-        const now_ns: i64 = @truncate(time.nanoTimestamp());
-        // self + all known peers
-        const count = 1 + self.peers.items.len;
-        var active = try self.allocator.alloc(ActiveMember, count);
-        var built: usize = 0;
-        errdefer {
-            for (active[0..built]) |*m| m.deinit(self.allocator);
-            self.allocator.free(active);
-        }
-        active[0] = ActiveMember{
-            .leadership_term_id = self.leader_ship_term_id,
-            .log_position = self.commit_position,
-            .time_of_last_append_ns = now_ns,
-            .member_id = self.member_id,
-            .ingress_endpoint = try self.allocator.dupe(u8, ""),
-            .consensus_endpoint = try self.allocator.dupe(u8, ""),
-            .log_endpoint = try self.allocator.dupe(u8, ""),
-            .catchup_endpoint = try self.allocator.dupe(u8, ""),
-            .archive_endpoint = try self.allocator.dupe(u8, ""),
-        };
-        built = 1;
-        for (self.peers.items, 1..) |*peer, i| {
-            active[i] = ActiveMember{
-                .leadership_term_id = peer.leadership_term_id,
-                .log_position = peer.log_position,
-                .time_of_last_append_ns = peer.time_of_last_append_ns,
-                .member_id = peer.member_id,
-                .ingress_endpoint = try self.allocator.dupe(u8, peer.ingress_endpoint),
-                .consensus_endpoint = try self.allocator.dupe(u8, peer.consensus_endpoint),
-                .log_endpoint = try self.allocator.dupe(u8, peer.log_endpoint),
-                .catchup_endpoint = try self.allocator.dupe(u8, peer.catchup_endpoint),
-                .archive_endpoint = try self.allocator.dupe(u8, peer.archive_endpoint),
-            };
-            built += 1;
-        }
-
-        const passive_count = self.passive_peers.items.len;
-        var passive = try self.allocator.alloc(ActiveMember, passive_count);
-        var p_built: usize = 0;
-        errdefer {
-            for (passive[0..p_built]) |*m| m.deinit(self.allocator);
-            self.allocator.free(passive);
-        }
-
-        for (self.passive_peers.items) |*peer| {
-            passive[p_built] = ActiveMember{
-                .leadership_term_id = peer.leadership_term_id,
-                .log_position = peer.log_position,
-                .time_of_last_append_ns = peer.time_of_last_append_ns,
-                .member_id = peer.member_id,
-                .ingress_endpoint = try self.allocator.dupe(u8, peer.ingress_endpoint),
-                .consensus_endpoint = try self.allocator.dupe(u8, peer.consensus_endpoint),
-                .log_endpoint = try self.allocator.dupe(u8, peer.log_endpoint),
-                .catchup_endpoint = try self.allocator.dupe(u8, peer.catchup_endpoint),
-                .archive_endpoint = try self.allocator.dupe(u8, peer.archive_endpoint),
-            };
-            p_built += 1;
-        }
-
-        try self.response_queue.append(self.allocator, .{
-            .member_list = ClusterMembersResponse{
-                .correlation_id = cmd.correlation_id,
-                .current_time_ns = now_ns,
-                .leader_member_id = self.leader_member_id,
-                .member_id = self.member_id,
-                .active_members = active,
-                .passive_members = passive,
-            },
-        });
+        try members.handleQueryMemberList(self, cmd);
     }
 
     /// Drain and deliver all queued responses.
@@ -798,129 +433,19 @@ pub const ClusterConductor = struct {
         }
     }
 
-    /// Serialize durable conductor state (role, term/session ids, commit
-    /// position, open sessions, and the replicated log) into a self-describing
-    /// little-endian blob suitable for writing to an Archive recording. The
-    /// caller owns the returned slice.
-    ///
-    /// This is an internal persistence format — read back only by
-    /// `deserializeState` on recovery, never exchanged with another Aeron
-    /// implementation — so the byte layout is our own rather than the SBE
-    /// ConsensusModuleSnapshot codec. Field selection mirrors the durable state
-    /// captured by io.aeron.cluster.ConsensusModuleAgent.takeSnapshot.
+    /// Serialize durable conductor state into a recovery blob. See conductor/snapshot.zig.
     pub fn serializeState(self: *const ClusterConductor, allocator: std.mem.Allocator) ![]u8 {
-        var buf: std.ArrayList(u8) = .empty;
-        errdefer buf.deinit(allocator);
-
-        try appendInt(&buf, allocator, u32, SNAPSHOT_MAGIC);
-        try appendInt(&buf, allocator, u32, SNAPSHOT_VERSION);
-        try appendInt(&buf, allocator, u8, @intFromEnum(self.role));
-        try appendInt(&buf, allocator, i32, self.leader_member_id);
-        try appendInt(&buf, allocator, i64, self.leader_ship_term_id);
-        try appendInt(&buf, allocator, i64, self.next_session_id);
-        try appendInt(&buf, allocator, i64, self.commit_position);
-
-        try appendInt(&buf, allocator, u32, @intCast(self.sessions.items.len));
-        for (self.sessions.items) |session| {
-            try appendInt(&buf, allocator, i64, session.cluster_session_id);
-            try appendInt(&buf, allocator, i32, session.response_stream_id);
-            try appendInt(&buf, allocator, u8, @intFromBool(session.is_open));
-            try appendBytes(&buf, allocator, session.response_channel);
-        }
-
-        try appendInt(&buf, allocator, i64, self.log.leader_ship_term_id);
-        try appendInt(&buf, allocator, i64, self.log.append_position);
-        try appendInt(&buf, allocator, i64, self.log.commit_position);
-        try appendInt(&buf, allocator, u32, @intCast(self.log.entries.items.len));
-        for (self.log.entries.items) |entry| {
-            try appendInt(&buf, allocator, i64, entry.position);
-            try appendInt(&buf, allocator, i64, entry.timestamp);
-            try appendBytes(&buf, allocator, entry.data);
-        }
-
-        return buf.toOwnedSlice(allocator);
+        return snapshot.serialize(self, allocator);
     }
 
-    /// Parse a blob produced by `serializeState` into an owned recovery-state
-    /// struct. Returns an error on truncation, bad magic, an unknown version, or
-    /// an invalid role tag — the input is trusted archive data, but a corrupt or
-    /// partially written recording must fail cleanly rather than panic.
-    /// The returned state is owned by the caller (call `deinit`).
+    /// Parse a blob produced by `serializeState`. See conductor/snapshot.zig.
     pub fn deserializeState(allocator: std.mem.Allocator, bytes: []const u8) !ClusterConductorState {
-        var reader: SnapshotReader = .{ .bytes = bytes };
-
-        if (try reader.readInt(u32) != SNAPSHOT_MAGIC) return error.InvalidSnapshotMagic;
-        if (try reader.readInt(u32) != SNAPSHOT_VERSION) return error.UnsupportedSnapshotVersion;
-
-        const role_int = try reader.readInt(u8);
-        if (role_int >= 3) return error.InvalidSnapshotRole;
-        const role: ClusterRole = @enumFromInt(role_int);
-        const leader_member_id = try reader.readInt(i32);
-        const leader_ship_term_id = try reader.readInt(i64);
-        const next_session_id = try reader.readInt(i64);
-        const commit_position = try reader.readInt(i64);
-
-        const session_count = try reader.readInt(u32);
-        const sessions = try allocator.alloc(SessionState, session_count);
-        var s_built: usize = 0;
-        errdefer {
-            for (sessions[0..s_built]) |sess| allocator.free(sess.response_channel);
-            allocator.free(sessions);
-        }
-        while (s_built < session_count) : (s_built += 1) {
-            const cluster_session_id = try reader.readInt(i64);
-            const response_stream_id = try reader.readInt(i32);
-            const is_open = (try reader.readInt(u8)) != 0;
-            const response_channel = try reader.readBytes(allocator);
-            sessions[s_built] = .{
-                .cluster_session_id = cluster_session_id,
-                .response_stream_id = response_stream_id,
-                .response_channel = response_channel,
-                .is_open = is_open,
-            };
-        }
-
-        const log_term = try reader.readInt(i64);
-        const log_append = try reader.readInt(i64);
-        const log_commit = try reader.readInt(i64);
-        const entry_count = try reader.readInt(u32);
-        const entries = try allocator.alloc(log_mod.LogEntryState, entry_count);
-        var e_built: usize = 0;
-        errdefer {
-            for (entries[0..e_built]) |entry| allocator.free(entry.data);
-            allocator.free(entries);
-        }
-        while (e_built < entry_count) : (e_built += 1) {
-            const position = try reader.readInt(i64);
-            const timestamp = try reader.readInt(i64);
-            const data = try reader.readBytes(allocator);
-            entries[e_built] = .{ .position = position, .timestamp = timestamp, .data = data };
-        }
-
-        return .{
-            .role = role,
-            .leader_member_id = leader_member_id,
-            .leader_ship_term_id = leader_ship_term_id,
-            .next_session_id = next_session_id,
-            .commit_position = commit_position,
-            .sessions = sessions,
-            .log_state = .{
-                .leader_ship_term_id = log_term,
-                .append_position = log_append,
-                .commit_position = log_commit,
-                .entries = entries,
-            },
-        };
+        return snapshot.deserialize(allocator, bytes);
     }
 
-    /// Recover conductor state from a serialized snapshot blob. Deserializes,
-    /// restores the durable state, and frees the temporary owned state. This is
-    /// the recovery entry point a restarting conductor calls with the last
-    /// successful snapshot read back from the Archive.
+    /// Recover conductor state from a serialized snapshot blob. See conductor/snapshot.zig.
     pub fn loadSnapshot(self: *ClusterConductor, bytes: []const u8) !void {
-        var state = try deserializeState(self.allocator, bytes);
-        defer state.deinit(self.allocator);
-        try self.restoreState(&state);
+        try snapshot.load(self, bytes);
     }
 
     /// Return the number of open sessions.
@@ -933,52 +458,6 @@ pub const ClusterConductor = struct {
             self.allocator.free(session.response_channel);
         }
         self.sessions.clearRetainingCapacity();
-    }
-};
-
-// =============================================================================
-// Snapshot Serialization Helpers (P11-2)
-// =============================================================================
-
-/// Magic prefix identifying a ClusterConductor snapshot blob ("CLSN").
-const SNAPSHOT_MAGIC: u32 = 0x4E534C43;
-/// On-disk snapshot layout version. Bump on any incompatible field change.
-const SNAPSHOT_VERSION: u32 = 1;
-
-/// Append a fixed-width little-endian integer to the snapshot buffer.
-fn appendInt(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, comptime T: type, value: T) !void {
-    var bytes: [@sizeOf(T)]u8 = undefined;
-    std.mem.writeInt(T, &bytes, value, .little);
-    try buf.appendSlice(allocator, &bytes);
-}
-
-/// Append a length-prefixed (u32) byte slice to the snapshot buffer.
-fn appendBytes(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, data: []const u8) !void {
-    try appendInt(buf, allocator, u32, @intCast(data.len));
-    try buf.appendSlice(allocator, data);
-}
-
-/// Cursor over a snapshot blob that bounds-checks every read, returning
-/// error.SnapshotTruncated rather than reading past the end of trusted-but-
-/// possibly-corrupt archive data.
-const SnapshotReader = struct {
-    bytes: []const u8,
-    pos: usize = 0,
-
-    fn readInt(self: *SnapshotReader, comptime T: type) !T {
-        const n = @sizeOf(T);
-        if (self.pos + n > self.bytes.len) return error.SnapshotTruncated;
-        const value = std.mem.readInt(T, self.bytes[self.pos..][0..n], .little);
-        self.pos += n;
-        return value;
-    }
-
-    fn readBytes(self: *SnapshotReader, allocator: std.mem.Allocator) ![]u8 {
-        const len = try self.readInt(u32);
-        if (self.pos + len > self.bytes.len) return error.SnapshotTruncated;
-        const out = try allocator.dupe(u8, self.bytes[self.pos..][0..len]);
-        self.pos += len;
-        return out;
     }
 };
 
@@ -1410,8 +889,9 @@ test "ClusterConductor auto-wired snapshot round trip" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/aeron-cluster-snapshot-test-{d}", .{time.nanoTimestamp()});
+    const archive_dir = try std.fmt.allocPrint(allocator, "/tmp/aeron-cluster-snapshot-test-{d}", .{@import("../time.zig").nanoTimestamp()});
     defer allocator.free(archive_dir);
+    const io_mod = @import("../io.zig");
     try std.Io.Dir.cwd().createDirPath(io_mod.io(), archive_dir);
     defer std.Io.Dir.cwd().deleteTree(io_mod.io(), archive_dir) catch {};
 
