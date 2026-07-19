@@ -47,6 +47,7 @@ pub const Sender = struct {
     retransmit_queue: std.ArrayList(RetransmitRequest),
     current_time_ms: i64,
     event_log: ?*event_log_mod.EventLog,
+    status_messages_applied: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -421,6 +422,7 @@ pub const Sender = struct {
                 if (new_limit > current_limit) {
                     self.counters_map.set(publication.publisher_limit.counter_id, new_limit);
                 }
+                _ = self.status_messages_applied.fetchAdd(1, .monotonic);
                 publication.last_activity_ns = self.current_time_ms * std.time.ns_per_ms;
                 var meta = publication.log_buffer.metaData();
                 meta.setIsConnected(true);
@@ -428,6 +430,10 @@ pub const Sender = struct {
                 return;
             }
         }
+    }
+
+    pub fn statusMessagesApplied(self: *const Sender) u64 {
+        return self.status_messages_applied.load(.monotonic);
     }
 
     pub fn setCurrentTimeMs(self: *Sender, time_ms: i64) void {

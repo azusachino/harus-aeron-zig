@@ -10,14 +10,26 @@ import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
 import org.agrona.ExpandableArrayBuffer;
 
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.concurrent.TimeUnit;
+
 public final class BtcUsdtClusterService implements ClusteredService
 {
+    private static final long RESPONSE_RETRY_TIMER_ID = 1;
+
     private final TradingOrderBook book = new TradingOrderBook();
     private final ExpandableArrayBuffer response = new ExpandableArrayBuffer(256);
+    private final Deque<PendingResponse> pendingResponses = new ArrayDeque<>();
+    private boolean responseRetryScheduled;
+    private Cluster cluster;
+
+    private record PendingResponse(ClientSession session, String value) {}
 
     @Override
     public void onStart(final Cluster cluster, final Image snapshotImage)
     {
+        this.cluster = cluster;
         // Snapshot support is added after the baseline replay path is proven.
     }
 
@@ -45,7 +57,8 @@ public final class BtcUsdtClusterService implements ClusteredService
         final String[] fields = event.split("\\|", -1);
         if (fields.length != 5 || !TradingOrderBook.SYMBOL.equals(fields[0]))
         {
-            respond(session, "BTC_USDT|0|REJECTED|bad-event");
+            enqueueResponse(session, "BTC_USDT|0|REJECTED|bad-event");
+            drainResponses(cluster);
             return;
         }
 
@@ -57,26 +70,67 @@ public final class BtcUsdtClusterService implements ClusteredService
                 Long.parseLong(fields[3]),
                 Long.parseLong(fields[4]));
             final TradingOrderBook.SubmitResult result = book.submit(order);
-            respond(session, "BTC_USDT|" + order.orderId() + "|FILLED|" + result.filledQuantity() +
+            enqueueResponse(session, "BTC_USDT|" + order.orderId() + "|FILLED|" + result.filledQuantity() +
                 "|RESTING|" + result.restingQuantity());
         }
         catch (final RuntimeException ex)
         {
-            respond(session, "BTC_USDT|0|REJECTED|" + ex.getClass().getSimpleName());
+            enqueueResponse(session, "BTC_USDT|0|REJECTED|" + ex.getClass().getSimpleName());
         }
+
+        drainResponses(cluster);
     }
 
-    private void respond(final ClientSession session, final String value)
+    private void enqueueResponse(final ClientSession session, final String value)
     {
-        final int length = response.putStringWithoutLengthAscii(0, value);
-        while (session.offer(response, 0, length) < 0)
+        pendingResponses.addLast(new PendingResponse(session, value));
+    }
+
+    private void drainResponses(final Cluster cluster)
+    {
+        while (!pendingResponses.isEmpty())
         {
-            Thread.yield();
+            final PendingResponse pending = pendingResponses.peekFirst();
+            final int length = response.putStringWithoutLengthAscii(0, pending.value());
+            if (pending.session().offer(response, 0, length) < 0)
+            {
+                if (cluster != null)
+                {
+                    scheduleResponseRetry(cluster);
+                }
+                return;
+            }
+            pendingResponses.removeFirst();
+        }
+
+        responseRetryScheduled = false;
+    }
+
+    private void scheduleResponseRetry(final Cluster cluster)
+    {
+        if (responseRetryScheduled)
+        {
+            return;
+        }
+
+        responseRetryScheduled = true;
+        final long delay = cluster.timeUnit().convert(1, TimeUnit.MILLISECONDS);
+        cluster.idleStrategy().reset();
+        while (!cluster.scheduleTimer(RESPONSE_RETRY_TIMER_ID, cluster.time() + delay))
+        {
+            cluster.idleStrategy().idle();
         }
     }
 
     @Override
-    public void onTimerEvent(final long correlationId, final long timestamp) {}
+    public void onTimerEvent(final long correlationId, final long timestamp)
+    {
+        if (correlationId == RESPONSE_RETRY_TIMER_ID)
+        {
+            responseRetryScheduled = false;
+            drainResponses(cluster);
+        }
+    }
 
     @Override
     public void onTakeSnapshot(final ExclusivePublication snapshotPublication) {}

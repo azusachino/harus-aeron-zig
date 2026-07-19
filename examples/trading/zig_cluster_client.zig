@@ -10,12 +10,32 @@ fn envOr(comptime name: [:0]const u8, fallback: []const u8) []const u8 {
 
 const Responses = struct {
     count: usize = 0,
+    expected_start: usize = 1_000_001,
+    seen: []bool = &.{},
+    malformed: usize = 0,
+    duplicate: usize = 0,
 };
 
 fn onResponse(_: i64, _: i64, payload: []const u8, ctx_ptr: *anyopaque) void {
     const responses: *Responses = @ptrCast(@alignCast(ctx_ptr));
-    _ = payload;
     responses.count += 1;
+    var fields = std.mem.splitScalar(u8, payload, '|');
+    _ = fields.next();
+    const order_id = fields.next() orelse {
+        responses.malformed += 1;
+        return;
+    };
+    const parsed = std.fmt.parseInt(usize, order_id, 10) catch {
+        responses.malformed += 1;
+        return;
+    };
+    if (parsed < responses.expected_start or parsed - responses.expected_start >= responses.seen.len) {
+        responses.malformed += 1;
+        return;
+    }
+    const index = parsed - responses.expected_start;
+    if (responses.seen[index]) responses.duplicate += 1;
+    responses.seen[index] = true;
 }
 
 fn envUsize(comptime name: [:0]const u8, fallback: usize) usize {
@@ -87,7 +107,10 @@ pub fn main() !void {
 
     const order_count = envUsize("ORDER_COUNT", 3);
     if (order_count == 0) return error.InvalidOrderCount;
-    var responses = Responses{};
+    const response_seen = try allocator.alloc(bool, order_count);
+    defer allocator.free(response_seen);
+    @memset(response_seen, false);
+    var responses = Responses{ .seen = response_seen };
     const trace_perf = envBool("TRACE_PERF");
     var perf = PerfStats{};
     const offer_timeout_ms = envUsize("OFFER_TIMEOUT_MS", 60_000);
@@ -139,10 +162,12 @@ pub fn main() !void {
                 const report_now_ms = aeron.time.milliTimestamp();
                 if (retry_started_ms == 0) retry_started_ms = report_now_ms;
                 if (report_now_ms - last_stall_report_ms >= 1_000) {
-                    std.debug.print("ZIG_CLUSTER_CLIENT_STALL sent={d} result={s} responses={d} ingress_position={d} publisher_limit={d} egress_position={d} invalid_egress={d} buffer_too_small={d} invalid_template={d} last_invalid_template={d} last_invalid_bytes={any} ignored_egress={d} last_ignored_template={d} session_events={d} last_session_event={any} session_detail={s} new_leader_events={d} status_sent={d} connected={any} retry_ms={d}\n", .{
+                    std.debug.print("ZIG_CLUSTER_CLIENT_STALL sent={d} result={s} responses={d} malformed={d} duplicate={d} ingress_position={d} publisher_limit={d} egress_position={d} invalid_egress={d} buffer_too_small={d} invalid_template={d} last_invalid_template={d} last_invalid_bytes={any} ignored_egress={d} last_ignored_template={d} last_ignored_bytes={any} session_events={d} last_session_event={any} session_detail={s} new_leader_events={d} status_received={d} status_applied={d} status_sent={d} connected={any} retry_ms={d}\n", .{
                         index + 1,
                         @tagName(offer_result),
                         responses.count,
+                        responses.malformed,
+                        responses.duplicate,
                         cluster.ingress_publication.position(),
                         cluster.ingress_publication.publisherLimit(),
                         cluster.egressPosition(),
@@ -153,10 +178,13 @@ pub fn main() !void {
                         cluster.egressLastInvalidBytes(),
                         cluster.egressIgnoredCount(),
                         cluster.egressLastIgnoredTemplate(),
+                        cluster.egressLastIgnoredBytes(),
                         cluster.egressSessionEventCount(),
                         cluster.egressLastSessionEvent(),
                         cluster.egressLastSessionDetail(),
                         cluster.egressNewLeaderEventCount(),
+                        driver.receiver_agent.statusMessagesReceived(),
+                        driver.sender_agent.statusMessagesApplied(),
                         driver.receiver_agent.statusMessagesSent(),
                         cluster.ingress_publication.isConnected(),
                         report_now_ms - retry_started_ms,
@@ -203,9 +231,11 @@ pub fn main() !void {
     }
     if (responses.count != order_count) {
         if (trace_perf) {
-            std.debug.print("ZIG_CLUSTER_CLIENT_RESPONSE_TIMEOUT responses={d} expected={d} egress_position={d} invalid_egress={d} buffer_too_small={d} invalid_template={d} last_invalid_template={d} last_invalid_bytes={any} ignored_egress={d} last_ignored_template={d}\n", .{
+            std.debug.print("ZIG_CLUSTER_CLIENT_RESPONSE_TIMEOUT responses={d} expected={d} malformed={d} duplicate={d} egress_position={d} invalid_egress={d} buffer_too_small={d} invalid_template={d} last_invalid_template={d} last_invalid_bytes={any} ignored_egress={d} last_ignored_template={d} last_ignored_length={d} last_ignored_bytes={any} status_received={d} status_applied={d} status_sent={d}\n", .{
                 responses.count,
                 order_count,
+                responses.malformed,
+                responses.duplicate,
                 cluster.egressPosition(),
                 cluster.egressInvalidCount(),
                 cluster.egressBufferTooSmallCount(),
@@ -214,7 +244,19 @@ pub fn main() !void {
                 cluster.egressLastInvalidBytes(),
                 cluster.egressIgnoredCount(),
                 cluster.egressLastIgnoredTemplate(),
+                cluster.egressLastIgnoredLength(),
+                cluster.egressLastIgnoredBytes(),
+                driver.receiver_agent.statusMessagesReceived(),
+                driver.sender_agent.statusMessagesApplied(),
+                driver.receiver_agent.statusMessagesSent(),
             });
+            var missing: usize = 0;
+            for (response_seen, 0..) |was_seen, index| {
+                if (!was_seen and missing < 16) {
+                    std.debug.print("ZIG_CLUSTER_CLIENT_MISSING order_id={d}\n", .{1_000_001 + index});
+                    missing += 1;
+                }
+            }
         }
         return error.ResponseTimeout;
     }

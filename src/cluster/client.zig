@@ -44,6 +44,8 @@ pub const AeronCluster = struct {
     egress_last_invalid_bytes: [16]u8 = [_]u8{0} ** 16,
     egress_new_leader_events: usize = 0,
     egress_last_ignored_template: u16 = 0,
+    egress_last_ignored_bytes: [32]u8 = [_]u8{0} ** 32,
+    egress_last_ignored_length: usize = 0,
     egress_session_events: usize = 0,
     egress_last_session_event: ?codecs.EventCode = null,
     egress_last_session_detail: [128]u8 = [_]u8{0} ** 128,
@@ -210,6 +212,14 @@ pub const AeronCluster = struct {
         return self.egress_last_ignored_template;
     }
 
+    pub fn egressLastIgnoredBytes(self: *const AeronCluster) [32]u8 {
+        return self.egress_last_ignored_bytes;
+    }
+
+    pub fn egressLastIgnoredLength(self: *const AeronCluster) usize {
+        return self.egress_last_ignored_length;
+    }
+
     pub fn egressSessionEventCount(self: *const AeronCluster) usize {
         return self.egress_session_events;
     }
@@ -315,6 +325,9 @@ pub const AeronCluster = struct {
         if (template_id != @intFromEnum(codecs.TemplateId.session_message_header)) {
             state.cluster.egress_ignored += 1;
             state.cluster.egress_last_ignored_template = template_id;
+            state.cluster.egress_last_ignored_length = buffer.len;
+            @memset(&state.cluster.egress_last_ignored_bytes, 0);
+            @memcpy(state.cluster.egress_last_ignored_bytes[0..@min(buffer.len, state.cluster.egress_last_ignored_bytes.len)], buffer[0..@min(buffer.len, state.cluster.egress_last_ignored_bytes.len)]);
             return;
         }
         if (buffer.len < codecs.SESSION_HEADER_LENGTH) {

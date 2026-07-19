@@ -114,6 +114,12 @@ pub const Image = struct {
         const term_count = header.term_id - self.initial_term_id;
         const partition = @as(usize, @intCast(@mod(term_count, 3)));
 
+        // A late retransmission from a term already evicted from this partition must not
+        // roll the partition backwards and clear the newer term's committed frames.
+        if (self.term_ids[partition] != std.math.minInt(i32) and header.term_id < self.term_ids[partition]) {
+            return false;
+        }
+
         const frame_offset = @as(usize, @intCast(header.term_offset));
         const term_buffer = self.prepareTerm(partition, header.term_id);
 
@@ -155,6 +161,9 @@ pub const Image = struct {
     pub fn insertPadding(self: *Image, counters_map: *counters.CountersMap, header: *const protocol.DataHeader) bool {
         const term_count = header.term_id - self.initial_term_id;
         const partition = @as(usize, @intCast(@mod(term_count, @as(i32, @intCast(metadata.PARTITION_COUNT)))));
+        if (self.term_ids[partition] != std.math.minInt(i32) and header.term_id < self.term_ids[partition]) {
+            return false;
+        }
         const frame_offset = @as(usize, @intCast(header.term_offset));
         const padding_length = header.frame_length;
         const term_buffer = self.prepareTerm(partition, header.term_id);
@@ -315,6 +324,7 @@ pub const Receiver = struct {
     // Diagnostic counters (atomic for cross-thread visibility)
     data_frames_total: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     data_frames_before_image: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    status_messages_received: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     status_messages_sent: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
     pub fn init(
@@ -386,6 +396,10 @@ pub const Receiver = struct {
 
     pub fn statusMessagesSent(self: *const Receiver) u64 {
         return self.status_messages_sent.load(.monotonic);
+    }
+
+    pub fn statusMessagesReceived(self: *const Receiver) u64 {
+        return self.status_messages_received.load(.monotonic);
     }
 
     pub fn processDatagram(self: *Receiver, data: []const u8, src_addr: net.Address) i32 {
@@ -549,6 +563,7 @@ pub const Receiver = struct {
                     continue;
                 }
                 const status = @as(*const protocol.StatusMessage, @ptrCast(@alignCast(&frame_data[0])));
+                _ = self.status_messages_received.fetchAdd(1, .monotonic);
                 self.mutex.lock();
                 // STATUS frames are flow-control feedback for publications; queue for conductor/sender.
                 self.pending_status_messages.append(self.allocator, .{
@@ -917,6 +932,37 @@ test "Image clears a reused term partition before rebuilding" {
     header.term_id = 3;
     try std.testing.expect(image.insertFrame(&counters_map, &header, "new"));
 
+    const term_buffer = log_buf.termBuffer(0);
+    try std.testing.expectEqualStrings("new", term_buffer[protocol.DataHeader.LENGTH .. protocol.DataHeader.LENGTH + 3]);
+    try std.testing.expectEqual(@as(i32, 3), image.term_ids[0]);
+}
+
+test "Image rejects stale frames after a reused term partition advances" {
+    const allocator = std.testing.allocator;
+    var meta_buffer align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
+    var values_buffer align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
+    var counters_map = counters.CountersMap.init(&meta_buffer, &values_buffer);
+    var log_buf = try logbuffer.LogBuffer.init(allocator, 64 * 1024);
+    defer log_buf.deinit();
+
+    const hwm_handle = counters_map.allocate(counters.RECEIVER_HWM, "stale-hwm");
+    const sub_pos_handle = counters_map.allocate(counters.SUBSCRIBER_POSITION, "stale-sub");
+    var image = Image.init(1, 2, 64 * 1024, 1500, 0, 0, &log_buf, hwm_handle, sub_pos_handle, undefined);
+
+    var header: protocol.DataHeader = undefined;
+    header.frame_length = @as(i32, @intCast(protocol.DataHeader.LENGTH + 3));
+    header.version = protocol.VERSION;
+    header.flags = 0;
+    header.type = @intFromEnum(protocol.FrameType.data);
+    header.term_offset = 0;
+    header.session_id = 1;
+    header.stream_id = 2;
+    header.term_id = 3;
+    header.reserved_value = 0;
+    try std.testing.expect(image.insertFrame(&counters_map, &header, "new"));
+
+    header.term_id = 0;
+    try std.testing.expect(!image.insertFrame(&counters_map, &header, "old"));
     const term_buffer = log_buf.termBuffer(0);
     try std.testing.expectEqualStrings("new", term_buffer[protocol.DataHeader.LENGTH .. protocol.DataHeader.LENGTH + 3]);
     try std.testing.expectEqual(@as(i32, 3), image.term_ids[0]);
