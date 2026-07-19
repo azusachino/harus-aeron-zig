@@ -16,7 +16,7 @@ const election_mod = aeron.cluster.election;
 const Election = election_mod.Election;
 const log_mod = aeron.cluster.log;
 const cluster_protocol = aeron.cluster.protocol;
-const order_store = @import("order_store.zig");
+const service_mod = @import("service.zig");
 const trading = @import("trading");
 
 const INGRESS_STREAM_ID: i32 = 101;
@@ -199,8 +199,7 @@ const Node = struct {
     election: Election,
     last_election_state: election_mod.ElectionState = .init,
     endpoints: []const u8,
-    book: trading.OrderBook,
-    store: order_store.OrderStore,
+    service: service_mod.TradingService,
     outputs: std.ArrayListUnmanaged(Output) = .empty,
     sessions: std.ArrayListUnmanaged(Session) = .empty,
     peer_publications: std.ArrayListUnmanaged(PeerPublication) = .empty,
@@ -227,7 +226,8 @@ const Node = struct {
         switch (header.template_id) {
             .session_connect_request => try self.handleConnect(payload),
             .session_message_header => try self.handleMessage(payload),
-            .session_keep_alive, .session_close_request => {},
+            .session_close_request => try self.handleSessionClose(payload),
+            .session_keep_alive => {},
             else => return error.UnsupportedClusterMessage,
         }
     }
@@ -269,6 +269,7 @@ const Node = struct {
                 const log_position = read(i64, payload[17..25]);
                 self.election.onNewLeadershipTerm(leader_ship_term_id, log_position, source_member_id, now_ns);
                 std.debug.print("ZIG_CLUSTER_LEADER_CHANGE member={d} leader={d} term={d} source=new_leadership_term\n", .{ self.member_id, source_member_id, leader_ship_term_id });
+                service_mod.TradingService.onNewLeadershipTerm(self.member_id, leader_ship_term_id, source_member_id);
             },
             INTERNAL_APPEND_REQUEST => {
                 if (payload.len < 41) return error.InvalidInternalMessage;
@@ -479,6 +480,7 @@ const Node = struct {
                 .cluster_session_id = assigned_session_id,
                 .publication_request_id = publication_request_id,
             });
+            try self.service.onSessionOpen(assigned_session_id);
         }
 
         var event_buffer = try self.allocator.alloc(u8, 512);
@@ -499,6 +501,20 @@ const Node = struct {
             .buffer = event_buffer,
         });
         self.allocator.free(response_channel_copy);
+    }
+
+    fn handleSessionClose(self: *Node, payload: []const u8) !void {
+        if (payload.len < 24) return error.InvalidCloseRequest;
+        const cluster_session_id = read(i64, payload[16..24]);
+        var index: usize = 0;
+        while (index < self.sessions.items.len) {
+            if (self.sessions.items[index].cluster_session_id == cluster_session_id) {
+                _ = self.sessions.swapRemove(index);
+            } else {
+                index += 1;
+            }
+        }
+        self.service.onSessionClose(cluster_session_id);
     }
 
     fn handleMessage(self: *Node, payload: []const u8) !void {
@@ -527,9 +543,7 @@ const Node = struct {
     }
 
     fn applyOrder(self: *Node, order_payload: []const u8) !trading.SubmitResult {
-        const order = try parseOrder(order_payload);
-        const result = try self.book.submit(order);
-        try self.store.append(order_payload);
+        const result = try self.service.onSessionMessage(order_payload, parseOrder);
         _ = try self.log.append(order_payload, nowNs());
         self.election.log_position += 1;
         return result;
@@ -562,6 +576,7 @@ const Node = struct {
                 .leader_ready => {
                     if (self.last_election_state != .leader_ready) {
                         std.debug.print("ZIG_CLUSTER_LEADER_CHANGE member={d} leader={d} term={d} source=election\n", .{ self.member_id, self.member_id, self.election.leaderShipTermId() });
+                        service_mod.TradingService.onNewLeadershipTerm(self.member_id, self.election.leaderShipTermId(), self.member_id);
                         try self.broadcastNewLeadershipTerm();
                         // New term: forget what we thought each peer had
                         // acked so retransmission re-syncs everyone from
@@ -618,7 +633,7 @@ const Node = struct {
         // order-log recording from the beginning of time.
         if (now_ms - self.last_snapshot_ms >= SNAPSHOT_INTERVAL_MS) {
             self.last_snapshot_ms = now_ms;
-            try self.store.takeSnapshot(self.member_id, &self.book, &self.log, self.next_session_id);
+            try self.service.onTakeSnapshot(self.member_id, &self.log, self.next_session_id);
         }
     }
 
@@ -692,8 +707,7 @@ const Node = struct {
         for (self.internal_outputs.items) |output| self.allocator.free(output.buffer);
         self.internal_outputs.deinit(self.allocator);
         self.peer_publications.deinit(self.allocator);
-        self.store.deinit();
-        self.book.deinit();
+        self.service.deinit();
         self.election.deinit();
         self.log.deinit();
     }
@@ -758,31 +772,28 @@ pub fn main() !void {
             .publication_request_id = publication_request_id,
         });
     }
-    var book = trading.OrderBook.init(allocator);
-    errdefer book.deinit();
     var log = log_mod.ClusterLog.init(allocator);
     errdefer log.deinit();
-    var store = try order_store.OrderStore.init(allocator, member_id, archive_dir, &book, &log, 1_000, parseOrder);
-    errdefer store.deinit();
+    var service = try service_mod.TradingService.init(allocator, member_id, archive_dir, &log, 1_000, parseOrder);
+    errdefer service.deinit();
     var election = try Election.init(allocator, member_id, CLUSTER_SIZE);
     errdefer election.deinit();
-    election.log_position = @intCast(store.replayed_orders);
+    election.log_position = @intCast(service.store.replayed_orders);
     var node = Node{
         .allocator = allocator,
         .aeron = &client,
         .member_id = member_id,
         .election = election,
         .endpoints = endpoints,
-        .book = book,
-        .store = store,
+        .service = service,
         .peer_publications = peer_publications,
         .internal_subscription_request_id = internal_subscription_request,
         .log = log,
-        .next_session_id = store.next_session_id,
+        .next_session_id = service.store.next_session_id,
     };
     defer node.deinit();
 
-    std.debug.print("ZIG_CLUSTER_REPLAY member={d} orders={d} archive_dir={s}\n", .{ member_id, store.replayed_orders, archive_dir });
+    std.debug.print("ZIG_CLUSTER_REPLAY member={d} orders={d} archive_dir={s}\n", .{ member_id, node.service.store.replayed_orders, archive_dir });
     std.debug.print("ZIG_CLUSTER_READY member={d} leader={d} ingress={s} internal={s}\n", .{ member_id, node.election.leaderMemberId(), ingress_channel, internal_channel });
     while (true) {
         _ = client.doWork();
