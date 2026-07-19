@@ -117,7 +117,7 @@ pub const Image = struct {
         // Write original frame_length as commit signal (NOT aligned — payload length must be exact)
         // advanceRebuildPosition and TermReader both align at read time.
         const len_ptr = @as(*i32, @ptrCast(@alignCast(&term_buffer[frame_offset])));
-        len_ptr.* = @as(i32, @intCast(total_frame_len));
+        @atomicStore(i32, len_ptr, @as(i32, @intCast(total_frame_len)), .release);
 
         // Update receiver_hwm counter using absolute stream position.
         const new_hwm = self.positionFor(header.term_id, header.term_offset + aligned_len);
