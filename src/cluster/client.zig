@@ -34,6 +34,8 @@ pub const AeronCluster = struct {
     cluster_session_id: i64,
     leadership_term_id: i64,
     leader_member_id: i32,
+    egress_invalid: usize = 0,
+    egress_ignored: usize = 0,
     closed: bool = false,
 
     const ConnectState = struct {
@@ -132,8 +134,21 @@ pub const AeronCluster = struct {
     }
 
     pub fn pollEgress(self: *AeronCluster, handler: EgressHandler, ctx: *anyopaque, fragment_limit: i32) i32 {
-        var state = PollState{ .handler = handler, .ctx = ctx };
+        var state = PollState{ .handler = handler, .ctx = ctx, .cluster = self };
         return self.aeron.poll(self.egress_subscription_id, onEgressFragment, @ptrCast(&state), fragment_limit);
+    }
+
+    pub fn egressPosition(self: *const AeronCluster) i64 {
+        const subscription = self.aeron.getSubscription(self.egress_subscription_id) orelse return 0;
+        return subscription.position();
+    }
+
+    pub fn egressInvalidCount(self: *const AeronCluster) usize {
+        return self.egress_invalid;
+    }
+
+    pub fn egressIgnoredCount(self: *const AeronCluster) usize {
+        return self.egress_ignored;
     }
 
     pub fn close(self: *AeronCluster) void {
@@ -143,7 +158,7 @@ pub const AeronCluster = struct {
         if (self.aeron.getSubscription(self.egress_subscription_id)) |subscription| subscription.close();
     }
 
-    const PollState = struct { handler: EgressHandler, ctx: *anyopaque };
+    const PollState = struct { handler: EgressHandler, ctx: *anyopaque, cluster: *AeronCluster };
 
     fn onConnectFragment(_: *const frame.DataHeader, buffer: []const u8, ctx_ptr: *anyopaque) void {
         const state: *ConnectState = @ptrCast(@alignCast(ctx_ptr));
@@ -171,8 +186,14 @@ pub const AeronCluster = struct {
 
     fn onEgressFragment(_: *const frame.DataHeader, buffer: []const u8, ctx_ptr: *anyopaque) void {
         const state: *PollState = @ptrCast(@alignCast(ctx_ptr));
-        const header = codecs.decodeMessageHeader(buffer) catch return;
-        if (header.template_id != .session_message_header or buffer.len < codecs.SESSION_HEADER_LENGTH) return;
+        const header = codecs.decodeMessageHeader(buffer) catch {
+            state.cluster.egress_invalid += 1;
+            return;
+        };
+        if (header.template_id != .session_message_header or buffer.len < codecs.SESSION_HEADER_LENGTH) {
+            state.cluster.egress_ignored += 1;
+            return;
+        }
         const cluster_session_id = readI64(buffer[16..24]);
         const timestamp = readI64(buffer[24..32]);
         state.handler(cluster_session_id, timestamp, buffer[codecs.SESSION_HEADER_LENGTH..], state.ctx);

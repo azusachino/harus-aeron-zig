@@ -8,7 +8,9 @@ fn envOr(comptime name: [:0]const u8, fallback: []const u8) []const u8 {
     return std.mem.span(value);
 }
 
-const Responses = struct { count: usize = 0 };
+const Responses = struct {
+    count: usize = 0,
+};
 
 fn onResponse(_: i64, _: i64, payload: []const u8, ctx_ptr: *anyopaque) void {
     const responses: *Responses = @ptrCast(@alignCast(ctx_ptr));
@@ -131,12 +133,13 @@ pub fn main() !void {
                 const now_ms = aeron.time.milliTimestamp();
                 if (retry_started_ms == 0) retry_started_ms = now_ms;
                 if (now_ms - last_stall_report_ms >= 1_000) {
-                    std.debug.print("ZIG_CLUSTER_CLIENT_STALL sent={d} result={s} responses={d} position={d} publisher_limit={d} connected={any} retry_ms={d}\n", .{
+                    std.debug.print("ZIG_CLUSTER_CLIENT_STALL sent={d} result={s} responses={d} ingress_position={d} publisher_limit={d} egress_position={d} connected={any} retry_ms={d}\n", .{
                         index + 1,
                         @tagName(offer_result),
                         responses.count,
                         cluster.ingress_publication.position(),
                         cluster.ingress_publication.publisherLimit(),
+                        cluster.egressPosition(),
                         cluster.ingress_publication.isConnected(),
                         now_ms - retry_started_ms,
                     });
@@ -180,7 +183,18 @@ pub fn main() !void {
         _ = client.doWork();
         _ = cluster.pollEgress(onResponse, @ptrCast(&responses), 10);
     }
-    if (responses.count != order_count) return error.ResponseTimeout;
+    if (responses.count != order_count) {
+        if (trace_perf) {
+            std.debug.print("ZIG_CLUSTER_CLIENT_RESPONSE_TIMEOUT responses={d} expected={d} egress_position={d} invalid_egress={d} ignored_egress={d}\n", .{
+                responses.count,
+                order_count,
+                cluster.egressPosition(),
+                cluster.egressInvalidCount(),
+                cluster.egressIgnoredCount(),
+            });
+        }
+        return error.ResponseTimeout;
+    }
     const total_ms = publish_ms + response_timeout_ms -| @as(usize, @intCast(@max(0, deadline - aeron.time.milliTimestamp())));
     const orders_per_sec = order_count * 1000 / @max(1, total_ms);
     std.debug.print("ZIG_CLUSTER_CLIENT_OK responses={d} publish_ms={d} total_ms={d} orders_per_sec={d}\n", .{ responses.count, publish_ms, total_ms, orders_per_sec });
