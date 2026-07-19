@@ -64,7 +64,8 @@ pub fn main() !void {
     const order_count = envUsize("ORDER_COUNT", 3);
     if (order_count == 0) return error.InvalidOrderCount;
     var responses = Responses{};
-    const offer_deadline = aeron.time.milliTimestamp() + 60_000;
+    const offer_timeout_ms = envUsize("OFFER_TIMEOUT_MS", 60_000);
+    const offer_deadline = aeron.time.milliTimestamp() + @as(i64, @intCast(offer_timeout_ms));
     for (0..order_count) |index| {
         // Keep the Zig client namespace disjoint from the Java baseline client.
         const order_id = 1_000_001 + index;

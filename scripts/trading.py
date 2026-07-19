@@ -87,6 +87,7 @@ def run(mode: str, action: str) -> int:
             "ORDER_COUNT": os.environ.get("TRADING_SOAK_MESSAGES", "500"),
             "START_DELAY_MS": os.environ.get("TRADING_SOAK_START_DELAY_MS", "5000"),
             "HOLD_OPEN_MS": os.environ.get("TRADING_SOAK_HOLD_OPEN_MS", "30000"),
+            "OFFER_TIMEOUT_MS": os.environ.get("TRADING_SOAK_OFFER_TIMEOUT_MS", "600000"),
             "QUIET": "1",
         }
     return subprocess.run(command, cwd=ROOT, env=environment, check=False).returncode

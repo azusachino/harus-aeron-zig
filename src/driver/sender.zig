@@ -414,7 +414,13 @@ pub const Sender = struct {
                     receiver_id,
                     self.current_time_ms * std.time.ns_per_ms,
                 );
-                self.counters_map.set(publication.publisher_limit.counter_id, new_limit);
+                const current_limit = self.counters_map.get(publication.publisher_limit.counter_id);
+                // UDP STATUS messages may arrive out of order. A stale STATUS must
+                // never move the publisher limit backwards and strand a publication
+                // that has already advanced beyond that old window.
+                if (new_limit > current_limit) {
+                    self.counters_map.set(publication.publisher_limit.counter_id, new_limit);
+                }
                 publication.last_activity_ns = self.current_time_ms * std.time.ns_per_ms;
                 var meta = publication.log_buffer.metaData();
                 meta.setIsConnected(true);
@@ -682,6 +688,8 @@ test "Sender: STATUS updates publisher limit" {
     try sender.onAddPublication(&publication);
 
     sender.onStatusMessage(7, 1001, 3, 1024, 4096, 77);
+    try std.testing.expectEqual(@as(i64, 5120), counters_map.get(pub_limit.counter_id));
+    sender.onStatusMessage(7, 1001, 2, 0, 4096, 77);
     try std.testing.expectEqual(@as(i64, 5120), counters_map.get(pub_limit.counter_id));
     try std.testing.expect(log_buf.metaData().isConnected());
     try std.testing.expectEqual(@as(i32, 1), log_buf.metaData().activeTransportCount());
