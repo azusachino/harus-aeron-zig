@@ -38,6 +38,7 @@ pub const Image = struct {
     subscriber_position: counters.CounterHandle, // client-owned image position counter
     rebuild_position: i64, // tracks gap filling progress
     last_status_position: i64,
+    last_status_ns: i64,
     term_ids: [metadata.PARTITION_COUNT]i32,
     source_address: net.Address,
     nak_state: NakState,
@@ -76,6 +77,7 @@ pub const Image = struct {
             .subscriber_position = subscriber_position,
             .rebuild_position = initial_rebuild_position,
             .last_status_position = 0,
+            .last_status_ns = 0,
             .term_ids = term_ids,
             .source_address = source_address,
             .nak_state = NakState.init(log_buffer.allocator, stream_id),
@@ -242,6 +244,7 @@ pub const NakSignal = struct {
 };
 
 const NAK_DELAY_NS: i64 = 1_000_000; // 1ms
+const STATUS_REFRESH_NS: i64 = 200_000_000; // 200ms, recover lost flow-control feedback
 
 pub const GapRange = struct { offset: i32, length: i32 };
 
@@ -618,7 +621,9 @@ pub const Receiver = struct {
 
             const subscriber_position = self.counters_map.get(image.subscriber_position.counter_id);
             const consumption_position = @min(image.rebuild_position, subscriber_position);
-            if (consumption_position > image.last_status_position) {
+            if (consumption_position > image.last_status_position or
+                now_ns - image.last_status_ns >= STATUS_REFRESH_NS)
+            {
                 self.mutex.unlock();
                 self.sendStatus(image) catch |err| switch (err) {
                     error.WouldBlock => {},
@@ -713,6 +718,7 @@ pub const Receiver = struct {
         _ = try self.send_endpoint.send(image.source_address, status_bytes);
         _ = self.status_messages_sent.fetchAdd(1, .monotonic);
         image.last_status_position = consumption_position;
+        image.last_status_ns = @as(i64, @intCast(time.nanoTimestamp()));
     }
 };
 
