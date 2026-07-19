@@ -14,6 +14,8 @@ const frame = aeron.protocol;
 const codecs = aeron.cluster.client_codecs;
 const election_mod = aeron.cluster.election;
 const Election = election_mod.Election;
+const log_mod = aeron.cluster.log;
+const cluster_protocol = aeron.cluster.protocol;
 const trading = @import("trading");
 
 const INGRESS_STREAM_ID: i32 = 101;
@@ -21,12 +23,22 @@ const EGRESS_STREAM_ID: i32 = 102;
 const INTERNAL_STREAM_ID: i32 = 103;
 const INTERNAL_MAGIC: u32 = 0x5A434C31; // ZCL1
 const INTERNAL_HEARTBEAT: u8 = 1;
-const INTERNAL_ORDER: u8 = 2;
 const INTERNAL_REQUEST_VOTE: u8 = 3;
 const INTERNAL_VOTE: u8 = 4;
 const INTERNAL_NEW_LEADERSHIP_TERM: u8 = 5;
+const INTERNAL_APPEND_REQUEST: u8 = 6;
+const INTERNAL_APPEND_POSITION: u8 = 7;
+const INTERNAL_COMMIT_POSITION: u8 = 8;
 const CLUSTER_SIZE: u32 = 3;
 const JOURNAL_MAX_ORDER_LENGTH: usize = 16 * 1024;
+// LESSON(log-replication): AppendPosition acks and idle retransmission both run
+// on this cadence; slower than the leader heartbeat so retransmission only
+// fires once a gap has had time to be closed by a normal in-order append.
+const APPEND_ACK_INTERVAL_MS: i64 = 200;
+const RETRANSMIT_INTERVAL_MS: i64 = 250;
+// Cap entries resent per peer per tick so a badly lagging follower cannot
+// make the leader flood the internal channel in one duty cycle.
+const MAX_RETRANSMIT_ENTRIES: usize = 64;
 
 fn env(comptime name: [:0]const u8, fallback: []const u8) []const u8 {
     const value = std.c.getenv(name) orelse return fallback;
@@ -40,6 +52,54 @@ fn envInt(comptime name: [:0]const u8, fallback: i32) i32 {
 
 fn read(comptime T: type, bytes: []const u8) T {
     return std.mem.readInt(T, @as(*const [@sizeOf(T)]u8, @ptrCast(bytes.ptr)), .little);
+}
+
+fn write(comptime T: type, buffer: []u8, value: T) void {
+    std.mem.writeInt(T, @as(*[@sizeOf(T)]u8, @ptrCast(buffer.ptr)), value, .little);
+}
+
+fn encodeAppendRequest(buffer: []u8, header: cluster_protocol.AppendRequestHeader) void {
+    write(i64, buffer[0..8], header.leader_ship_term_id);
+    write(i64, buffer[8..16], header.log_position);
+    write(i64, buffer[16..24], header.timestamp);
+    write(i32, buffer[24..28], header.leader_member_id);
+}
+
+fn decodeAppendRequest(buffer: []const u8) cluster_protocol.AppendRequestHeader {
+    return .{
+        .leader_ship_term_id = read(i64, buffer[0..8]),
+        .log_position = read(i64, buffer[8..16]),
+        .timestamp = read(i64, buffer[16..24]),
+        .leader_member_id = read(i32, buffer[24..28]),
+    };
+}
+
+fn encodeAppendPosition(buffer: []u8, header: cluster_protocol.AppendPositionHeader) void {
+    write(i64, buffer[0..8], header.leader_ship_term_id);
+    write(i64, buffer[8..16], header.log_position);
+    write(i32, buffer[16..20], header.follower_member_id);
+}
+
+fn decodeAppendPosition(buffer: []const u8) cluster_protocol.AppendPositionHeader {
+    return .{
+        .leader_ship_term_id = read(i64, buffer[0..8]),
+        .log_position = read(i64, buffer[8..16]),
+        .follower_member_id = read(i32, buffer[16..20]),
+    };
+}
+
+fn encodeCommitPosition(buffer: []u8, header: cluster_protocol.CommitPositionHeader) void {
+    write(i64, buffer[0..8], header.leader_ship_term_id);
+    write(i64, buffer[8..16], header.log_position);
+    write(i32, buffer[16..20], header.leader_member_id);
+}
+
+fn decodeCommitPosition(buffer: []const u8) cluster_protocol.CommitPositionHeader {
+    return .{
+        .leader_ship_term_id = read(i64, buffer[0..8]),
+        .log_position = read(i64, buffer[8..16]),
+        .leader_member_id = read(i32, buffer[16..20]),
+    };
 }
 
 fn nowNs() i64 {
@@ -104,6 +164,11 @@ const InternalOutput = struct {
 const PeerPublication = struct {
     member_id: i32,
     publication_request_id: i64,
+    // Leader-side bookkeeping only: highest log position this peer has
+    // acked, used to decide what to retransmit and whether quorum commit
+    // can advance. Meaningless (and unused) while this node is a follower.
+    acked_log_position: i64 = 0,
+    last_retransmit_ms: i64 = 0,
 };
 
 const Session = struct {
@@ -122,7 +187,7 @@ const Journal = struct {
     file: std.Io.File,
     replayed_orders: usize = 0,
 
-    fn init(allocator: std.mem.Allocator, book: *trading.OrderBook, path: []const u8) !Journal {
+    fn init(allocator: std.mem.Allocator, book: *trading.OrderBook, log: *log_mod.ClusterLog, path: []const u8) !Journal {
         try std.Io.Dir.cwd().createDirPath(aeron.io.io(), std.fs.path.dirname(path) orelse ".");
         var file = std.Io.Dir.cwd().openFile(aeron.io.io(), path, .{ .mode = .read_write }) catch |err| switch (err) {
             error.FileNotFound => try std.Io.Dir.cwd().createFile(aeron.io.io(), path, .{ .read = true, .truncate = false }),
@@ -146,8 +211,13 @@ const Journal = struct {
                 if (order_length == 0 or order_length > JOURNAL_MAX_ORDER_LENGTH or order_length > bytes.len - offset) {
                     return error.CorruptJournal;
                 }
-                const order = parseOrder(bytes[offset .. offset + order_length]) catch return error.CorruptJournal;
+                const order_payload = bytes[offset .. offset + order_length];
+                const order = parseOrder(order_payload) catch return error.CorruptJournal;
                 _ = book.submit(order) catch return error.CorruptJournal;
+                // Replay drives the replication log to the same byte position
+                // a live AppendRequest would have reached, so a restarted
+                // member reports the correct log_position to peers immediately.
+                _ = log.append(order_payload, 0) catch return error.CorruptJournal;
                 replayed_orders += 1;
                 offset += order_length;
             }
@@ -209,6 +279,14 @@ const Node = struct {
     internal_tx_count: u64 = 0,
     internal_rx_count: u64 = 0,
     internal_order_rx_count: u64 = 0,
+    // LESSON(log-replication): `log` tracks byte-accurate append/commit
+    // positions independent of election.log_position (which counts applied
+    // orders, not bytes, and only feeds Raft vote comparisons). Quorum
+    // tracking lives on each PeerPublication rather than log.zig's
+    // LogLeader, which assumes the leader is always the highest member id.
+    log: log_mod.ClusterLog,
+    last_append_ack_sent_ms: i64 = 0,
+    last_commit_broadcast_position: i64 = -1,
 
     fn handleFragment(self: *Node, payload: []const u8) !void {
         const header = try codecs.decodeMessageHeader(payload);
@@ -236,20 +314,6 @@ const Node = struct {
                     std.debug.print("ZIG_CLUSTER_INTERNAL_RX member={d} kind=heartbeat source={d}\n", .{ self.member_id, source_member_id });
                 }
             },
-            INTERNAL_ORDER => {
-                if (source_member_id != self.election.leaderMemberId()) return error.StaleInternalLeader;
-                if (payload.len < 25) return error.InvalidInternalMessage;
-                const order_length = @as(usize, @intCast(read(u32, payload[21..25])));
-                if (25 + order_length > payload.len) return error.InvalidInternalMessage;
-                _ = self.applyOrder(payload[25 .. 25 + order_length]) catch |err| switch (err) {
-                    error.DuplicateOrder => {},
-                    else => return err,
-                };
-                self.internal_order_rx_count += 1;
-                if (self.internal_order_rx_count <= 3) {
-                    std.debug.print("ZIG_CLUSTER_INTERNAL_RX member={d} kind=order source={d} count={d}\n", .{ self.member_id, source_member_id, self.internal_order_rx_count });
-                }
-            },
             INTERNAL_REQUEST_VOTE => {
                 if (payload.len < 33) return error.InvalidInternalMessage;
                 const candidate_term_id = read(i64, payload[9..17]);
@@ -272,7 +336,138 @@ const Node = struct {
                 self.election.onNewLeadershipTerm(leader_ship_term_id, log_position, source_member_id, now_ns);
                 std.debug.print("ZIG_CLUSTER_LEADER_CHANGE member={d} leader={d} term={d} source=new_leadership_term\n", .{ self.member_id, source_member_id, leader_ship_term_id });
             },
+            INTERNAL_APPEND_REQUEST => {
+                if (payload.len < 41) return error.InvalidInternalMessage;
+                const header = decodeAppendRequest(payload[9..37]);
+                const order_length = @as(usize, @intCast(read(u32, payload[37..41])));
+                if (41 + order_length > payload.len) return error.InvalidInternalMessage;
+                try self.handleAppendRequest(source_member_id, header, payload[41 .. 41 + order_length]);
+            },
+            INTERNAL_APPEND_POSITION => {
+                if (payload.len < 29) return error.InvalidInternalMessage;
+                const header = decodeAppendPosition(payload[9..29]);
+                if (self.member_id == self.election.leaderMemberId()) {
+                    for (self.peer_publications.items) |*peer| {
+                        if (peer.member_id == header.follower_member_id) {
+                            peer.acked_log_position = header.log_position;
+                            break;
+                        }
+                    }
+                    self.checkCommitAdvance();
+                }
+            },
+            INTERNAL_COMMIT_POSITION => {
+                if (payload.len < 29) return error.InvalidInternalMessage;
+                const header = decodeCommitPosition(payload[9..29]);
+                if (source_member_id == self.election.leaderMemberId()) {
+                    self.log.advanceCommitPosition(header.log_position);
+                }
+            },
             else => return error.UnsupportedInternalMessage,
+        }
+    }
+
+    /// Apply a leader-replicated log entry. Entries whose position does not
+    /// match our current append_position are either duplicates (already
+    /// applied — ignored) or a gap (leader will close it via retransmission
+    /// once our AppendPosition ack reports our stalled position).
+    fn handleAppendRequest(self: *Node, source_member_id: i32, header: cluster_protocol.AppendRequestHeader, order_payload: []const u8) !void {
+        if (source_member_id != self.election.leaderMemberId()) return error.StaleInternalLeader;
+        if (header.leader_ship_term_id < self.election.leaderShipTermId()) return; // stale term, ignore
+        if (header.log_position == self.log.appendPosition()) {
+            _ = self.applyOrder(order_payload) catch |err| switch (err) {
+                error.DuplicateOrder => {},
+                else => return err,
+            };
+            self.internal_order_rx_count += 1;
+            if (self.internal_order_rx_count <= 3) {
+                std.debug.print("ZIG_CLUSTER_INTERNAL_RX member={d} kind=append source={d} position={d}\n", .{ self.member_id, source_member_id, header.log_position });
+            }
+        }
+        // Ack our current position either way: on the happy path this
+        // reports the newly advanced position; on a gap it reports the
+        // stalled position so the leader knows where to resume sending from.
+        try self.sendAppendPositionAck(source_member_id);
+    }
+
+    /// Recompute commit position from this node's own append position plus
+    /// every peer's last-known ack, exactly mirroring log.zig's LogLeader
+    /// quorum rule but keyed to the peer set this member actually has
+    /// (log.zig's LogLeader wrongly assumes the leader holds the highest
+    /// member id in the cluster).
+    fn checkCommitAdvance(self: *Node) void {
+        var positions: [CLUSTER_SIZE]i64 = undefined;
+        var count: usize = 0;
+        positions[count] = self.log.appendPosition();
+        count += 1;
+        for (self.peer_publications.items) |peer| {
+            positions[count] = peer.acked_log_position;
+            count += 1;
+        }
+        const slice = positions[0..count];
+        std.mem.sort(i64, slice, {}, struct {
+            fn greaterThan(_: void, a: i64, b: i64) bool {
+                return a > b;
+            }
+        }.greaterThan);
+        const quorum_threshold: usize = (CLUSTER_SIZE / 2) + 1;
+        if (slice.len >= quorum_threshold) {
+            self.log.advanceCommitPosition(slice[quorum_threshold - 1]);
+        }
+    }
+
+    fn sendAppendRequestTo(self: *Node, publication_request_id: i64, position: i64, order_payload: []const u8) !void {
+        const buffer = try self.allocator.alloc(u8, 41 + order_payload.len);
+        errdefer self.allocator.free(buffer);
+        std.mem.writeInt(u32, buffer[0..4], INTERNAL_MAGIC, .little);
+        buffer[4] = INTERNAL_APPEND_REQUEST;
+        std.mem.writeInt(i32, buffer[5..9], self.member_id, .little);
+        encodeAppendRequest(buffer[9..37], .{
+            .leader_ship_term_id = self.election.leaderShipTermId(),
+            .log_position = position,
+            .timestamp = nowNs(),
+            .leader_member_id = self.member_id,
+        });
+        std.mem.writeInt(u32, buffer[37..41], @intCast(order_payload.len), .little);
+        @memcpy(buffer[41..], order_payload);
+        try self.internal_outputs.append(self.allocator, .{
+            .publication_request_id = publication_request_id,
+            .buffer = buffer,
+        });
+    }
+
+    fn sendAppendPositionAck(self: *Node, leader_member_id: i32) !void {
+        const publication_request_id = self.peerPublicationRequestId(leader_member_id) orelse return;
+        const buffer = try self.allocator.alloc(u8, 29);
+        std.mem.writeInt(u32, buffer[0..4], INTERNAL_MAGIC, .little);
+        buffer[4] = INTERNAL_APPEND_POSITION;
+        std.mem.writeInt(i32, buffer[5..9], self.member_id, .little);
+        encodeAppendPosition(buffer[9..29], .{
+            .leader_ship_term_id = self.election.leaderShipTermId(),
+            .log_position = self.log.appendPosition(),
+            .follower_member_id = self.member_id,
+        });
+        try self.internal_outputs.append(self.allocator, .{
+            .publication_request_id = publication_request_id,
+            .buffer = buffer,
+        });
+    }
+
+    fn broadcastCommitPosition(self: *Node, position: i64) !void {
+        for (self.peer_publications.items) |peer| {
+            const buffer = try self.allocator.alloc(u8, 29);
+            std.mem.writeInt(u32, buffer[0..4], INTERNAL_MAGIC, .little);
+            buffer[4] = INTERNAL_COMMIT_POSITION;
+            std.mem.writeInt(i32, buffer[5..9], self.member_id, .little);
+            encodeCommitPosition(buffer[9..29], .{
+                .leader_ship_term_id = self.election.leaderShipTermId(),
+                .log_position = position,
+                .leader_member_id = self.member_id,
+            });
+            try self.internal_outputs.append(self.allocator, .{
+                .publication_request_id = peer.publication_request_id,
+                .buffer = buffer,
+            });
         }
     }
 
@@ -376,6 +571,7 @@ const Node = struct {
         if (self.member_id != self.election.leaderMemberId() or payload.len < codecs.SESSION_HEADER_LENGTH) return;
         const session_id = read(i64, payload[16..24]);
         const order_payload = payload[codecs.SESSION_HEADER_LENGTH..];
+        const position = self.log.appendPosition();
         const result = self.applyOrder(order_payload) catch |err| switch (err) {
             error.DuplicateOrder => return self.queueResponse(session_id, 0, "REJECTED|duplicate-order"),
             error.InvalidOrder => return self.queueResponse(session_id, 0, "REJECTED|invalid-order"),
@@ -393,32 +589,21 @@ const Node = struct {
         var result_buffer: [128]u8 = undefined;
         const result_text = try std.fmt.bufPrint(&result_buffer, "FILLED|{d}|RESTING|{d}", .{ result.filled_quantity, result.resting_quantity });
         try self.queueResponse(session_id, order_id, result_text);
-        try self.queueReplication(order_payload);
+        try self.broadcastAppendRequest(position, order_payload);
     }
 
     fn applyOrder(self: *Node, order_payload: []const u8) !trading.SubmitResult {
         const order = try parseOrder(order_payload);
         const result = try self.book.submit(order);
         if (!self.replaying) try self.journal.append(order_payload);
+        _ = try self.log.append(order_payload, nowNs());
         self.election.log_position += 1;
         return result;
     }
 
-    fn queueReplication(self: *Node, order_payload: []const u8) !void {
+    fn broadcastAppendRequest(self: *Node, position: i64, order_payload: []const u8) !void {
         for (self.peer_publications.items) |peer| {
-            const buffer = try self.allocator.alloc(u8, 25 + order_payload.len);
-            errdefer self.allocator.free(buffer);
-            std.mem.writeInt(u32, buffer[0..4], INTERNAL_MAGIC, .little);
-            buffer[4] = INTERNAL_ORDER;
-            std.mem.writeInt(i32, buffer[5..9], self.member_id, .little);
-            std.mem.writeInt(i64, buffer[9..17], self.next_session_id, .little);
-            std.mem.writeInt(i32, buffer[17..21], self.election.leaderMemberId(), .little);
-            std.mem.writeInt(u32, buffer[21..25], @intCast(order_payload.len), .little);
-            @memcpy(buffer[25..], order_payload);
-            try self.internal_outputs.append(self.allocator, .{
-                .publication_request_id = peer.publication_request_id,
-                .buffer = buffer,
-            });
+            try self.sendAppendRequestTo(peer.publication_request_id, position, order_payload);
         }
     }
 
@@ -444,6 +629,12 @@ const Node = struct {
                     if (self.last_election_state != .leader_ready) {
                         std.debug.print("ZIG_CLUSTER_LEADER_CHANGE member={d} leader={d} term={d} source=election\n", .{ self.member_id, self.member_id, self.election.leaderShipTermId() });
                         try self.broadcastNewLeadershipTerm();
+                        // New term: forget what we thought each peer had
+                        // acked so retransmission re-syncs everyone from
+                        // wherever they actually are, not wherever the
+                        // previous term left off.
+                        for (self.peer_publications.items) |*peer| peer.acked_log_position = 0;
+                        self.last_commit_broadcast_position = -1;
                     }
                 },
                 else => {},
@@ -465,6 +656,27 @@ const Node = struct {
                     .buffer = buffer,
                 });
             }
+        }
+
+        if (self.member_id == self.election.leaderMemberId()) {
+            for (self.peer_publications.items) |*peer| {
+                if (peer.acked_log_position < self.log.appendPosition() and now_ms - peer.last_retransmit_ms >= RETRANSMIT_INTERVAL_MS) {
+                    peer.last_retransmit_ms = now_ms;
+                    var sent: usize = 0;
+                    for (self.log.entriesFrom(peer.acked_log_position)) |entry| {
+                        if (sent >= MAX_RETRANSMIT_ENTRIES) break;
+                        try self.sendAppendRequestTo(peer.publication_request_id, entry.position, entry.data);
+                        sent += 1;
+                    }
+                }
+            }
+            if (self.log.commitPosition() != self.last_commit_broadcast_position) {
+                self.last_commit_broadcast_position = self.log.commitPosition();
+                try self.broadcastCommitPosition(self.last_commit_broadcast_position);
+            }
+        } else if (self.election.leaderMemberId() != -1 and now_ms - self.last_append_ack_sent_ms >= APPEND_ACK_INTERVAL_MS) {
+            self.last_append_ack_sent_ms = now_ms;
+            try self.sendAppendPositionAck(self.election.leaderMemberId());
         }
     }
 
@@ -541,6 +753,7 @@ const Node = struct {
         self.journal.deinit();
         self.book.deinit();
         self.election.deinit();
+        self.log.deinit();
     }
 };
 
@@ -605,7 +818,9 @@ pub fn main() !void {
     }
     var book = trading.OrderBook.init(allocator);
     errdefer book.deinit();
-    var journal = try Journal.init(allocator, &book, journal_path);
+    var log = log_mod.ClusterLog.init(allocator);
+    errdefer log.deinit();
+    var journal = try Journal.init(allocator, &book, &log, journal_path);
     errdefer journal.deinit();
     var election = try Election.init(allocator, member_id, CLUSTER_SIZE);
     errdefer election.deinit();
@@ -620,6 +835,7 @@ pub fn main() !void {
         .journal = journal,
         .peer_publications = peer_publications,
         .internal_subscription_request_id = internal_subscription_request,
+        .log = log,
     };
     defer node.deinit();
 
