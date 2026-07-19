@@ -91,6 +91,8 @@ pub fn main() !void {
     const offer_timeout_ms = envUsize("OFFER_TIMEOUT_MS", 60_000);
     const offer_deadline = aeron.time.milliTimestamp() + @as(i64, @intCast(offer_timeout_ms));
     const publish_start_ms = aeron.time.milliTimestamp();
+    var retry_started_ms: i64 = 0;
+    var last_stall_report_ms = publish_start_ms;
     for (0..order_count) |index| {
         // Keep the Zig client namespace disjoint from the Java baseline client.
         const order_id = 1_000_001 + index;
@@ -121,9 +123,30 @@ pub fn main() !void {
                 perf.offer_calls += 1;
                 perf.offer_ns += aeron.time.nanoTimestamp() - offer_start_ns;
             }
+            const is_retry = switch (offer_result) {
+                .ok => false,
+                else => true,
+            };
+            if (trace_perf and is_retry) {
+                const now_ms = aeron.time.milliTimestamp();
+                if (retry_started_ms == 0) retry_started_ms = now_ms;
+                if (now_ms - last_stall_report_ms >= 1_000) {
+                    std.debug.print("ZIG_CLUSTER_CLIENT_STALL sent={d} result={s} responses={d} position={d} publisher_limit={d} connected={any} retry_ms={d}\n", .{
+                        index + 1,
+                        @tagName(offer_result),
+                        responses.count,
+                        cluster.ingress_publication.position(),
+                        cluster.ingress_publication.publisherLimit(),
+                        cluster.ingress_publication.isConnected(),
+                        now_ms - retry_started_ms,
+                    });
+                    last_stall_report_ms = now_ms;
+                }
+            }
             switch (offer_result) {
                 .ok => {
                     if (trace_perf) perf.offers_ok += 1;
+                    retry_started_ms = 0;
                     if ((index + 1) % 100 == 0) {
                         std.debug.print("ZIG_CLUSTER_CLIENT_PROGRESS sent={d} responses={d}\n", .{ index + 1, responses.count });
                     }

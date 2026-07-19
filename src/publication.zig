@@ -178,6 +178,11 @@ pub const ExclusivePublication = struct {
         return @as(i64, term_id - self.initial_term_id) * self.term_length + term_offset;
     }
 
+    /// Read the current live flow-control ceiling for diagnostics and pacing.
+    pub fn publisherLimit(self: *ExclusivePublication) i64 {
+        return self.livePublisherLimit();
+    }
+
     pub fn isConnected(self: *const ExclusivePublication) bool {
         return self.log_buffer.metaData().isConnected();
     }
