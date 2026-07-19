@@ -56,6 +56,7 @@ pub const ConsensusAdapter = struct {
                     message.log_leadership_term_id,
                     message.log_position,
                     message.candidate_member_id,
+                    now_ns,
                 );
                 return codecs.encodeVote(response, .{
                     .candidate_term_id = message.candidate_term_id,

@@ -12,6 +12,8 @@ const std = @import("std");
 const aeron = @import("aeron");
 const frame = aeron.protocol;
 const codecs = aeron.cluster.client_codecs;
+const election_mod = aeron.cluster.election;
+const Election = election_mod.Election;
 const trading = @import("trading");
 
 const INGRESS_STREAM_ID: i32 = 101;
@@ -20,6 +22,10 @@ const INTERNAL_STREAM_ID: i32 = 103;
 const INTERNAL_MAGIC: u32 = 0x5A434C31; // ZCL1
 const INTERNAL_HEARTBEAT: u8 = 1;
 const INTERNAL_ORDER: u8 = 2;
+const INTERNAL_REQUEST_VOTE: u8 = 3;
+const INTERNAL_VOTE: u8 = 4;
+const INTERNAL_NEW_LEADERSHIP_TERM: u8 = 5;
+const CLUSTER_SIZE: u32 = 3;
 const JOURNAL_MAX_ORDER_LENGTH: usize = 16 * 1024;
 
 fn env(comptime name: [:0]const u8, fallback: []const u8) []const u8 {
@@ -34,6 +40,10 @@ fn envInt(comptime name: [:0]const u8, fallback: i32) i32 {
 
 fn read(comptime T: type, bytes: []const u8) T {
     return std.mem.readInt(T, @as(*const [@sizeOf(T)]u8, @ptrCast(bytes.ptr)), .little);
+}
+
+fn nowNs() i64 {
+    return @intCast(aeron.time.nanoTimestamp());
 }
 
 fn varField(buffer: []const u8, offset: *usize) ?[]const u8 {
@@ -182,7 +192,8 @@ const Node = struct {
     allocator: std.mem.Allocator,
     aeron: *aeron.Aeron,
     member_id: i32,
-    leader_member_id: i32,
+    election: Election,
+    last_election_state: election_mod.ElectionState = .init,
     endpoints: []const u8,
     book: trading.OrderBook,
     journal: Journal,
@@ -192,8 +203,6 @@ const Node = struct {
     peer_publications: std.ArrayListUnmanaged(PeerPublication) = .empty,
     internal_outputs: std.ArrayListUnmanaged(InternalOutput) = .empty,
     internal_subscription_request_id: i64,
-    last_leader_heartbeat_ms: i64,
-    election_timeout_ms: i64,
     last_heartbeat_sent_ms: i64 = 0,
     last_connected_peer_count: i32 = -1,
     next_session_id: i64 = 1_000,
@@ -212,32 +221,23 @@ const Node = struct {
     }
 
     fn handleInternalFragment(self: *Node, payload: []const u8) !void {
-        if (payload.len < 13 or read(u32, payload[0..4]) != INTERNAL_MAGIC) return error.InvalidInternalMessage;
+        if (payload.len < 9 or read(u32, payload[0..4]) != INTERNAL_MAGIC) return error.InvalidInternalMessage;
         self.internal_rx_count += 1;
         const kind = payload[4];
         const source_member_id = read(i32, payload[5..9]);
+        const now_ns = nowNs();
         switch (kind) {
             INTERNAL_HEARTBEAT => {
-                const now_ms = aeron.time.milliTimestamp();
-                const leader_is_stale = now_ms - self.last_leader_heartbeat_ms >= self.election_timeout_ms;
-                if (source_member_id != self.member_id and
-                    (source_member_id < self.leader_member_id or leader_is_stale))
-                {
-                    const previous_leader = self.leader_member_id;
-                    self.leader_member_id = source_member_id;
-                    if (previous_leader != source_member_id) {
-                        std.debug.print("ZIG_CLUSTER_LEADER_CHANGE member={d} leader={d} source=heartbeat\n", .{ self.member_id, source_member_id });
-                    }
-                }
-                if (source_member_id == self.leader_member_id) {
-                    self.last_leader_heartbeat_ms = now_ms;
-                    if (self.internal_rx_count <= 3) {
-                        std.debug.print("ZIG_CLUSTER_INTERNAL_RX member={d} kind=heartbeat source={d}\n", .{ self.member_id, source_member_id });
-                    }
+                if (payload.len < 25) return error.InvalidInternalMessage;
+                const leadership_term_id = read(i64, payload[9..17]);
+                const log_position = read(i64, payload[17..25]);
+                self.election.onLeaderHeartbeat(leadership_term_id, log_position, source_member_id, now_ns);
+                if (self.internal_rx_count <= 3) {
+                    std.debug.print("ZIG_CLUSTER_INTERNAL_RX member={d} kind=heartbeat source={d}\n", .{ self.member_id, source_member_id });
                 }
             },
             INTERNAL_ORDER => {
-                if (source_member_id != self.leader_member_id) return error.StaleInternalLeader;
+                if (source_member_id != self.election.leaderMemberId()) return error.StaleInternalLeader;
                 if (payload.len < 25) return error.InvalidInternalMessage;
                 const order_length = @as(usize, @intCast(read(u32, payload[21..25])));
                 if (25 + order_length > payload.len) return error.InvalidInternalMessage;
@@ -250,7 +250,82 @@ const Node = struct {
                     std.debug.print("ZIG_CLUSTER_INTERNAL_RX member={d} kind=order source={d} count={d}\n", .{ self.member_id, source_member_id, self.internal_order_rx_count });
                 }
             },
+            INTERNAL_REQUEST_VOTE => {
+                if (payload.len < 33) return error.InvalidInternalMessage;
+                const candidate_term_id = read(i64, payload[9..17]);
+                const log_leader_ship_term_id = read(i64, payload[17..25]);
+                const log_position = read(i64, payload[25..33]);
+                const granted = self.election.onRequestVote(candidate_term_id, log_leader_ship_term_id, log_position, source_member_id, now_ns);
+                try self.sendVote(source_member_id, candidate_term_id, granted);
+            },
+            INTERNAL_VOTE => {
+                if (payload.len < 25) return error.InvalidInternalMessage;
+                const candidate_term_id = read(i64, payload[9..17]);
+                const candidate_member_id = read(i32, payload[17..21]);
+                const vote = read(i32, payload[21..25]) != 0;
+                self.election.onVote(candidate_term_id, candidate_member_id, source_member_id, vote);
+            },
+            INTERNAL_NEW_LEADERSHIP_TERM => {
+                if (payload.len < 25) return error.InvalidInternalMessage;
+                const leader_ship_term_id = read(i64, payload[9..17]);
+                const log_position = read(i64, payload[17..25]);
+                self.election.onNewLeadershipTerm(leader_ship_term_id, log_position, source_member_id, now_ns);
+                std.debug.print("ZIG_CLUSTER_LEADER_CHANGE member={d} leader={d} term={d} source=new_leadership_term\n", .{ self.member_id, source_member_id, leader_ship_term_id });
+            },
             else => return error.UnsupportedInternalMessage,
+        }
+    }
+
+    fn peerPublicationRequestId(self: *const Node, target_member_id: i32) ?i64 {
+        for (self.peer_publications.items) |peer| {
+            if (peer.member_id == target_member_id) return peer.publication_request_id;
+        }
+        return null;
+    }
+
+    fn sendVote(self: *Node, target_member_id: i32, candidate_term_id: i64, vote: bool) !void {
+        const publication_request_id = self.peerPublicationRequestId(target_member_id) orelse return;
+        const buffer = try self.allocator.alloc(u8, 25);
+        std.mem.writeInt(u32, buffer[0..4], INTERNAL_MAGIC, .little);
+        buffer[4] = INTERNAL_VOTE;
+        std.mem.writeInt(i32, buffer[5..9], self.member_id, .little);
+        std.mem.writeInt(i64, buffer[9..17], candidate_term_id, .little);
+        std.mem.writeInt(i32, buffer[17..21], target_member_id, .little);
+        std.mem.writeInt(i32, buffer[21..25], if (vote) 1 else 0, .little);
+        try self.internal_outputs.append(self.allocator, .{
+            .publication_request_id = publication_request_id,
+            .buffer = buffer,
+        });
+    }
+
+    fn broadcastRequestVote(self: *Node) !void {
+        for (self.peer_publications.items) |peer| {
+            const buffer = try self.allocator.alloc(u8, 33);
+            std.mem.writeInt(u32, buffer[0..4], INTERNAL_MAGIC, .little);
+            buffer[4] = INTERNAL_REQUEST_VOTE;
+            std.mem.writeInt(i32, buffer[5..9], self.member_id, .little);
+            std.mem.writeInt(i64, buffer[9..17], self.election.candidate_term_id, .little);
+            std.mem.writeInt(i64, buffer[17..25], self.election.leader_ship_term_id, .little);
+            std.mem.writeInt(i64, buffer[25..33], self.election.log_position, .little);
+            try self.internal_outputs.append(self.allocator, .{
+                .publication_request_id = peer.publication_request_id,
+                .buffer = buffer,
+            });
+        }
+    }
+
+    fn broadcastNewLeadershipTerm(self: *Node) !void {
+        for (self.peer_publications.items) |peer| {
+            const buffer = try self.allocator.alloc(u8, 25);
+            std.mem.writeInt(u32, buffer[0..4], INTERNAL_MAGIC, .little);
+            buffer[4] = INTERNAL_NEW_LEADERSHIP_TERM;
+            std.mem.writeInt(i32, buffer[5..9], self.member_id, .little);
+            std.mem.writeInt(i64, buffer[9..17], self.election.leaderShipTermId(), .little);
+            std.mem.writeInt(i64, buffer[17..25], self.election.log_position, .little);
+            try self.internal_outputs.append(self.allocator, .{
+                .publication_request_id = peer.publication_request_id,
+                .buffer = buffer,
+            });
         }
     }
 
@@ -267,7 +342,8 @@ const Node = struct {
         errdefer self.allocator.free(response_channel_copy);
         const publication_request_id = try self.aeron.addPublication(response_channel_copy, response_stream_id);
 
-        const assigned_session_id = if (self.member_id == self.leader_member_id) self.next_session_id else 0;
+        const leader_member_id = self.election.leaderMemberId();
+        const assigned_session_id = if (self.member_id == leader_member_id) self.next_session_id else 0;
         if (assigned_session_id != 0) self.next_session_id += 1;
         if (assigned_session_id != 0) {
             try self.sessions.append(self.allocator, .{
@@ -278,13 +354,13 @@ const Node = struct {
 
         var event_buffer = try self.allocator.alloc(u8, 512);
         errdefer self.allocator.free(event_buffer);
-        const code: codecs.EventCode = if (self.member_id == self.leader_member_id) .ok else .redirect;
+        const code: codecs.EventCode = if (self.member_id == leader_member_id) .ok else .redirect;
         const event_length = try codecs.encodeSessionEvent(
             event_buffer,
             assigned_session_id,
             correlation_id,
             1,
-            self.leader_member_id,
+            leader_member_id,
             code,
             self.endpoints,
         );
@@ -297,7 +373,7 @@ const Node = struct {
     }
 
     fn handleMessage(self: *Node, payload: []const u8) !void {
-        if (self.member_id != self.leader_member_id or payload.len < codecs.SESSION_HEADER_LENGTH) return;
+        if (self.member_id != self.election.leaderMemberId() or payload.len < codecs.SESSION_HEADER_LENGTH) return;
         const session_id = read(i64, payload[16..24]);
         const order_payload = payload[codecs.SESSION_HEADER_LENGTH..];
         const result = self.applyOrder(order_payload) catch |err| switch (err) {
@@ -324,6 +400,7 @@ const Node = struct {
         const order = try parseOrder(order_payload);
         const result = try self.book.submit(order);
         if (!self.replaying) try self.journal.append(order_payload);
+        self.election.log_position += 1;
         return result;
     }
 
@@ -335,7 +412,7 @@ const Node = struct {
             buffer[4] = INTERNAL_ORDER;
             std.mem.writeInt(i32, buffer[5..9], self.member_id, .little);
             std.mem.writeInt(i64, buffer[9..17], self.next_session_id, .little);
-            std.mem.writeInt(i32, buffer[17..21], self.leader_member_id, .little);
+            std.mem.writeInt(i32, buffer[17..21], self.election.leaderMemberId(), .little);
             std.mem.writeInt(u32, buffer[21..25], @intCast(order_payload.len), .little);
             @memcpy(buffer[25..], order_payload);
             try self.internal_outputs.append(self.allocator, .{
@@ -356,19 +433,33 @@ const Node = struct {
             self.last_connected_peer_count = connected_peer_count;
             std.debug.print("ZIG_CLUSTER_PEERS member={d} connected={d}/{d}\n", .{ self.member_id, connected_peer_count, self.peer_publications.items.len });
         }
-        if (self.member_id != self.leader_member_id and now_ms - self.last_leader_heartbeat_ms >= self.election_timeout_ms + @as(i64, self.member_id) * 250) {
-            self.leader_member_id = self.member_id;
-            self.last_leader_heartbeat_ms = now_ms;
-            std.debug.print("ZIG_CLUSTER_LEADER_CHANGE member={d} leader={d}\n", .{ self.member_id, self.leader_member_id });
+
+        const now_ns = nowNs();
+        _ = self.election.doWork(now_ns);
+        const state = self.election.currentState();
+        if (state != self.last_election_state) {
+            switch (state) {
+                .candidate_ballot => try self.broadcastRequestVote(),
+                .leader_ready => {
+                    if (self.last_election_state != .leader_ready) {
+                        std.debug.print("ZIG_CLUSTER_LEADER_CHANGE member={d} leader={d} term={d} source=election\n", .{ self.member_id, self.member_id, self.election.leaderShipTermId() });
+                        try self.broadcastNewLeadershipTerm();
+                    }
+                },
+                else => {},
+            }
+            self.last_election_state = state;
         }
-        if (self.member_id == self.leader_member_id and now_ms - self.last_heartbeat_sent_ms >= 100) {
+
+        if (self.member_id == self.election.leaderMemberId() and now_ms - self.last_heartbeat_sent_ms >= 100) {
             self.last_heartbeat_sent_ms = now_ms;
             for (self.peer_publications.items) |peer| {
-                const buffer = try self.allocator.alloc(u8, 13);
+                const buffer = try self.allocator.alloc(u8, 25);
                 std.mem.writeInt(u32, buffer[0..4], INTERNAL_MAGIC, .little);
                 buffer[4] = INTERNAL_HEARTBEAT;
                 std.mem.writeInt(i32, buffer[5..9], self.member_id, .little);
-                std.mem.writeInt(i32, buffer[9..13], self.leader_member_id, .little);
+                std.mem.writeInt(i64, buffer[9..17], self.election.leaderShipTermId(), .little);
+                std.mem.writeInt(i64, buffer[17..25], self.election.log_position, .little);
                 try self.internal_outputs.append(self.allocator, .{
                     .publication_request_id = peer.publication_request_id,
                     .buffer = buffer,
@@ -449,6 +540,7 @@ const Node = struct {
         self.peer_publications.deinit(self.allocator);
         self.journal.deinit();
         self.book.deinit();
+        self.election.deinit();
     }
 };
 
@@ -467,7 +559,6 @@ pub fn main() !void {
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
     const member_id = envInt("CLUSTER_MEMBER_ID", 0);
-    const leader_member_id = envInt("CLUSTER_LEADER_MEMBER_ID", 0);
     const port = envInt("INGRESS_PORT", 9010 + member_id);
     // MediaDriver currently exposes one receive socket. Keep the internal stream
     // on the ingress port by default; deployments may override this only when
@@ -476,7 +567,6 @@ pub fn main() !void {
     const aeron_dir = env("AERON_DIR", "/dev/shm/aeron");
     const endpoints = env("CLUSTER_ENDPOINTS", "0=zig-node-0:9010,1=zig-node-1:9011,2=zig-node-2:9012");
     const internal_endpoints = env("CLUSTER_INTERNAL_ENDPOINTS", "0=zig-node-0:9010,1=zig-node-1:9011,2=zig-node-2:9012");
-    const election_timeout_ms = @as(i64, @intCast(envInt("ELECTION_TIMEOUT_MS", 5_000)));
     const ingress_channel = try std.fmt.allocPrint(allocator, "aeron:udp?endpoint=0.0.0.0:{d}", .{port});
     defer allocator.free(ingress_channel);
     const internal_channel = try std.fmt.allocPrint(allocator, "aeron:udp?endpoint=0.0.0.0:{d}", .{internal_port});
@@ -517,24 +607,24 @@ pub fn main() !void {
     errdefer book.deinit();
     var journal = try Journal.init(allocator, &book, journal_path);
     errdefer journal.deinit();
-    const now_ms = aeron.time.milliTimestamp();
+    var election = try Election.init(allocator, member_id, CLUSTER_SIZE);
+    errdefer election.deinit();
+    election.log_position = @intCast(journal.replayed_orders);
     var node = Node{
         .allocator = allocator,
         .aeron = &client,
         .member_id = member_id,
-        .leader_member_id = leader_member_id,
+        .election = election,
         .endpoints = endpoints,
         .book = book,
         .journal = journal,
         .peer_publications = peer_publications,
         .internal_subscription_request_id = internal_subscription_request,
-        .last_leader_heartbeat_ms = now_ms,
-        .election_timeout_ms = election_timeout_ms,
     };
     defer node.deinit();
 
     std.debug.print("ZIG_CLUSTER_REPLAY member={d} orders={d} path={s}\n", .{ member_id, journal.replayed_orders, journal_path });
-    std.debug.print("ZIG_CLUSTER_READY member={d} leader={d} ingress={s} internal={s}\n", .{ member_id, leader_member_id, ingress_channel, internal_channel });
+    std.debug.print("ZIG_CLUSTER_READY member={d} leader={d} ingress={s} internal={s}\n", .{ member_id, node.election.leaderMemberId(), ingress_channel, internal_channel });
     while (true) {
         _ = client.doWork();
         _ = client.poll(subscription_request, onFragment, @ptrCast(&node), 100);

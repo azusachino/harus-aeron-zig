@@ -25,6 +25,7 @@ fn runElection(candidate: *ConsensusModule, voter: *ConsensusModule, start_ns: i
         candidate.election.leaderShipTermId(),
         candidate.election.log_position,
         candidate.ctx.member_id,
+        ballot_time,
     );
     if (!granted) return error.VoteNotGranted;
     candidate.election.onVote(candidate.election.candidate_term_id, candidate.ctx.member_id, voter.ctx.member_id, true);
@@ -124,6 +125,7 @@ test "cluster integration: new leader continues after leader death" {
         node1.election.leaderShipTermId(),
         node1.election.log_position,
         1,
+        node1_ballot_time,
     );
     try std.testing.expect(granted);
     node1.election.onVote(node1.election.candidate_term_id, 1, 2, true);

@@ -99,6 +99,7 @@ test "Election: follower receives RequestVote while candidate" {
         candidate.leader_ship_term_id,
         candidate.log_position,
         challenger.member_id,
+        ballot_time,
     );
 
     // Candidate should accept vote and transition to follower_ballot
