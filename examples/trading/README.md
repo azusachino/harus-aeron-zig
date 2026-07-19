@@ -49,12 +49,10 @@ stress case:
 TRADING_SOAK_MESSAGES=1000 uv run scripts/trading.py soak --mode java
 ```
 
-The publisher now rotates terms and the sender follows rotated partitions, so
-the run advances past the earlier ~600-order ingress ceiling. The current
-remaining gap is on the Zig client's Java-cluster egress path: responses stop
-at about 681 orders and the client eventually reports `OfferTimeout` or
-`ResponseTimeout`. This remains an explicit 0.9 maturity gap rather than a
-passing soak.
+The publisher rotates terms with stream-identifying padding and the sender
+follows rotated partitions. The 1,000-order Java-cluster run now completes with
+`ZIG_CLUSTER_CLIENT_OK responses=1000`; sustained multi-hour soak evidence is
+still part of the unreleased 0.9 hardening work.
 
 Matching rules are deterministic:
 
