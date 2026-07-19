@@ -137,6 +137,7 @@ test "ReceiverTest: STATUS response uses the image source address and wire layou
     defer log_buffer.deinit();
     const hwm = storage.map.allocate(counters.RECEIVER_HWM, "hwm");
     const subscriber_position = storage.map.allocate(counters.SUBSCRIBER_POSITION, "subscriber");
+    storage.map.set(subscriber_position.counter_id, 65536);
     var image = driver.receiver.Image.init(42, 1001, 65536, 1408, 10, 11, &log_buffer, hwm, subscriber_position, source_address);
     defer image.deinit();
 

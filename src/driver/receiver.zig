@@ -37,6 +37,7 @@ pub const Image = struct {
     receiver_hwm: counters.CounterHandle, // highest term_offset seen
     subscriber_position: counters.CounterHandle, // client-owned image position counter
     rebuild_position: i64, // tracks gap filling progress
+    last_status_position: i64,
     source_address: net.Address,
     nak_state: NakState,
     last_activity_ns: i64,
@@ -70,6 +71,7 @@ pub const Image = struct {
             .receiver_hwm = receiver_hwm,
             .subscriber_position = subscriber_position,
             .rebuild_position = initial_rebuild_position,
+            .last_status_position = 0,
             .source_address = source_address,
             .nak_state = NakState.init(log_buffer.allocator, stream_id),
             .last_activity_ns = @as(i64, @intCast(time.nanoTimestamp())),
@@ -533,7 +535,7 @@ pub const Receiver = struct {
         var src_addr: net.Address = undefined;
         const bytes_read = self.recv_endpoint.recv(&self.recv_buf, &src_addr) catch |err| {
             if (err == error.WouldBlock) {
-                return 0;
+                return self.refreshSubscriberStatuses();
             }
             if (builtin.mode == .Debug) {
                 std.debug.print("[RECEIVER] recv error: {any}\n", .{err});
@@ -542,10 +544,42 @@ pub const Receiver = struct {
         };
 
         if (bytes_read == 0) {
-            return 0;
+            return self.refreshSubscriberStatuses();
         }
 
         return self.processDatagram(self.recv_buf[0..bytes_read], src_addr);
+    }
+
+    fn refreshSubscriberStatuses(self: *Receiver) i32 {
+        var work: i32 = 0;
+        const now_ns = @as(i64, @intCast(time.nanoTimestamp()));
+        self.mutex.lock();
+        const images = self.images.items;
+        for (images) |image| {
+            if (image.nak_state.shouldSend(now_ns)) {
+                self.mutex.unlock();
+                self.sendNak(image) catch |err| {
+                    std.log.err("receiver idle NAK send failed session_id={} stream_id={} err={}", .{ image.session_id, image.stream_id, err });
+                };
+                image.nak_state.clear();
+                work += 1;
+                self.mutex.lock();
+            }
+
+            const subscriber_position = self.counters_map.get(image.subscriber_position.counter_id);
+            const consumption_position = @min(image.rebuild_position, subscriber_position);
+            if (consumption_position > image.last_status_position) {
+                self.mutex.unlock();
+                self.sendStatus(image) catch |err| switch (err) {
+                    error.WouldBlock => {},
+                    else => std.log.err("receiver refresh STATUS send failed session_id={} stream_id={} err={}", .{ image.session_id, image.stream_id, err }),
+                };
+                work += 1;
+                self.mutex.lock();
+            }
+        }
+        self.mutex.unlock();
+        return work;
     }
 
     pub fn onAddSubscription(self: *Receiver, image: *Image) !void {
@@ -605,7 +639,11 @@ pub const Receiver = struct {
 
     // Send a STATUS message to source_address acknowledging receipt
     pub fn sendStatus(self: *Receiver, image: *Image) !void {
-        const consumption_position = image.rebuild_position;
+        // STATUS must describe the slowest client-visible position, not merely
+        // network receipt. Otherwise a fast source can lap the three-term ring
+        // and overwrite frames before the subscriber reads them.
+        const subscriber_position = self.counters_map.get(image.subscriber_position.counter_id);
+        const consumption_position = @min(image.rebuild_position, subscriber_position);
         const consumption_term_id = image.initial_term_id + @as(i32, @intCast(@divTrunc(consumption_position, @as(i64, @intCast(image.term_length)))));
         const consumption_term_offset = @as(i32, @intCast(@mod(consumption_position, @as(i64, @intCast(image.term_length)))));
 
@@ -623,6 +661,7 @@ pub const Receiver = struct {
 
         const status_bytes = @as([*]const u8, @ptrCast(&status))[0..protocol.StatusMessage.LENGTH];
         _ = try self.send_endpoint.send(image.source_address, status_bytes);
+        image.last_status_position = consumption_position;
     }
 };
 
