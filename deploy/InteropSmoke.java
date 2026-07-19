@@ -60,7 +60,8 @@ public final class InteropSmoke
 
             for (int i = 0; i < MESSAGE_COUNT; i++)
             {
-                awaitOffer(publication, buffer, payload.length);
+                awaitOffer(publication, buffer, payload.length, subscription, handler);
+                subscription.poll(handler, MESSAGE_COUNT);
             }
 
             awaitFragments(subscription, handler, state);
@@ -108,7 +109,12 @@ public final class InteropSmoke
         }
     }
 
-    private static void awaitOffer(final Publication publication, final UnsafeBuffer buffer, final int length)
+    private static void awaitOffer(
+        final Publication publication,
+        final UnsafeBuffer buffer,
+        final int length,
+        final Subscription subscription,
+        final FragmentHandler handler)
     {
         final long deadline = System.nanoTime() + TIMEOUT_NS;
         while (true)
@@ -125,6 +131,7 @@ public final class InteropSmoke
                     "Timed out offering publication data; last result=" + Publication.errorString(position));
             }
 
+            subscription.poll(handler, MESSAGE_COUNT);
             sleepQuietly(1);
         }
     }

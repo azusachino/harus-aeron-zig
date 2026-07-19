@@ -103,6 +103,35 @@ pub fn encodeSessionKeepAlive(buffer: []u8, leadership_term_id: i64, cluster_ses
     return 24;
 }
 
+/// Encode the SessionEvent sent by a cluster member during client connect.
+/// This is shared by the Zig cluster sample and the client decoder so the
+/// process-boundary example cannot drift from the Java-compatible layout.
+pub fn encodeSessionEvent(
+    buffer: []u8,
+    cluster_session_id: i64,
+    correlation_id: i64,
+    leadership_term_id: i64,
+    leader_member_id: i32,
+    code: EventCode,
+    detail: []const u8,
+) !usize {
+    const block_length: usize = 44;
+    const total = MESSAGE_HEADER_LENGTH + block_length + 4 + detail.len;
+    if (buffer.len < total) return error.BufferTooSmall;
+    if (detail.len > std.math.maxInt(u32)) return error.PayloadTooLarge;
+    try encodeMessageHeader(buffer, @intCast(block_length), .session_event, SCHEMA_VERSION);
+    write(i64, buffer[8..16], cluster_session_id);
+    write(i64, buffer[16..24], correlation_id);
+    write(i64, buffer[24..32], leadership_term_id);
+    write(i32, buffer[32..36], leader_member_id);
+    write(i32, buffer[36..40], @intFromEnum(code));
+    write(i32, buffer[40..44], PROTOCOL_SEMANTIC_VERSION);
+    write(i64, buffer[44..52], 5_000_000_000);
+    write(u32, buffer[52..56], @intCast(detail.len));
+    @memcpy(buffer[56 .. 56 + detail.len], detail);
+    return total;
+}
+
 pub fn encodeSessionCloseRequest(buffer: []u8, leadership_term_id: i64, cluster_session_id: i64) !usize {
     if (buffer.len < MESSAGE_HEADER_LENGTH + 16) return error.BufferTooSmall;
     try encodeMessageHeader(buffer, 16, .session_close_request, SCHEMA_VERSION);
@@ -231,4 +260,16 @@ test "session event decoder follows SBE fixed block and var data" {
     try std.testing.expectEqual(@as(i64, 99), event.correlation_id);
     try std.testing.expectEqual(EventCode.ok, event.code);
     try std.testing.expectEqualStrings("ok", event.detail);
+}
+
+test "session event encoder round trips the Java-compatible layout" {
+    var buffer: [128]u8 = undefined;
+    const length = try encodeSessionEvent(&buffer, 12, 99, 4, 1, .ok, "ready");
+    const event = try decodeSessionEvent(buffer[0..length]);
+    try std.testing.expectEqual(@as(i64, 12), event.cluster_session_id);
+    try std.testing.expectEqual(@as(i64, 99), event.correlation_id);
+    try std.testing.expectEqual(@as(i64, 4), event.leadership_term_id);
+    try std.testing.expectEqual(@as(i32, 1), event.leader_member_id);
+    try std.testing.expectEqual(EventCode.ok, event.code);
+    try std.testing.expectEqualStrings("ready", event.detail);
 }

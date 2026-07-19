@@ -37,6 +37,11 @@ public final class TradingOrderBookTest
             new TradingOrderBook.Order(7, TradingOrderBook.Side.BID, 99, 2));
         require(result.filledQuantity() == 0 && result.restingQuantity() == 2, "edge resting order");
         require(book.bestAsk() == null && book.bestBid().priceTicks() == 99, "edge book sides");
+
+        book.submit(new TradingOrderBook.Order(8, TradingOrderBook.Side.ASK, 100, 1));
+        book.submit(new TradingOrderBook.Order(9, TradingOrderBook.Side.ASK, 100, 1));
+        book.submit(new TradingOrderBook.Order(10, TradingOrderBook.Side.BID, 100, 1));
+        require(book.bestAsk().orderId() == 9, "equal-price FIFO");
     }
 
     private static void expectFailure(final Runnable action)

@@ -1,0 +1,49 @@
+services:
+  java-node-0:
+    build:
+      context: ../..
+      dockerfile: deploy/Containerfile.java-trading-cluster
+    command: ["--add-opens", "java.base/jdk.internal.misc=ALL-UNNAMED", "--add-opens", "java.base/java.util.zip=ALL-UNNAMED", "-cp", "/aeron-all.jar:/trading", "trading.JavaTradingClusterNode"]
+    environment:
+      CLUSTER_MEMBER_ID: "0"
+      AERON_DIR: /dev/shm/aeron
+      ARCHIVE_DIR: /data/archive
+      CLUSTER_DIR: /data/cluster
+      CLUSTER_MEMBERS: "0,java-node-0:9010,java-node-0:9011,java-node-0:9012,java-node-0:9013,java-node-0:8010|1,java-node-1:9010,java-node-1:9011,java-node-1:9012,java-node-1:9013,java-node-1:8010|2,java-node-2:9010,java-node-2:9011,java-node-2:9012,java-node-2:9013,java-node-2:8010"
+    tmpfs:
+      - /dev/shm:exec,size=1g
+    volumes:
+      - java_node_0:/data
+    networks: [trading]
+
+  java-node-1:
+    extends: java-node-0
+    environment:
+      CLUSTER_MEMBER_ID: "1"
+      AERON_DIR: /dev/shm/aeron
+      ARCHIVE_DIR: /data/archive
+      CLUSTER_DIR: /data/cluster
+      CLUSTER_MEMBERS: "0,java-node-0:9010,java-node-0:9011,java-node-0:9012,java-node-0:9013,java-node-0:8010|1,java-node-1:9010,java-node-1:9011,java-node-1:9012,java-node-1:9013,java-node-1:8010|2,java-node-2:9010,java-node-2:9011,java-node-2:9012,java-node-2:9013,java-node-2:8010"
+    volumes:
+      - java_node_1:/data
+
+  java-node-2:
+    extends: java-node-0
+    environment:
+      CLUSTER_MEMBER_ID: "2"
+      AERON_DIR: /dev/shm/aeron
+      ARCHIVE_DIR: /data/archive
+      CLUSTER_DIR: /data/cluster
+      CLUSTER_MEMBERS: "0,java-node-0:9010,java-node-0:9011,java-node-0:9012,java-node-0:9013,java-node-0:8010|1,java-node-1:9010,java-node-1:9011,java-node-1:9012,java-node-1:9013,java-node-1:8010|2,java-node-2:9010,java-node-2:9011,java-node-2:9012,java-node-2:9013,java-node-2:8010"
+    volumes:
+      - java_node_2:/data
+
+networks:
+  trading:
+    name: aeron-trading
+    driver: bridge
+
+volumes:
+  java_node_0:
+  java_node_1:
+  java_node_2:

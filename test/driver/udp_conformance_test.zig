@@ -165,7 +165,7 @@ test "ReceiverTest: STATUS response uses the image source address and wire layou
     try std.testing.expectEqual(@as(i32, 1001), status.stream_id);
     try std.testing.expectEqual(@as(i32, 11), status.consumption_term_id);
     try std.testing.expectEqual(@as(i32, 0), status.consumption_term_offset);
-    try std.testing.expectEqual(@as(i32, 16384), status.receiver_window);
+    try std.testing.expectEqual(@as(i32, 65536), status.receiver_window);
 }
 
 test "FlowControlTest: unicast limit is receiver position plus window" {

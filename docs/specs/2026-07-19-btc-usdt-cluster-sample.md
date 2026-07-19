@@ -12,10 +12,13 @@ Each mode is a three-member cluster plus clients:
 | --- | --- | --- | --- |
 | `zig` | three Zig cluster nodes | Zig and Java clients | validate the Zig cluster process boundary |
 | `java` | three Java Aeron Cluster nodes | Java and Zig clients | validate against upstream Aeron Cluster (baseline now green) |
-| `mixed` | two Java members and one Zig member | Java and Zig clients | prove wire-compatible election, log, snapshot, and client behavior |
+| `mixed` | two Java members and one Zig consensus/log observer | Java and Zig clients | prove consensus/log ingress and client interoperability; full service/replay parity remains open |
 
-The mixed mode is the acceptance target. A Java client talking to a Zig
-MediaDriver is only a lower-level prerequisite; it is not cluster evidence.
+The mixed mode is the acceptance target. Its current smoke proves Java/Zig
+consensus/log-stream exchange and client traffic through the Java leader. The
+Zig member journals received Java log frames and survives a member restart. A Java
+client talking to a standalone Zig MediaDriver is only a lower-level
+prerequisite; it is not full mixed-cluster evidence.
 
 ## Client flow
 
@@ -42,8 +45,9 @@ failure between append and commit.
 ## Java baseline evidence
 
 The Java baseline is implemented under `examples/trading/java/` and runs with
-`deploy/trading/docker-compose.java.yml`. It uses `aeron-all` 1.50.4 from the
-vendored-compatible Maven artifact, `ClusteredMediaDriver`,
+the split Compose files under `deploy/trading/`. It uses the authentic
+`aeron-all` artifact built from the vendored `vendor/aeron` source,
+`ClusteredMediaDriver`,
 `ClusteredServiceContainer`, and `AeronCluster`.
 
 The verified smoke result is three ready members and three client responses:
@@ -62,18 +66,42 @@ a routable client egress hostname.
 
 ## Current implementation boundary
 
-The repository's Zig `--cluster` entrypoint currently owns one local
-`ConsensusModule`, and `examples/cluster_demo.zig` simulates three nodes with
-direct calls. Neither is yet a networked three-process cluster. The Java
-Compose topology is the working reference; Zig and mixed Compose files remain
-blocked until the Zig cluster transport, archive/replay boundary, and
-Java-compatible cluster protocol are implemented.
+The repository's Zig `--cluster` entrypoint still owns one local
+`ConsensusModule`, and `examples/cluster_demo.zig` remains an in-process
+simulation. The trading sample now also has a networked three-process Zig
+topology (`zig_cluster_node.zig`) that speaks the Java-compatible client
+session/egress protocol and passes Java/Zig client smokes. It deliberately uses
+a fixed leader and a local order book backed by an append-only journal. Peer
+publications and internal heartbeat/order framing are wired. The source-aware receiver path has now been
+verified with a three-member smoke: node 1 becomes leader after node 0 stops,
+node 2 follows node 1's heartbeat, and replicated orders are observed on node
+2. This is deterministic sample-level failover, not Raft/consensus parity.
+Each Zig member now persists accepted order inputs to its named Compose volume
+at `/data/orders.log` and replays them before `ZIG_CLUSTER_READY`; a restart
+proof restored six replicated orders on member 1. This is an explicit durable
+sample journal, not Aeron Archive replay or a snapshot format. Durable
+snapshots are still not implemented in this sample. The three-process smoke does support multiple concurrent client
+sessions and follower-to-leader redirect. The Java Compose topology remains the
+upstream reference; mixed mode now has a consensus/client smoke, while Zig
+member-to-member log application, catchup, archive, ingress ownership, and
+replay boundaries remain open. The exact SBE/member-protocol gap is recorded in
+`docs/investigations/2026-07-19-mixed-cluster-boundary.md`.
 
 Run the orchestration planner with:
 
 ```bash
 uv run scripts/trading.py plan
 ```
+
+The pure-Zig durable replay gate is:
+
+```bash
+TRADING_SOAK_MESSAGES=3 uv run scripts/trading.py replay-proof --mode zig
+```
+
+The runner restarts member 1 without removing its named volume and requires
+`ZIG_CLUSTER_REPLAY member=1 orders=6` before it passes. This proves the sample
+journal boundary, not Aeron Archive or snapshot parity.
 
 Once a topology is real, use `--mode zig`, `--mode java`, or `--mode mixed`
 with `config`, `up`, and `down`.

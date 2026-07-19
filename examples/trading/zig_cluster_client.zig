@@ -43,6 +43,11 @@ fn envUsize(comptime name: [:0]const u8, fallback: usize) usize {
     return std.fmt.parseInt(usize, std.mem.span(value), 10) catch fallback;
 }
 
+fn envI64(comptime name: [:0]const u8, fallback: i64) i64 {
+    const value = std.c.getenv(name) orelse return fallback;
+    return std.fmt.parseInt(i64, std.mem.span(value), 10) catch fallback;
+}
+
 fn envBool(comptime name: [:0]const u8) bool {
     const value = std.c.getenv(name) orelse return false;
     return std.mem.eql(u8, std.mem.span(value), "1") or std.mem.eql(u8, std.mem.span(value), "true");
@@ -64,16 +69,27 @@ const PerfStats = struct {
     offer_ns: i128 = 0,
 };
 
+fn printMissingResponses(responses: *const Responses) void {
+    var missing: usize = 0;
+    for (responses.seen, 0..) |was_seen, index| {
+        if (!was_seen and missing < 16) {
+            std.debug.print("ZIG_CLUSTER_CLIENT_MISSING order_id={d}\n", .{responses.expected_start + index});
+            missing += 1;
+        }
+    }
+}
+
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     const aeron_dir = envOr("AERON_DIR", "/tmp/aeron-zig-cluster-client");
-    const ingress_endpoint = envOr("INGRESS_ENDPOINT", "java-node-0:9010");
+    const ingress_endpoints = envOr(
+        "INGRESS_ENDPOINTS",
+        envOr("INGRESS_ENDPOINT", "java-node-0:9010,java-node-1:9010,java-node-2:9010"),
+    );
     const response_channel = envOr("RESPONSE_CHANNEL", "aeron:udp?endpoint=zig-client:0");
-    const ingress_channel = try std.fmt.allocPrint(allocator, "aeron:udp?endpoint={s}", .{ingress_endpoint});
-    defer allocator.free(ingress_channel);
 
     const driver = try aeron.driver.MediaDriver.create(allocator, .{ .aeron_dir = aeron_dir });
     try driver.start();
@@ -95,14 +111,40 @@ pub fn main() !void {
         _ = std.c.nanosleep(&delay, null);
     }
 
-    var cluster = try aeron.cluster.client.AeronCluster.connect(.{
-        .aeron = &client,
-        .allocator = allocator,
-        .ingress_channel = ingress_channel,
-        .egress_channel = response_channel,
-        .response_channel = response_channel,
-        .max_connect_iterations = envUsize("CONNECT_MAX_ITERATIONS", 100_000),
-    });
+    var cluster: aeron.cluster.client.AeronCluster = undefined;
+    var connected = false;
+    var last_connect_error: anyerror = error.ConnectTimeout;
+    var endpoint_iterator = std.mem.splitScalar(u8, ingress_endpoints, ',');
+    while (endpoint_iterator.next()) |ingress_endpoint| {
+        if (ingress_endpoint.len == 0) continue;
+        const ingress_channel = try std.fmt.allocPrint(allocator, "aeron:udp?endpoint={s}", .{ingress_endpoint});
+        defer allocator.free(ingress_channel);
+        cluster = aeron.cluster.client.AeronCluster.connect(.{
+            .aeron = &client,
+            .allocator = allocator,
+            .ingress_channel = ingress_channel,
+            .egress_channel = response_channel,
+            .response_channel = response_channel,
+            .max_connect_iterations = envUsize("CONNECT_MAX_ITERATIONS", 100_000),
+            .connect_timeout_ms = envI64("CONNECT_TIMEOUT_MS", 30_000),
+        }) catch |err| {
+            last_connect_error = err;
+            std.debug.print("ZIG_CLUSTER_CLIENT_CONNECT_RETRY error={s} ingress={s} status_received={d} status_sent={d} data_frames={d} data_before_image={d} insert_failures={d} nak_sent={d}\n", .{
+                @errorName(err),
+                ingress_endpoint,
+                driver.receiver_agent.statusMessagesReceived(),
+                driver.receiver_agent.statusMessagesSent(),
+                driver.receiver_agent.dataFramesTotal(),
+                driver.receiver_agent.dataFramesBeforeImage(),
+                driver.receiver_agent.insertFailures(),
+                driver.receiver_agent.nakFramesSent(),
+            });
+            continue;
+        };
+        connected = true;
+        break;
+    }
+    if (!connected) return last_connect_error;
     defer cluster.close();
 
     const order_count = envUsize("ORDER_COUNT", 3);
@@ -149,7 +191,76 @@ pub fn main() !void {
                 last_keep_alive_ms = now_ms;
             }
             const offer_start_ns = if (trace_perf) aeron.time.nanoTimestamp() else 0;
-            const offer_result = try cluster.offer(order);
+            const offer_result = cluster.offer(order) catch |err| {
+                if (err == error.ClusterSessionClosed) {
+                    std.debug.print("ZIG_CLUSTER_CLIENT_SESSION_CLOSED sent={d} responses={d} malformed={d} duplicate={d} ingress_position={d} publisher_limit={d} egress_position={d} invalid_egress={d} buffer_too_small={d} invalid_template={d} ignored_egress={d} last_ignored_template={d} last_ignored_length={d} last_ignored_bytes={any} zero_payload_frames={d} padding_frames={d} last_padding_term={d} last_padding_offset={d} last_padding_length={d} term_buffer_clears={d} last_clear_old_term={d} last_clear_new_term={d} last_clear_subscriber={d}\n", .{
+                        index,
+                        responses.count,
+                        responses.malformed,
+                        responses.duplicate,
+                        cluster.ingress_publication.position(),
+                        cluster.ingress_publication.publisherLimit(),
+                        cluster.egressPosition(),
+                        cluster.egressInvalidCount(),
+                        cluster.egressBufferTooSmallCount(),
+                        cluster.egressInvalidTemplateCount(),
+                        cluster.egressIgnoredCount(),
+                        cluster.egressLastIgnoredTemplate(),
+                        cluster.egressLastIgnoredLength(),
+                        cluster.egressLastIgnoredBytes(),
+                        driver.receiver_agent.zeroPayloadFrames(),
+                        driver.receiver_agent.paddingFramesReceived(),
+                        driver.receiver_agent.lastPaddingTermId(),
+                        driver.receiver_agent.lastPaddingTermOffset(),
+                        driver.receiver_agent.lastPaddingLength(),
+                        driver.receiver_agent.termBufferClears(),
+                        driver.receiver_agent.lastClearOldTermId(),
+                        driver.receiver_agent.lastClearNewTermId(),
+                        driver.receiver_agent.lastClearSubscriberPosition(),
+                    });
+                    std.debug.print("ZIG_CLUSTER_CLIENT_STATUS_DIAGNOSTICS status_received={d} status_applied={d} status_sent={d} status_last_session={d} status_last_stream={d} status_last_term={d} status_last_offset={d} status_last_window={d} status_last_limit={d} receiver_last_stream={d} receiver_last_position={d} receiver_last_rebuild={d} receiver_last_subscriber={d} data_frames={d} data_before_image={d} insert_failures={d} nak_sent={d}\n", .{
+                        driver.receiver_agent.statusMessagesReceived(),
+                        driver.sender_agent.statusMessagesApplied(),
+                        driver.receiver_agent.statusMessagesSent(),
+                        driver.sender_agent.lastStatusSessionId(),
+                        driver.sender_agent.lastStatusStreamId(),
+                        driver.sender_agent.lastStatusTermId(),
+                        driver.sender_agent.lastStatusTermOffset(),
+                        driver.sender_agent.lastStatusWindow(),
+                        driver.sender_agent.lastStatusLimit(),
+                        driver.receiver_agent.lastStatusStreamId(),
+                        driver.receiver_agent.lastStatusPosition(),
+                        driver.receiver_agent.lastStatusRebuildPosition(),
+                        driver.receiver_agent.lastStatusSubscriberPosition(),
+                        driver.receiver_agent.dataFramesTotal(),
+                        driver.receiver_agent.dataFramesBeforeImage(),
+                        driver.receiver_agent.insertFailures(),
+                        driver.receiver_agent.nakFramesSent(),
+                    });
+                    std.debug.print("ZIG_CLUSTER_CLIENT_SENDER_DIAGNOSTICS data_frames_sent={d} last_sent_term={d} last_sent_offset={d} last_sent_length={d} stale_frames_skipped={d} last_expected_term={d} last_expected_offset={d} retransmit_requests={d} retransmits_sent={d} last_retransmit_term={d} last_retransmit_offset={d} last_retransmit_length={d} last_retransmit_source_port={d} last_retransmit_frame_term={d} last_retransmit_frame_offset={d} last_retransmit_frame_session={d} last_retransmit_frame_stream={d} last_retransmit_frame_length={d}\n", .{
+                        driver.sender_agent.dataFramesSent(),
+                        driver.sender_agent.lastSentTermId(),
+                        driver.sender_agent.lastSentTermOffset(),
+                        driver.sender_agent.lastSentFrameLength(),
+                        driver.sender_agent.staleFramesSkipped(),
+                        driver.sender_agent.lastExpectedTermId(),
+                        driver.sender_agent.lastExpectedTermOffset(),
+                        driver.sender_agent.retransmitRequests(),
+                        driver.sender_agent.retransmitsSent(),
+                        driver.sender_agent.lastRetransmitTermId(),
+                        driver.sender_agent.lastRetransmitTermOffset(),
+                        driver.sender_agent.lastRetransmitLength(),
+                        driver.sender_agent.lastRetransmitSourcePort(),
+                        driver.sender_agent.lastRetransmitFrameTermId(),
+                        driver.sender_agent.lastRetransmitFrameTermOffset(),
+                        driver.sender_agent.lastRetransmitFrameSessionId(),
+                        driver.sender_agent.lastRetransmitFrameStreamId(),
+                        driver.sender_agent.lastRetransmitFrameLength(),
+                    });
+                    printMissingResponses(&responses);
+                }
+                return err;
+            };
             if (trace_perf) {
                 perf.offer_calls += 1;
                 perf.offer_ns += aeron.time.nanoTimestamp() - offer_start_ns;
@@ -162,7 +273,7 @@ pub fn main() !void {
                 const report_now_ms = aeron.time.milliTimestamp();
                 if (retry_started_ms == 0) retry_started_ms = report_now_ms;
                 if (report_now_ms - last_stall_report_ms >= 1_000) {
-                    std.debug.print("ZIG_CLUSTER_CLIENT_STALL sent={d} result={s} responses={d} malformed={d} duplicate={d} ingress_position={d} publisher_limit={d} egress_position={d} invalid_egress={d} buffer_too_small={d} invalid_template={d} last_invalid_template={d} last_invalid_bytes={any} ignored_egress={d} last_ignored_template={d} last_ignored_bytes={any} session_events={d} last_session_event={any} session_detail={s} new_leader_events={d} status_received={d} status_applied={d} status_sent={d} connected={any} retry_ms={d}\n", .{
+                    std.debug.print("ZIG_CLUSTER_CLIENT_STALL sent={d} result={s} responses={d} malformed={d} duplicate={d} ingress_position={d} publisher_limit={d} egress_position={d} invalid_egress={d} buffer_too_small={d} invalid_template={d} last_invalid_template={d} last_invalid_bytes={any} ignored_egress={d} last_ignored_template={d} last_ignored_bytes={any} session_events={d} last_session_event={any} session_detail={s} new_leader_events={d} status_received={d} status_applied={d} status_sent={d} status_last_session={d} status_last_stream={d} status_last_term={d} status_last_offset={d} status_last_window={d} status_last_limit={d} connected={any} retry_ms={d}\n", .{
                         index + 1,
                         @tagName(offer_result),
                         responses.count,
@@ -186,6 +297,12 @@ pub fn main() !void {
                         driver.receiver_agent.statusMessagesReceived(),
                         driver.sender_agent.statusMessagesApplied(),
                         driver.receiver_agent.statusMessagesSent(),
+                        driver.sender_agent.lastStatusSessionId(),
+                        driver.sender_agent.lastStatusStreamId(),
+                        driver.sender_agent.lastStatusTermId(),
+                        driver.sender_agent.lastStatusTermOffset(),
+                        driver.sender_agent.lastStatusWindow(),
+                        driver.sender_agent.lastStatusLimit(),
                         cluster.ingress_publication.isConnected(),
                         report_now_ms - retry_started_ms,
                     });
@@ -231,7 +348,7 @@ pub fn main() !void {
     }
     if (responses.count != order_count) {
         if (trace_perf) {
-            std.debug.print("ZIG_CLUSTER_CLIENT_RESPONSE_TIMEOUT responses={d} expected={d} malformed={d} duplicate={d} egress_position={d} invalid_egress={d} buffer_too_small={d} invalid_template={d} last_invalid_template={d} last_invalid_bytes={any} ignored_egress={d} last_ignored_template={d} last_ignored_length={d} last_ignored_bytes={any} zero_payload_frames={d} status_received={d} status_applied={d} status_sent={d}\n", .{
+            std.debug.print("ZIG_CLUSTER_CLIENT_RESPONSE_TIMEOUT responses={d} expected={d} malformed={d} duplicate={d} egress_position={d} invalid_egress={d} buffer_too_small={d} invalid_template={d} last_invalid_template={d} last_invalid_bytes={any} ignored_egress={d} last_ignored_template={d} last_ignored_length={d} last_ignored_bytes={any} zero_payload_frames={d} padding_frames={d} last_padding_term={d} last_padding_offset={d} last_padding_length={d} term_buffer_clears={d} last_clear_old_term={d} last_clear_new_term={d} last_clear_subscriber={d} receiver_last_stream={d} receiver_last_position={d} receiver_last_rebuild={d} receiver_last_subscriber={d} status_received={d} status_applied={d} status_sent={d}\n", .{
                 responses.count,
                 order_count,
                 responses.malformed,
@@ -247,17 +364,47 @@ pub fn main() !void {
                 cluster.egressLastIgnoredLength(),
                 cluster.egressLastIgnoredBytes(),
                 driver.receiver_agent.zeroPayloadFrames(),
+                driver.receiver_agent.paddingFramesReceived(),
+                driver.receiver_agent.lastPaddingTermId(),
+                driver.receiver_agent.lastPaddingTermOffset(),
+                driver.receiver_agent.lastPaddingLength(),
+                driver.receiver_agent.termBufferClears(),
+                driver.receiver_agent.lastClearOldTermId(),
+                driver.receiver_agent.lastClearNewTermId(),
+                driver.receiver_agent.lastClearSubscriberPosition(),
+                driver.receiver_agent.lastStatusStreamId(),
+                driver.receiver_agent.lastStatusPosition(),
+                driver.receiver_agent.lastStatusRebuildPosition(),
+                driver.receiver_agent.lastStatusSubscriberPosition(),
                 driver.receiver_agent.statusMessagesReceived(),
                 driver.sender_agent.statusMessagesApplied(),
                 driver.receiver_agent.statusMessagesSent(),
             });
-            var missing: usize = 0;
-            for (response_seen, 0..) |was_seen, index| {
-                if (!was_seen and missing < 16) {
-                    std.debug.print("ZIG_CLUSTER_CLIENT_MISSING order_id={d}\n", .{1_000_001 + index});
-                    missing += 1;
-                }
-            }
+            std.debug.print("ZIG_CLUSTER_CLIENT_STATUS_DIAGNOSTICS status_received={d} status_applied={d} status_sent={d} receiver_last_stream={d} receiver_last_position={d} receiver_last_rebuild={d} receiver_last_subscriber={d} data_frames={d} data_before_image={d} insert_failures={d} nak_sent={d}\n", .{
+                driver.receiver_agent.statusMessagesReceived(),
+                driver.sender_agent.statusMessagesApplied(),
+                driver.receiver_agent.statusMessagesSent(),
+                driver.receiver_agent.lastStatusStreamId(),
+                driver.receiver_agent.lastStatusPosition(),
+                driver.receiver_agent.lastStatusRebuildPosition(),
+                driver.receiver_agent.lastStatusSubscriberPosition(),
+                driver.receiver_agent.dataFramesTotal(),
+                driver.receiver_agent.dataFramesBeforeImage(),
+                driver.receiver_agent.insertFailures(),
+                driver.receiver_agent.nakFramesSent(),
+            });
+            std.debug.print("ZIG_CLUSTER_CLIENT_SENDER_DIAGNOSTICS data_frames_sent={d} last_sent_term={d} last_sent_offset={d} last_sent_length={d} retransmit_requests={d} retransmits_sent={d} last_retransmit_term={d} last_retransmit_offset={d} last_retransmit_length={d}\n", .{
+                driver.sender_agent.dataFramesSent(),
+                driver.sender_agent.lastSentTermId(),
+                driver.sender_agent.lastSentTermOffset(),
+                driver.sender_agent.lastSentFrameLength(),
+                driver.sender_agent.retransmitRequests(),
+                driver.sender_agent.retransmitsSent(),
+                driver.sender_agent.lastRetransmitTermId(),
+                driver.sender_agent.lastRetransmitTermOffset(),
+                driver.sender_agent.lastRetransmitLength(),
+            });
+            printMissingResponses(&responses);
         }
         return error.ResponseTimeout;
     }
@@ -265,6 +412,12 @@ pub fn main() !void {
     const orders_per_sec = order_count * 1000 / @max(1, total_ms);
     std.debug.print("ZIG_CLUSTER_CLIENT_OK responses={d} publish_ms={d} total_ms={d} orders_per_sec={d}\n", .{ responses.count, publish_ms, total_ms, orders_per_sec });
     if (trace_perf) {
+        std.debug.print("ZIG_CLUSTER_CLIENT_TRANSPORT_DIAGNOSTICS data_frames_sent={d} stale_frames_skipped={d} retransmit_requests={d} retransmits_sent={d}\n", .{
+            driver.sender_agent.dataFramesSent(),
+            driver.sender_agent.staleFramesSkipped(),
+            driver.sender_agent.retransmitRequests(),
+            driver.sender_agent.retransmitsSent(),
+        });
         std.debug.print("ZIG_CLUSTER_CLIENT_TRACE offers={d} ok={d} not_connected={d} back_pressure={d} admin_action={d} yields={d} do_work_calls={d} do_work_items={d} do_work_ms={d} poll_calls={d} poll_fragments={d} poll_ms={d} offer_ms={d}\n", .{
             perf.offer_calls,
             perf.offers_ok,

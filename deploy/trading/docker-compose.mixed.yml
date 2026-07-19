@@ -5,16 +5,16 @@ services:
       dockerfile: deploy/Containerfile.java-trading-cluster
     command: ["--add-opens", "java.base/jdk.internal.misc=ALL-UNNAMED", "--add-opens", "java.base/java.util.zip=ALL-UNNAMED", "-cp", "/aeron-all.jar:/trading", "trading.JavaTradingClusterClient"]
     environment:
-      INGRESS_ENDPOINTS: "${INGRESS_ENDPOINTS:-0=java-node-0:9010,1=java-node-1:9010,2=java-node-2:9010}"
+      INGRESS_ENDPOINTS: "0=java-node-0:9010,1=java-node-1:9010"
       ORDER_COUNT: "${ORDER_COUNT:-3}"
-      START_DELAY_MS: "${START_DELAY_MS:-0}"
+      START_DELAY_MS: "${START_DELAY_MS:-5000}"
       HOLD_OPEN_MS: "${HOLD_OPEN_MS:-0}"
       OFFER_TIMEOUT_MS: "${OFFER_TIMEOUT_MS:-60000}"
       RESPONSE_TIMEOUT_MS: "${RESPONSE_TIMEOUT_MS:-30000}"
       QUIET: "${QUIET:-0}"
     tmpfs:
       - /dev/shm:exec,size=1g
-    networks: [trading]
+    networks: [mixed]
 
   zig-client:
     build:
@@ -22,21 +22,20 @@ services:
       dockerfile: deploy/Containerfile.zig-trading-client
     environment:
       AERON_DIR: /dev/shm/aeron
-      INGRESS_ENDPOINTS: "${INGRESS_ENDPOINTS:-java-node-0:9010,java-node-1:9010,java-node-2:9010}"
-      RESPONSE_CHANNEL: "${RESPONSE_CHANNEL:-aeron:udp?endpoint=zig-client:0}"
+      INGRESS_ENDPOINTS: "java-node-0:9010,java-node-1:9010"
+      RESPONSE_CHANNEL: "aeron:udp?endpoint=zig-client:0"
       ORDER_COUNT: "${ORDER_COUNT:-3}"
-      START_DELAY_MS: "${START_DELAY_MS:-0}"
+      START_DELAY_MS: "${START_DELAY_MS:-5000}"
+      CONNECT_TIMEOUT_MS: "${CONNECT_TIMEOUT_MS:-30000}"
+      CONNECT_MAX_ITERATIONS: "${CONNECT_MAX_ITERATIONS:-10000000}"
       OFFER_TIMEOUT_MS: "${OFFER_TIMEOUT_MS:-60000}"
       RESPONSE_TIMEOUT_MS: "${RESPONSE_TIMEOUT_MS:-30000}"
-      CONNECT_MAX_ITERATIONS: "${CONNECT_MAX_ITERATIONS:-100000}"
-      CONNECT_TIMEOUT_MS: "${CONNECT_TIMEOUT_MS:-30000}"
-      TRACE_PERF: "${TRACE_PERF:-0}"
       QUIET: "${QUIET:-0}"
     tmpfs:
       - /dev/shm:exec,size=1g
-    networks: [trading]
+    networks: [mixed]
 
 networks:
-  trading:
-    name: aeron-trading
+  mixed:
+    name: aeron-mixed
     external: true

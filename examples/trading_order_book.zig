@@ -60,9 +60,9 @@ pub const OrderBook = struct {
 
             if (matched == opposite.quantity) {
                 if (order.side == .bid) {
-                    _ = self.asks.swapRemove(match_index);
+                    _ = self.asks.orderedRemove(match_index);
                 } else {
-                    _ = self.bids.swapRemove(match_index);
+                    _ = self.bids.orderedRemove(match_index);
                 }
             } else {
                 opposite.quantity -= matched;
@@ -224,4 +224,15 @@ test "order book edge path leaves non-crossing orders resting" {
     try std.testing.expectEqual(@as(i64, 2), result.resting_quantity);
     try std.testing.expectEqual(@as(i64, 99), book.bestBid().?.price);
     try std.testing.expect(book.bestAsk() == null);
+}
+
+test "order book preserves FIFO at an equal price level" {
+    var book = OrderBook.init(std.testing.allocator);
+    defer book.deinit();
+
+    _ = try book.submit(.{ .order_id = 10, .side = .ask, .price = 100, .quantity = 1 });
+    _ = try book.submit(.{ .order_id = 11, .side = .ask, .price = 100, .quantity = 1 });
+    _ = try book.submit(.{ .order_id = 12, .side = .bid, .price = 100, .quantity = 1 });
+
+    try std.testing.expectEqual(@as(u64, 11), book.bestAsk().?.order_id);
 }

@@ -17,6 +17,11 @@ pub const STARTUP_CANVASS_TIMEOUT_NS: i64 = 5_000_000_000; // 5 seconds
 /// Leader heartbeat timeout for followers to detect leader failure
 pub const LEADER_HEARTBEAT_TIMEOUT_NS: i64 = 500_000_000; // 500ms
 
+/// Aeron uses NULL_VALUE (-1) for a member that has not written a leadership
+/// term yet. Keeping this sentinel is required for Java Cluster RequestVote
+/// comparisons during the initial election.
+pub const NULL_LEADERSHIP_TERM_ID: i64 = -1;
+
 // =============================================================================
 // ElectionState enum
 // =============================================================================
@@ -50,7 +55,7 @@ pub const MemberState = struct {
     /// Latest known log position from this member
     log_position: i64 = 0,
     /// Latest known leadership term from this member
-    leader_ship_term_id: i64 = 0,
+    leader_ship_term_id: i64 = NULL_LEADERSHIP_TERM_ID,
     /// Whether this member granted a vote in current ballot
     is_vote_granted: bool = false,
 };
@@ -99,7 +104,7 @@ pub const Election = struct {
             try members.append(allocator, .{
                 .member_id = @intCast(i),
                 .log_position = 0,
-                .leader_ship_term_id = 0,
+                .leader_ship_term_id = NULL_LEADERSHIP_TERM_ID,
                 .is_vote_granted = false,
             });
         }
@@ -109,7 +114,7 @@ pub const Election = struct {
             .member_id = member_id,
             .leader_member_id = -1,
             .candidate_term_id = 0,
-            .leader_ship_term_id = 0,
+            .leader_ship_term_id = NULL_LEADERSHIP_TERM_ID,
             .log_position = 0,
             .election_deadline_ns = 0,
             .cluster_members = members,
@@ -459,6 +464,16 @@ test "onRequestVote grants vote for higher term" {
     try std.testing.expectEqual(true, granted);
     try std.testing.expectEqual(ElectionState.follower_ballot, election.state);
     try std.testing.expectEqual(@as(i32, 1), election.leader_member_id);
+}
+
+test "onRequestVote grants Java's initial null log term" {
+    var election = try Election.init(std.testing.allocator, 2, 3);
+    defer election.deinit();
+
+    const granted = election.onRequestVote(2, NULL_LEADERSHIP_TERM_ID, 0, 1);
+
+    try std.testing.expect(granted);
+    try std.testing.expectEqual(ElectionState.follower_ballot, election.state);
 }
 
 test "onRequestVote rejects stale term" {

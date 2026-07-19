@@ -1,0 +1,4 @@
+FROM debian:bookworm-slim
+
+COPY zig-out/bin/zig-cluster-node /usr/local/bin/zig-cluster-node
+ENTRYPOINT ["/usr/local/bin/zig-cluster-node"]

@@ -1,0 +1,4 @@
+FROM debian:bookworm-slim
+
+COPY zig-out/bin/zig-consensus-member /usr/local/bin/zig-consensus-member
+ENTRYPOINT ["/usr/local/bin/zig-consensus-member"]

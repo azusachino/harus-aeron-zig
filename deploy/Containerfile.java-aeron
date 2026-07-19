@@ -1,0 +1,16 @@
+FROM eclipse-temurin:21-jdk-alpine AS builder
+COPY test/interop/aeron-all.jar /aeron-all.jar
+COPY deploy/InteropSmoke.java /src/InteropSmoke.java
+COPY deploy/CountersChecker.java /src/CountersChecker.java
+COPY deploy/MultiStreamSmoke.java /src/MultiStreamSmoke.java
+COPY deploy/ExclusivePublicationSmoke.java /src/ExclusivePublicationSmoke.java
+COPY deploy/ReconnectSmoke.java /src/ReconnectSmoke.java
+RUN mkdir -p /out && javac -cp /aeron-all.jar -d /out /src/InteropSmoke.java /src/CountersChecker.java /src/MultiStreamSmoke.java /src/ExclusivePublicationSmoke.java /src/ReconnectSmoke.java
+
+FROM eclipse-temurin:21-jre
+COPY --from=builder /aeron-all.jar /aeron-all.jar
+COPY --from=builder /out /interop
+COPY deploy/entrypoint-java.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENV MSG_COUNT=10
+ENTRYPOINT ["/entrypoint.sh"]

@@ -23,6 +23,10 @@ public final class BtcUsdtClusterService implements ClusteredService
     private final Deque<PendingResponse> pendingResponses = new ArrayDeque<>();
     private boolean responseRetryScheduled;
     private Cluster cluster;
+    private long sessionMessages;
+    private long responsesOffered;
+    private long responseBackPressure;
+    private long timerRetries;
 
     private record PendingResponse(ClientSession session, String value) {}
 
@@ -51,6 +55,14 @@ public final class BtcUsdtClusterService implements ClusteredService
         if (session == null)
         {
             return;
+        }
+
+        sessionMessages++;
+        if ((sessionMessages % 1000) == 0)
+        {
+            System.out.println("JAVA_CLUSTER_SERVICE_PROGRESS messages=" + sessionMessages +
+                " responses=" + responsesOffered + " back_pressure=" + responseBackPressure +
+                " timer_retries=" + timerRetries);
         }
 
         final String event = buffer.getStringWithoutLengthAscii(offset, length);
@@ -92,14 +104,23 @@ public final class BtcUsdtClusterService implements ClusteredService
         {
             final PendingResponse pending = pendingResponses.peekFirst();
             final int length = response.putStringWithoutLengthAscii(0, pending.value());
-            if (pending.session().offer(response, 0, length) < 0)
+            final long offerResult = pending.session().offer(response, 0, length);
+            if (offerResult < 0)
             {
+                responseBackPressure++;
+                if (responseBackPressure == 1 || (responseBackPressure % 1000) == 0)
+                {
+                    System.out.println("JAVA_CLUSTER_SERVICE_RESPONSE_BACK_PRESSURE messages=" + sessionMessages +
+                        " responses=" + responsesOffered + " back_pressure=" + responseBackPressure +
+                        " timer_retries=" + timerRetries + " result=" + offerResult);
+                }
                 if (cluster != null)
                 {
                     scheduleResponseRetry(cluster);
                 }
                 return;
             }
+            responsesOffered++;
             pendingResponses.removeFirst();
         }
 
@@ -127,6 +148,13 @@ public final class BtcUsdtClusterService implements ClusteredService
     {
         if (correlationId == RESPONSE_RETRY_TIMER_ID)
         {
+            timerRetries++;
+            if (timerRetries == 1 || (timerRetries % 1000) == 0)
+            {
+                System.out.println("JAVA_CLUSTER_SERVICE_TIMER_RETRY messages=" + sessionMessages +
+                    " responses=" + responsesOffered + " back_pressure=" + responseBackPressure +
+                    " timer_retries=" + timerRetries);
+            }
             responseRetryScheduled = false;
             drainResponses(cluster);
         }

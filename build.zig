@@ -334,6 +334,8 @@ pub fn build(b: *std.Build) void {
         .{ .name = "throughput-example", .path = "examples/throughput.zig" },
         .{ .name = "trading-order-book", .path = "examples/trading_order_book.zig" },
         .{ .name = "zig-cluster-client", .path = "examples/trading/zig_cluster_client.zig" },
+        .{ .name = "zig-cluster-node", .path = "examples/trading/zig_cluster_node.zig" },
+        .{ .name = "zig-consensus-member", .path = "examples/trading/zig_consensus_member.zig" },
     };
     const examples_step = b.step("examples", "Build all examples");
     for (example_files) |example| {
@@ -346,6 +348,7 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "aeron", .module = aeron_mod },
                     .{ .name = "agrona", .module = agrona_mod },
+                    .{ .name = "trading", .module = trading_example_mod },
                 },
             }),
         });

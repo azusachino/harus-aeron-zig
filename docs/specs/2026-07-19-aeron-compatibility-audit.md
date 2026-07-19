@@ -37,8 +37,13 @@ The compatibility claim will only be expanded after a real external test proves:
 3. it survives leader loss and reconnects to the new leader; and
 4. a Java client can perform the reciprocal flow against a Zig member.
 
-Until then, Java Cluster and mixed Cluster modes remain blocked, while the Java-only sample is
-the reference baseline.
+The Java-only sample remains the reference baseline. Java Cluster and mixed
+Cluster modes are no longer untested: the Java topology is a passing baseline,
+and mixed mode has passing consensus/client/log-ingress smokes, a restart-
+persistent local log journal, and a bounded 100k soak.
+Full mixed acceptance remains blocked until the Zig member implements the
+upstream ingress, replicated log, catchup/archive, snapshot, and restart/replay
+contracts.
 
 The first external smoke also exposed two lower-level compatibility requirements now tracked in
 code: container DNS names must resolve in UDP channel parsing, and the Media Driver must use a

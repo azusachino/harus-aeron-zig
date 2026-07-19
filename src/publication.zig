@@ -254,6 +254,9 @@ test "ExclusivePublication rotates after term is full" {
     try std.testing.expectEqual(@as(i32, 1), log_buf.metaData().activeTermCount());
     try std.testing.expectEqual(@as(i32, 101), metadata.termId(log_buf.metaData().rawTailVolatile(1)));
     try std.testing.expect(metadata.termOffset(log_buf.metaData().rawTailVolatile(1), term_length) > 0);
+    const next_term_header = @as(*const frame.DataHeader, @ptrCast(@alignCast(&log_buf.termBuffer(1)[0])));
+    try std.testing.expectEqual(@as(i32, 101), next_term_header.term_id);
+    try std.testing.expectEqual(@as(i32, 0), next_term_header.term_offset);
 }
 
 test "offer: first message succeeds when publisher_limit equals term_length" {

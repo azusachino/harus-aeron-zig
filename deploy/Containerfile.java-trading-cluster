@@ -1,8 +1,6 @@
 FROM eclipse-temurin:21-jdk AS builder
-ARG AERON_VERSION=1.50.4
 
-RUN wget -q -O /aeron-all.jar \
-      "https://repo1.maven.org/maven2/io/aeron/aeron-all/${AERON_VERSION}/aeron-all-${AERON_VERSION}.jar"
+COPY test/interop/aeron-all.jar /aeron-all.jar
 
 COPY examples/trading/java /src
 RUN mkdir -p /out && javac -cp /aeron-all.jar -d /out \

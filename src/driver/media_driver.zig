@@ -214,6 +214,14 @@ pub const MediaDriver = struct {
         return self;
     }
 
+    /// Set the first publication session id before clients register streams.
+    ///
+    /// Clustered applications use disjoint ranges so two member-local drivers
+    /// cannot alias the `(session_id, stream_id)` image identity at a receiver.
+    pub fn setInitialSessionId(self: *MediaDriver, session_id: i32) void {
+        self.conductor_agent.next_session_id = session_id;
+    }
+
     /// DEPRECATED: use `create` with a temporary CnC file instead.
     /// This method allocates buffers on the heap without a CnC file, creating a divergent code path
     /// from production. All new tests should use `create` with a temp aeron_dir (see test cases in cnc.zig).

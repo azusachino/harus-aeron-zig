@@ -1,0 +1,51 @@
+services:
+  java-node-0:
+    build:
+      context: ../..
+      dockerfile: deploy/Containerfile.java-trading-cluster
+    command: ["--add-opens", "java.base/jdk.internal.misc=ALL-UNNAMED", "--add-opens", "java.base/java.util.zip=ALL-UNNAMED", "-cp", "/aeron-all.jar:/trading", "trading.JavaTradingClusterNode"]
+    environment: &java_environment
+      CLUSTER_MEMBER_ID: "0"
+      RESET_CLUSTER: "true"
+      AERON_DIR: /dev/shm/aeron
+      ARCHIVE_DIR: /data/archive
+      CLUSTER_DIR: /data/cluster
+      CLUSTER_MEMBERS: "0,java-node-0:9010,java-node-0:9011,java-node-0:9012,java-node-0:9013,java-node-0:8010|1,java-node-1:9010,java-node-1:9011,java-node-1:9012,java-node-1:9013,java-node-1:8010|2,zig-node-2:9020,zig-node-2:9022,zig-node-2:9022,zig-node-2:9022,zig-node-2:8020"
+    tmpfs:
+      - /dev/shm:exec,size=1g
+    volumes:
+      - mixed_java_0:/data
+    networks: [mixed]
+
+  java-node-1:
+    extends: java-node-0
+    environment:
+      <<: *java_environment
+      CLUSTER_MEMBER_ID: "1"
+    volumes:
+      - mixed_java_1:/data
+
+  zig-node-2:
+    build:
+      context: ../..
+      dockerfile: deploy/Containerfile.zig-consensus-member
+    environment:
+      CLUSTER_MEMBER_ID: "2"
+      CONSENSUS_PORT: "9022"
+      AERON_DIR: /dev/shm/aeron
+      LOG_JOURNAL_PATH: /data/mixed-log.bin
+      CLUSTER_CONSENSUS_ENDPOINTS: "0=java-node-0:9011,1=java-node-1:9011,2=zig-node-2:9022"
+    tmpfs:
+      - /dev/shm:exec,size=1g
+    volumes:
+      - mixed_zig_2:/data
+    networks: [mixed]
+
+networks:
+  mixed:
+    name: aeron-mixed
+
+volumes:
+  mixed_java_0:
+  mixed_java_1:
+  mixed_zig_2:

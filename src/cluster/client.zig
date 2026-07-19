@@ -24,6 +24,7 @@ pub const Context = struct {
     client_info: []const u8 = "harus-aeron-zig",
     encoded_credentials: []const u8 = &.{},
     max_connect_iterations: usize = 100_000,
+    connect_timeout_ms: i64 = 30_000,
 };
 
 pub const EgressHandler = *const fn (cluster_session_id: i64, timestamp: i64, payload: []const u8, ctx: *anyopaque) void;
@@ -78,7 +79,11 @@ pub const AeronCluster = struct {
         var request_sent = false;
 
         var iteration: usize = 0;
+        const connect_started_ms = aeron_mod.time.milliTimestamp();
         while (iteration < ctx.max_connect_iterations) : (iteration += 1) {
+            if (aeron_mod.time.milliTimestamp() - connect_started_ms >= ctx.connect_timeout_ms) {
+                return error.ConnectTimeout;
+            }
             _ = ctx.aeron.doWork();
 
             const publication = ctx.aeron.publicationForRequest(publication_request_id);

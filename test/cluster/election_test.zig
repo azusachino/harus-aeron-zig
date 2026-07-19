@@ -112,9 +112,10 @@ test "Election: onCanvassPosition updates member state" {
     var election = try aeron.cluster.election.Election.init(allocator, 0, 3);
     defer election.deinit();
 
-    // Initial state: all members have log_position = 0
+    // Initial state: all members have log_position = 0 and Aeron's NULL term
+    // sentinel until they participate in a leadership term.
     try std.testing.expectEqual(@as(i64, 0), election.cluster_members.items[1].log_position);
-    try std.testing.expectEqual(@as(i64, 0), election.cluster_members.items[1].leader_ship_term_id);
+    try std.testing.expectEqual(aeron.cluster.election.NULL_LEADERSHIP_TERM_ID, election.cluster_members.items[1].leader_ship_term_id);
 
     // Update member 1's canvass position
     election.onCanvassPosition(2, 1024, 1);

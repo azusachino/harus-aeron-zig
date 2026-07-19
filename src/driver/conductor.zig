@@ -253,7 +253,16 @@ pub const DriverConductor = struct {
     pub fn doWork(self: *DriverConductor) i32 {
         // LESSON(conductor): Command dispatch via ring buffer polling + SETUP signal processing in one work cycle. See docs/tutorial/03-driver/03-conductor.md
         var work: i32 = 0;
-        work += self.ring_buffer.read(handleMessage, @ptrCast(self), 10);
+        const ring_head_before = self.ring_buffer.loadHead();
+        const ring_tail_before = self.ring_buffer.loadTail();
+        const commands_read = self.ring_buffer.read(handleMessage, @ptrCast(self), 10);
+        work += commands_read;
+        if (builtin.mode == .Debug and (commands_read > 0 or ring_head_before != ring_tail_before)) {
+            std.debug.print(
+                "[CONDUCTOR] IPC ring head={d} tail={d} read={d} after_head={d}\n",
+                .{ ring_head_before, ring_tail_before, commands_read, self.ring_buffer.loadHead() },
+            );
+        }
 
         // Check liveness and evict timed-out resources
         self.checkImageLiveness();
@@ -274,7 +283,7 @@ pub const DriverConductor = struct {
             var found = false;
             for (self.subscriptions.items) |sub| {
                 if (sub.stream_id == sig.stream_id) {
-                    if (self.receiver.hasImage(sig.session_id, sig.stream_id)) {
+                    if (self.receiver.hasImageFrom(sig.session_id, sig.stream_id, sig.source_address)) {
                         if (builtin.mode == .Debug) std.debug.print("[CONDUCTOR] Image already exists for session {d} stream {d}, skipping duplicate SETUP\n", .{ sig.session_id, sig.stream_id });
                         found = true;
                         break;
@@ -357,7 +366,7 @@ pub const DriverConductor = struct {
                         sig.stream_id,
                         sig.initial_term_id,
                         0,
-                        @as(i32, @divTrunc(sig.term_length, 4)),
+                        sig.term_length,
                         0, // receiver_id = 0 for initial internal status
                     );
                     self.receiver.sendStatus(image) catch {};
@@ -403,6 +412,7 @@ pub const DriverConductor = struct {
                 nak.term_id,
                 nak.term_offset,
                 nak.length,
+                nak.source_address,
             ) catch {};
             work += 1;
         }
