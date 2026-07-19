@@ -42,17 +42,17 @@ the cluster while Zig is still draining its orders. Java order IDs start at
 `1`, while Zig IDs start at `1_000_001`, so the two clients can run
 concurrently without collisions.
 
-The 500-order soak is currently green. A 2,100-order run exercises the
-Java-cluster path past the previous burst-loss boundary:
+The 500-order soak is currently green. A 10,000-order run exercises the
+Java-cluster path well past the previous burst-loss boundary:
 
 ```bash
-TRADING_SOAK_MESSAGES=2100 uv run scripts/trading.py soak --mode java
+TRADING_SOAK_MESSAGES=10000 uv run scripts/trading.py soak --mode java
 ```
 
 The publisher rotates terms with stream-identifying padding and the sender
-follows rotated partitions. The mixed Java/Zig 2,100-order Java-cluster run
-completes with both `JAVA_CLUSTER_CLIENT_OK responses=2100` and
-`ZIG_CLUSTER_CLIENT_OK responses=2100`. The embedded driver now uses a 4 MiB
+follows rotated partitions. The mixed Java/Zig 10,000-order Java-cluster run
+completes with both `JAVA_CLUSTER_CLIENT_OK responses=10000` and
+`ZIG_CLUSTER_CLIENT_OK responses=10000`. The embedded driver now uses a 4 MiB
 UDP receive buffer and queues incoming NAKs for sender retransmission; sustained
 multi-hour soak evidence is still part of the unreleased 0.9 hardening work.
 
