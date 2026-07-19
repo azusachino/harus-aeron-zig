@@ -231,7 +231,7 @@ pub fn main() !void {
     }
     if (responses.count != order_count) {
         if (trace_perf) {
-            std.debug.print("ZIG_CLUSTER_CLIENT_RESPONSE_TIMEOUT responses={d} expected={d} malformed={d} duplicate={d} egress_position={d} invalid_egress={d} buffer_too_small={d} invalid_template={d} last_invalid_template={d} last_invalid_bytes={any} ignored_egress={d} last_ignored_template={d} last_ignored_length={d} last_ignored_bytes={any} status_received={d} status_applied={d} status_sent={d}\n", .{
+            std.debug.print("ZIG_CLUSTER_CLIENT_RESPONSE_TIMEOUT responses={d} expected={d} malformed={d} duplicate={d} egress_position={d} invalid_egress={d} buffer_too_small={d} invalid_template={d} last_invalid_template={d} last_invalid_bytes={any} ignored_egress={d} last_ignored_template={d} last_ignored_length={d} last_ignored_bytes={any} zero_payload_frames={d} status_received={d} status_applied={d} status_sent={d}\n", .{
                 responses.count,
                 order_count,
                 responses.malformed,
@@ -246,6 +246,7 @@ pub fn main() !void {
                 cluster.egressLastIgnoredTemplate(),
                 cluster.egressLastIgnoredLength(),
                 cluster.egressLastIgnoredBytes(),
+                driver.receiver_agent.zeroPayloadFrames(),
                 driver.receiver_agent.statusMessagesReceived(),
                 driver.sender_agent.statusMessagesApplied(),
                 driver.receiver_agent.statusMessagesSent(),

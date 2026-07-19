@@ -324,6 +324,7 @@ pub const Receiver = struct {
     // Diagnostic counters (atomic for cross-thread visibility)
     data_frames_total: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     data_frames_before_image: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    zero_payload_frames: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     status_messages_received: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     status_messages_sent: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
@@ -402,6 +403,10 @@ pub const Receiver = struct {
         return self.status_messages_received.load(.monotonic);
     }
 
+    pub fn zeroPayloadFrames(self: *const Receiver) u64 {
+        return self.zero_payload_frames.load(.monotonic);
+    }
+
     pub fn processDatagram(self: *Receiver, data: []const u8, src_addr: net.Address) i32 {
         if (data.len < 8) return 0;
 
@@ -436,6 +441,12 @@ pub const Receiver = struct {
                 const payload_len_raw = @as(i32, header.frame_length) - @as(i32, @intCast(protocol.DataHeader.LENGTH));
                 const payload_len: usize = if (payload_len_raw > 0) @intCast(payload_len_raw) else 0;
                 const payload_offset = protocol.DataHeader.LENGTH;
+
+                if (payload_len > 0 and payload_offset + payload_len <= frame_data.len and
+                    std.mem.allEqual(u8, frame_data[payload_offset .. payload_offset + payload_len], 0))
+                {
+                    _ = self.zero_payload_frames.fetchAdd(1, .monotonic);
+                }
 
                 self.mutex.lock();
 
