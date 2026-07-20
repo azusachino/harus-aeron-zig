@@ -540,11 +540,6 @@ pub const Receiver = struct {
                 }
 
                 const total = self.data_frames_total.fetchAdd(1, .monotonic) + 1;
-                if (header.stream_id == 103) {
-                    std.debug.print("[DIAG103] recv term_id={d} term_offset={d} frame_len={d} session={d} src_port={d}\n", .{
-                        header.term_id, header.term_offset, header.frame_length, header.session_id, src_addr.getPort(),
-                    });
-                }
                 if (builtin.mode == .Debug) {
                     std.debug.print("[RECEIVER] DATA frame #{d}: pkt_len={d} term_id={d} term_offset={d} frame_len={d} session={d} stream={d}\n", .{
                         total, data.len, header.term_id, header.term_offset, header.frame_length, header.session_id, header.stream_id,
@@ -723,11 +718,6 @@ pub const Receiver = struct {
             } else if (frame_type_raw == @intFromEnum(protocol.FrameType.nak)) {
                 if (frame_data.len >= protocol.NakHeader.LENGTH) {
                     const nak = @as(*const protocol.NakHeader, @ptrCast(@alignCast(&frame_data[0])));
-                    if (nak.stream_id == 103) {
-                        std.debug.print("[DIAG103] NAK recv session={d} term_id={d} term_offset={d} length={d} src_port={d}\n", .{
-                            nak.session_id, nak.term_id, nak.term_offset, nak.length, src_addr.getPort(),
-                        });
-                    }
                     self.mutex.lock();
                     self.pending_nak_messages.append(self.allocator, .{
                         .session_id = nak.session_id,

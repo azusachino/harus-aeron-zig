@@ -422,11 +422,6 @@ pub const Sender = struct {
             if (frame_header.term_id != req.term_id or frame_header.term_offset != @as(i32, @intCast(offset))) {
                 break;
             }
-            if (publication.stream_id == 103) {
-                std.debug.print("[DIAG103] retransmit send pub_session={d} pub_stream={d} frame_session={d} term_id={d} term_offset={d} dest_port={d}\n", .{
-                    publication.session_id, publication.stream_id, frame_header.session_id, frame_header.term_id, frame_header.term_offset, req.source_address.getPort(),
-                });
-            }
             if (publication.send_channel.send(req.source_address, frame_data)) |_| {
                 _ = self.retransmits_sent.fetchAdd(1, .monotonic);
                 self.last_retransmit_frame_term_id.store(frame_header.term_id, .monotonic);
