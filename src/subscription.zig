@@ -68,6 +68,12 @@ pub const Subscription = struct {
         return self.image_list.items.len > 0;
     }
 
+    pub fn position(self: *const Subscription) i64 {
+        var max_position: i64 = 0;
+        for (self.image_list.items) |image| max_position = @max(max_position, image.position());
+        return max_position;
+    }
+
     pub fn close(self: *Subscription) void {
         self.is_closed = true;
     }

@@ -10,6 +10,7 @@ const builtin = @import("builtin");
 pub const conductor = @import("conductor.zig");
 pub const sender = @import("sender.zig");
 pub const receiver = @import("receiver.zig");
+pub const flow_control = @import("flow_control.zig");
 const agrona = @import("agrona");
 const ring_buffer = agrona.ring_buffer;
 const broadcast = agrona.broadcast;
@@ -43,6 +44,7 @@ pub const MediaDriverContext = struct {
     image_liveness_timeout_ns: i64 = 5_000_000_000,
     publication_connection_timeout_ns: i64 = 5_000_000_000,
     listen_port: u16 = 0, // 0 = ephemeral, non-zero = bind to specific port
+    socket_receive_buffer_length: i32 = 4 * 1024 * 1024,
     conductor_idle_strategy: ?IdleStrategy = null,
     sender_idle_strategy: ?IdleStrategy = null,
     receiver_idle_strategy: ?IdleStrategy = null,
@@ -154,8 +156,12 @@ pub const MediaDriver = struct {
         // Create dummy endpoints for sender/receiver
         const recv_fd = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
         errdefer net.closeSocket(recv_fd);
-        const send_fd = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
-        errdefer net.closeSocket(send_fd);
+        try net.setSockOpt(recv_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, &std.mem.toBytes(ctx_.socket_receive_buffer_length));
+        // Aeron UDP flow control replies (STATUS) target the source port of SETUP/DATA.
+        // Sending and receiving on separate unbound sockets advertises one port and polls
+        // another, so an external Java driver can never advance the publisher limit.
+        // One shared datagram socket preserves the bidirectional channel identity.
+        const send_fd = recv_fd;
 
         // Bind socket to configured port (if non-zero)
         const bound = if (ctx_.listen_port != 0) blk: {
@@ -208,6 +214,14 @@ pub const MediaDriver = struct {
         return self;
     }
 
+    /// Set the first publication session id before clients register streams.
+    ///
+    /// Clustered applications use disjoint ranges so two member-local drivers
+    /// cannot alias the `(session_id, stream_id)` image identity at a receiver.
+    pub fn setInitialSessionId(self: *MediaDriver, session_id: i32) void {
+        self.conductor_agent.next_session_id = session_id;
+    }
+
     /// DEPRECATED: use `create` with a temporary CnC file instead.
     /// This method allocates buffers on the heap without a CnC file, creating a divergent code path
     /// from production. All new tests should use `create` with a temp aeron_dir (see test cases in cnc.zig).
@@ -239,6 +253,7 @@ pub const MediaDriver = struct {
 
         const recv_fd = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
         errdefer net.closeSocket(recv_fd);
+        try net.setSockOpt(recv_fd, std.posix.SOL.SOCKET, std.posix.SO.RCVBUF, &std.mem.toBytes(ctx_.socket_receive_buffer_length));
         const send_fd = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM | std.posix.SOCK.NONBLOCK, std.posix.IPPROTO.UDP);
         errdefer net.closeSocket(send_fd);
 
@@ -353,6 +368,13 @@ pub const MediaDriver = struct {
         return null;
     }
 
+    /// Return the concrete UDP port used by the shared receive socket after a network
+    /// subscription has resolved its endpoint. This mirrors Java Aeron's
+    /// Subscription.tryResolveChannelEndpointPort().
+    pub fn receivePort(self: *const MediaDriver) u16 {
+        return self.recv_endpoint.bound_address.getPort();
+    }
+
     pub fn getImageLogBuffer(self: *MediaDriver, session_id: i32, stream_id: i32) ?*@import("../logbuffer/log_buffer.zig").LogBuffer {
         for (self.receiver_agent.images.items) |image| {
             if (image.session_id == session_id and image.stream_id == stream_id) {
@@ -409,6 +431,18 @@ test "MediaDriver: create and destroy with cnc.dat" {
 
     try testing.expect(md.cnc != null);
     std.Io.Dir.cwd().access(io_mod.io(), "/tmp/aeron-test-create/cnc.dat", .{}) catch {}; // Access check
+}
+
+test "MediaDriver: publication and subscription UDP paths share one socket" {
+    const allocator = testing.allocator;
+    const ctx = MediaDriverContext{ .aeron_dir = "/tmp/aeron-test-shared-udp-socket" };
+    defer std.Io.Dir.cwd().deleteTree(io_mod.io(), ctx.aeron_dir) catch {};
+
+    const md = try MediaDriver.create(allocator, ctx);
+    defer md.destroy();
+
+    try testing.expectEqual(md.recv_endpoint.socket, md.send_endpoint.socket);
+    try testing.expectEqual(@as(u16, 0), md.receivePort());
 }
 
 test "MediaDriver: init and deinit" {

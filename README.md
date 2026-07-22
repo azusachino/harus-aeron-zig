@@ -1,7 +1,8 @@
 # harus-aeron-zig
 
-Aeron reimplemented in Zig — wire-compatible with the real [Aeron](https://github.com/aeron-io/aeron)
-UDP protocol. Also a structured course for learning both Aeron internals and Zig systems programming.
+Aeron reimplemented in Zig — with the current compatibility target explicitly limited to the
+Media Driver UDP/data path. Also a structured course for learning both Aeron internals and Zig
+systems programming.
 
 ## What Is Aeron?
 
@@ -9,11 +10,15 @@ Aeron is a high-performance messaging system built on UDP. It delivers reliable,
 unicast and multicast transport via memory-mapped log buffers and NAK-based retransmission —
 no brokers, no overhead, just bytes and math.
 
-## Project Status: v1.0.0-rc1
+## Project Status: v0.9.0 (pre-1.0 development)
 
-`harus-aeron-zig` is a **Zig reimplementation of the Aeron messaging protocol**, targeting wire compatibility with [aeron-io/aeron](https://github.com/aeron-io/aeron).
-Current parity: protocol frames (100%), archive protocol (100%), IPC (95%), cluster (90%), URI parser (95%).
-269 tests pass. Release candidate — interop smoke validation ongoing before final 1.0.0 tag.
+`harus-aeron-zig` is a **Zig reimplementation of selected Aeron subsystems**, using
+[aeron-io/aeron](https://github.com/aeron-io/aeron) as the compatibility reference.
+The Media Driver/client data path is the current interop target. Archive and Cluster are
+implementation work in progress; the Zig Cluster is not currently wire-compatible with the
+official Java Aeron Cluster and must not be described as a drop-in replacement.
+The project is not released as v1.0.0. The 0.9 line is undergoing extended interop, smoke,
+and soak validation before any 1.0 release decision.
 
 - **Phase 1-4**: Media Driver (Conductor, Sender, Receiver agents) + Client API (Publication/Subscription)
 - **Phase 5**: Archive (recording, replay, catalog persistence)
@@ -36,8 +41,9 @@ Two things at once:
 - **Media Driver**: High-performance duty-cycle agents (Conductor, Sender, Receiver).
 - **Client Library**: Publication and Subscription APIs with zero-copy data path.
 - **Archive**: Record and replay Aeron streams with persistent catalogs.
-- **Cluster**: Raft-based consensus for fault-tolerant state machine replication.
-- **Interoperability**: Interop test infrastructure included (`make interop`) — interop smoke validation ongoing for v1.0.0 final.
+- **Cluster**: Experimental in-process consensus model; upstream Java Cluster interoperability
+  is not implemented yet.
+- **Interoperability**: Interop test infrastructure included (`make interop-smoke`, `make interop`), with extended 0.9 validation still in progress.
 
 ## Course Roadmap
 
@@ -64,6 +70,12 @@ make build
 
 # Run tests
 make test
+
+# Long-running 0.9 local soak (default: 1,000,000 iterations)
+make soak-0.9
+
+# Extended Java↔Zig interop soak (default: 1,000 messages)
+make interop-soak-0.9
 
 # Check your tutorial stubs
 make tutorial-check

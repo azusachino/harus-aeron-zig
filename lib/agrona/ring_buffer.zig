@@ -10,11 +10,12 @@ pub const PADDING_MSG_TYPE_ID: i32 = -1;
 pub const CLIENT_KEEPALIVE_MSG_TYPE: i32 = 0x06;
 pub const TERMINATE_DRIVER_MSG_TYPE: i32 = 0x0E;
 
-// Metadata positions (last 768 bytes of buffer — 6 cache lines of 128 bytes)
-pub const TAIL_POSITION_OFFSET: usize = 0;
-pub const HEAD_CACHE_POSITION_OFFSET: usize = 128;
-pub const HEAD_POSITION_OFFSET: usize = 256;
-pub const CORRELATION_COUNTER_OFFSET: usize = 384;
+// Metadata positions (last 768 bytes of buffer — the first 128-byte slot is
+// reserved, matching org.agrona.concurrent.ringbuffer.RingBufferDescriptor).
+pub const TAIL_POSITION_OFFSET: usize = 128;
+pub const HEAD_CACHE_POSITION_OFFSET: usize = 256;
+pub const HEAD_POSITION_OFFSET: usize = 384;
+pub const CORRELATION_COUNTER_OFFSET: usize = 512;
 pub const CONSUMER_HEARTBEAT_OFFSET: usize = 640;
 pub const METADATA_LENGTH: usize = 768;
 
@@ -162,10 +163,11 @@ pub const ManyToOneRingBuffer = struct {
 
     pub fn read(self: *ManyToOneRingBuffer, handler: MessageHandler, ctx: *anyopaque, limit: i32) i32 {
         var head = self.loadHead();
+        const tail = self.loadTail();
         var fragments_read: i32 = 0;
 
         var i: i32 = 0;
-        while (i < limit) {
+        while (i < limit and head < tail) {
             const index = @as(usize, @intCast(head)) % self.capacity;
 
             const record_addr = self.buffer.ptr + index;
@@ -377,10 +379,10 @@ test "ring buffer constants match agrona protocol values" {
     try std.testing.expectEqual(@as(usize, 768), METADATA_LENGTH);
     try std.testing.expectEqual(@as(usize, 8), RecordDescriptor.HEADER_LENGTH);
     try std.testing.expectEqual(@as(usize, 8), RecordDescriptor.ALIGNMENT);
-    try std.testing.expectEqual(@as(usize, 0), TAIL_POSITION_OFFSET);
-    try std.testing.expectEqual(@as(usize, 128), HEAD_CACHE_POSITION_OFFSET);
-    try std.testing.expectEqual(@as(usize, 256), HEAD_POSITION_OFFSET);
-    try std.testing.expectEqual(@as(usize, 384), CORRELATION_COUNTER_OFFSET);
+    try std.testing.expectEqual(@as(usize, 128), TAIL_POSITION_OFFSET);
+    try std.testing.expectEqual(@as(usize, 256), HEAD_CACHE_POSITION_OFFSET);
+    try std.testing.expectEqual(@as(usize, 384), HEAD_POSITION_OFFSET);
+    try std.testing.expectEqual(@as(usize, 512), CORRELATION_COUNTER_OFFSET);
 }
 
 test "single write and read roundtrip" {
@@ -560,10 +562,10 @@ test "java-compat: ADD_SUBSCRIPTION record byte layout" {
 }
 
 test "java-compat: metadata offsets match Agrona trailer layout" {
-    try std.testing.expectEqual(@as(usize, 0), TAIL_POSITION_OFFSET);
-    try std.testing.expectEqual(@as(usize, 128), HEAD_CACHE_POSITION_OFFSET);
-    try std.testing.expectEqual(@as(usize, 256), HEAD_POSITION_OFFSET);
-    try std.testing.expectEqual(@as(usize, 384), CORRELATION_COUNTER_OFFSET);
+    try std.testing.expectEqual(@as(usize, 128), TAIL_POSITION_OFFSET);
+    try std.testing.expectEqual(@as(usize, 256), HEAD_CACHE_POSITION_OFFSET);
+    try std.testing.expectEqual(@as(usize, 384), HEAD_POSITION_OFFSET);
+    try std.testing.expectEqual(@as(usize, 512), CORRELATION_COUNTER_OFFSET);
     try std.testing.expectEqual(@as(usize, 640), CONSUMER_HEARTBEAT_OFFSET);
     try std.testing.expectEqual(@as(usize, 768), METADATA_LENGTH);
 }

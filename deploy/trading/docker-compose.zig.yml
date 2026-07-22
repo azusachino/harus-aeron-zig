@@ -1,0 +1,40 @@
+services:
+  zig-client:
+    build:
+      context: ../..
+      dockerfile: deploy/Containerfile.zig-trading-client
+    environment:
+      AERON_DIR: /dev/shm/aeron
+      INGRESS_ENDPOINTS: "zig-node-0:9010,zig-node-1:9011,zig-node-2:9012"
+      RESPONSE_CHANNEL: "${RESPONSE_CHANNEL:-aeron:udp?endpoint=zig-client:0}"
+      ORDER_COUNT: "${ORDER_COUNT:-3}"
+      START_DELAY_MS: "${START_DELAY_MS:-5000}"
+      OFFER_TIMEOUT_MS: "${OFFER_TIMEOUT_MS:-60000}"
+      RESPONSE_TIMEOUT_MS: "${RESPONSE_TIMEOUT_MS:-30000}"
+      CONNECT_MAX_ITERATIONS: "${CONNECT_MAX_ITERATIONS:-100000}"
+      CONNECT_TIMEOUT_MS: "${CONNECT_TIMEOUT_MS:-30000}"
+      QUIET: "${QUIET:-0}"
+    tmpfs:
+      - /dev/shm:exec,size=1g
+    networks: [trading]
+
+  java-client:
+    build:
+      context: ../..
+      dockerfile: deploy/Containerfile.java-trading-cluster
+    command: ["--add-opens", "java.base/jdk.internal.misc=ALL-UNNAMED", "--add-opens", "java.base/java.util.zip=ALL-UNNAMED", "-cp", "/aeron-all.jar:/trading", "trading.JavaTradingClusterClient"]
+    environment:
+      INGRESS_ENDPOINTS: "0=zig-node-0:9010,1=zig-node-1:9011,2=zig-node-2:9012"
+      ORDER_COUNT: "${ORDER_COUNT:-3}"
+      START_DELAY_MS: "${START_DELAY_MS:-5000}"
+      OFFER_TIMEOUT_MS: "${OFFER_TIMEOUT_MS:-60000}"
+      RESPONSE_TIMEOUT_MS: "${RESPONSE_TIMEOUT_MS:-30000}"
+      QUIET: "${QUIET:-0}"
+    tmpfs:
+      - /dev/shm:exec,size=1g
+    networks: [trading]
+
+networks:
+  trading:
+    name: aeron-trading
+    external: true

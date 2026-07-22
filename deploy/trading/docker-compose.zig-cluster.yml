@@ -1,0 +1,63 @@
+services:
+  zig-node-0:
+    build:
+      context: ../..
+      dockerfile: deploy/Containerfile.zig-trading-cluster
+    environment:
+      CLUSTER_MEMBER_ID: "0"
+      CLUSTER_LEADER_MEMBER_ID: "0"
+      ELECTION_TIMEOUT_MS: "5000"
+      INGRESS_PORT: "9010"
+      # The current Zig MediaDriver owns one receive socket. Replication uses a
+      # separate stream on that same socket until multi-endpoint receive support
+      # is implemented.
+      INTERNAL_PORT: "9010"
+      AERON_DIR: /dev/shm/aeron
+      CLUSTER_ARCHIVE_DIR: /data/archive
+      CLUSTER_ENDPOINTS: "0=zig-node-0:9010,1=zig-node-1:9011,2=zig-node-2:9012"
+      CLUSTER_INTERNAL_ENDPOINTS: "0=zig-node-0:9010,1=zig-node-1:9011,2=zig-node-2:9012"
+    tmpfs:
+      - /dev/shm:exec,size=1g
+    volumes:
+      - zig_node_0:/data
+    networks: [trading]
+
+  zig-node-1:
+    extends: zig-node-0
+    environment:
+      CLUSTER_MEMBER_ID: "1"
+      CLUSTER_LEADER_MEMBER_ID: "0"
+      ELECTION_TIMEOUT_MS: "5000"
+      INGRESS_PORT: "9011"
+      INTERNAL_PORT: "9011"
+      AERON_DIR: /dev/shm/aeron
+      CLUSTER_ARCHIVE_DIR: /data/archive
+      CLUSTER_ENDPOINTS: "0=zig-node-0:9010,1=zig-node-1:9011,2=zig-node-2:9012"
+      CLUSTER_INTERNAL_ENDPOINTS: "0=zig-node-0:9010,1=zig-node-1:9011,2=zig-node-2:9012"
+    volumes:
+      - zig_node_1:/data
+
+  zig-node-2:
+    extends: zig-node-0
+    environment:
+      CLUSTER_MEMBER_ID: "2"
+      CLUSTER_LEADER_MEMBER_ID: "0"
+      ELECTION_TIMEOUT_MS: "5000"
+      INGRESS_PORT: "9012"
+      INTERNAL_PORT: "9012"
+      AERON_DIR: /dev/shm/aeron
+      CLUSTER_ARCHIVE_DIR: /data/archive
+      CLUSTER_ENDPOINTS: "0=zig-node-0:9010,1=zig-node-1:9011,2=zig-node-2:9012"
+      CLUSTER_INTERNAL_ENDPOINTS: "0=zig-node-0:9010,1=zig-node-1:9011,2=zig-node-2:9012"
+    volumes:
+      - zig_node_2:/data
+
+networks:
+  trading:
+    name: aeron-trading
+    driver: bridge
+
+volumes:
+  zig_node_0:
+  zig_node_1:
+  zig_node_2:

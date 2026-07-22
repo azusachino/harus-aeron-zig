@@ -20,9 +20,15 @@ pub const archive = struct {
     pub const conductor = @import("archive/conductor.zig");
     pub const recorder = @import("archive/recorder.zig");
     pub const replayer = @import("archive/replayer.zig");
+    pub const Archive = @import("archive/archive.zig").Archive;
+    pub const ArchiveContext = @import("archive/archive.zig").ArchiveContext;
 };
 pub const cluster = struct {
     pub const protocol = @import("cluster/protocol.zig");
+    pub const client_codecs = @import("cluster/client_codecs.zig");
+    pub const aeron_consensus_codecs = @import("cluster/aeron_consensus_codecs.zig");
+    pub const aeron_consensus_adapter = @import("cluster/aeron_consensus_adapter.zig");
+    pub const client = @import("cluster/client.zig");
     pub const election = @import("cluster/election.zig");
     pub const log = @import("cluster/log.zig");
     pub const conductor = @import("cluster/conductor.zig");
@@ -42,7 +48,6 @@ pub const Image = @import("image.zig").Image;
 
 pub const AeronContext = struct {
     aeron_dir: []const u8 = "/tmp/aeron",
-    idle_strategy: ?ipc.idle_strategy.IdleStrategy = null,
 };
 
 // LESSON(what-is-aeron): Aeron is a factory and lifecycle container for the client-side API. It holds the cnc.dat file handle, ring buffer and broadcast receiver for driver communication, and hash maps of owned Publication and Subscription instances. The embedded_driver field is optional—clients can spawn their own driver or connect to an existing one via cnc.dat. See docs/tutorial/00-orientation/01-what-is-aeron.md
@@ -53,12 +58,12 @@ pub const Aeron = struct {
     to_driver_ring_buffer: ipc.ring_buffer.ManyToOneRingBuffer,
     to_clients_broadcast_receiver: ipc.broadcast.BroadcastReceiver,
     counters_map: ipc.counters.CountersMap,
-    idle_strategy: ipc.idle_strategy.IdleStrategy,
     client_id: i64,
     last_keepalive_ms: i64 = 0,
 
     // Tracking
     publications: std.AutoHashMapUnmanaged(i64, *ExclusivePublication),
+    pending_publications: std.AutoHashMapUnmanaged(i64, i64) = .{},
     subscriptions: std.AutoHashMapUnmanaged(i64, *Subscription),
     pending_subscription_streams: std.AutoHashMapUnmanaged(i64, i32),
     embedded_driver: ?*driver.MediaDriver = null,
@@ -105,10 +110,10 @@ pub const Aeron = struct {
             .to_driver_ring_buffer = to_driver_ring_buffer,
             .to_clients_broadcast_receiver = ipc.broadcast.BroadcastReceiver.wrap(to_clients),
             .counters_map = ipc.counters.CountersMap.init(counters_meta, counters_values),
-            .idle_strategy = ctx.idle_strategy orelse ipc.idle_strategy.IdleStrategy.initDefaultBackoff(),
             .client_id = client_id,
             .last_keepalive_ms = 0,
             .publications = .{},
+            .pending_publications = .{},
             .subscriptions = .{},
             .pending_subscription_streams = .{},
         };
@@ -124,6 +129,7 @@ pub const Aeron = struct {
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.publications.deinit(self.allocator);
+        self.pending_publications.deinit(self.allocator);
 
         var sub_it = self.subscriptions.iterator();
         while (sub_it.next()) |entry| {
@@ -137,6 +143,10 @@ pub const Aeron = struct {
         }
         self.subscriptions.deinit(self.allocator);
         self.pending_subscription_streams.deinit(self.allocator);
+    }
+
+    pub fn clientId(self: *const Aeron) i64 {
+        return self.client_id;
     }
 
     fn openPublicationLogBuffer(self: *Aeron, log_file_name: []const u8, session_id: i32, stream_id: i32) ?PublicationLogHandle {
@@ -185,7 +195,22 @@ pub const Aeron = struct {
             const msg_type_id = self.to_clients_broadcast_receiver.typeId();
             const buffer = self.to_clients_broadcast_receiver.buffer();
 
-            if (msg_type_id == driver.conductor.RESPONSE_ON_IMAGE_READY) {
+            if (msg_type_id == driver.conductor.RESPONSE_ON_ERROR) {
+                if (buffer.len >= 16) {
+                    const correlation_id = std.mem.readInt(i64, buffer[0..8], .little);
+                    const error_code = std.mem.readInt(i32, buffer[8..12], .little);
+                    const message_length = std.mem.readInt(i32, buffer[12..16], .little);
+                    if (message_length >= 0 and buffer.len >= 16 + @as(usize, @intCast(message_length))) {
+                        std.debug.print("[AERON] driver error correlation={d} code={d}: {s}\n", .{
+                            correlation_id,
+                            error_code,
+                            buffer[16 .. 16 + @as(usize, @intCast(message_length))],
+                        });
+                    }
+                }
+                work += 1;
+            } else if (msg_type_id == driver.conductor.RESPONSE_ON_IMAGE_READY) {
+                if (buffer.len < 32) continue;
                 const registration_id = std.mem.readInt(i64, buffer[0..8], .little);
                 const session_id = std.mem.readInt(i32, buffer[8..12], .little);
                 const stream_id = std.mem.readInt(i32, buffer[12..16], .little);
@@ -206,6 +231,7 @@ pub const Aeron = struct {
                                 continue;
                             };
                             img.* = Image.init(session_id, stream_id, 0, log_handle.buffer);
+                            img.setSubscriberPositionCounter(&self.counters_map, subscriber_position_id);
                             img.owns_log_buffer = log_handle.owns_buffer;
                             sub.addImage(img) catch {
                                 if (log_handle.owns_buffer) {
@@ -218,9 +244,9 @@ pub const Aeron = struct {
                     }
                 }
                 _ = registration_id;
-                _ = subscriber_position_id;
                 work += 1;
             } else if (msg_type_id == driver.conductor.RESPONSE_ON_SUBSCRIPTION_READY) {
+                if (buffer.len < 12) continue;
                 const correlation_id = std.mem.readInt(i64, buffer[0..8], .little);
                 const stream_id = self.pending_subscription_streams.get(correlation_id) orelse 0;
                 const channel_status_indicator_id = std.mem.readInt(i32, buffer[8..12], .little);
@@ -238,7 +264,9 @@ pub const Aeron = struct {
                 };
                 _ = self.pending_subscription_streams.remove(correlation_id);
                 work += 1;
-            } else if (msg_type_id == driver.conductor.RESPONSE_ON_PUBLICATION_READY) {
+            } else if (msg_type_id == driver.conductor.RESPONSE_ON_PUBLICATION_READY or
+                msg_type_id == driver.conductor.RESPONSE_ON_EXCLUSIVE_PUBLICATION_READY)
+            {
                 if (buffer.len < 36) continue;
 
                 const correlation_id = std.mem.readInt(i64, buffer[0..8], .little);
@@ -254,7 +282,6 @@ pub const Aeron = struct {
                 if (buffer.len < 36 + log_file_name_len) continue;
 
                 const log_file_name = buffer[36 .. 36 + log_file_name_len];
-                _ = correlation_id;
                 _ = channel_status_indicator_id;
 
                 if (self.openPublicationLogBuffer(log_file_name, session_id, stream_id)) |log_handle| {
@@ -285,17 +312,25 @@ pub const Aeron = struct {
                         self.allocator.destroy(pub_instance);
                         continue;
                     };
+                    self.pending_publications.put(self.allocator, correlation_id, registration_id) catch {};
+                } else {
+                    std.debug.print("[AERON] publication ready but log buffer open failed correlation={d} path={s}\n", .{ correlation_id, log_file_name });
                 }
                 work += 1;
             }
         }
 
         const total_work = work + keepalive_work;
-        self.idle_strategy.idle(total_work);
         return total_work;
     }
 
     pub fn getPublication(self: *Aeron, registration_id: i64) ?*ExclusivePublication {
+        return self.publications.get(registration_id);
+    }
+
+    /// Resolve the publication created by an asynchronous addPublication request.
+    pub fn publicationForRequest(self: *Aeron, correlation_id: i64) ?*ExclusivePublication {
+        const registration_id = self.pending_publications.get(correlation_id) orelse correlation_id;
         return self.publications.get(registration_id);
     }
 
@@ -319,6 +354,7 @@ pub const Aeron = struct {
 
     // LESSON(what-is-aeron): addSubscription encodes the upstream SubscriptionMessageFlyweight layout into the to-driver ring buffer: client_id, correlation_id, registration_correlation_id, stream_id, channel_length, then channel bytes. The driver's Conductor reads that payload and sends RESPONSE_ON_SUBSCRIPTION_READY keyed by correlation_id. See docs/tutorial/00-orientation/01-what-is-aeron.md
     pub fn addSubscription(self: *Aeron, channel: []const u8, stream_id: i32) !i64 {
+        if (channel.len > 1024 - 32) return error.ChannelTooLong;
         const correlation_id = self.to_driver_ring_buffer.nextCorrelationId();
 
         var buf: [1024]u8 = undefined;
@@ -339,6 +375,7 @@ pub const Aeron = struct {
 
     // LESSON(what-is-zig): addPublication is the complementary client-to-driver handshake for writers. It uses the upstream PublicationMessageFlyweight layout: client_id, correlation_id, stream_id, channel_length, then channel bytes. The Conductor allocates an ExclusivePublication with a log buffer and responds with RESPONSE_ON_PUBLICATION_READY using the same correlation_id. See docs/tutorial/00-orientation/02-what-is-zig.md
     pub fn addPublication(self: *Aeron, channel: []const u8, stream_id: i32) !i64 {
+        if (channel.len > 1024 - 24) return error.ChannelTooLong;
         const correlation_id = self.to_driver_ring_buffer.nextCorrelationId();
 
         var buf: [1024]u8 = undefined;
@@ -432,7 +469,6 @@ test "Aeron addSubscription encodes upstream SubscriptionMessageFlyweight layout
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},
-        .idle_strategy = ipc.idle_strategy.IdleStrategy.initBusySpin(),
         .embedded_driver = null,
     };
     defer aeron.publications.deinit(allocator);
@@ -483,7 +519,6 @@ test "Aeron addPublication encodes upstream PublicationMessageFlyweight layout" 
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},
-        .idle_strategy = ipc.idle_strategy.IdleStrategy.initBusySpin(),
         .embedded_driver = null,
     };
     defer aeron.publications.deinit(allocator);
@@ -564,7 +599,6 @@ test "Aeron doWork parses full publication-ready payload and maps log buffer" {
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},
-        .idle_strategy = ipc.idle_strategy.IdleStrategy.initBusySpin(),
         .embedded_driver = null,
     };
     defer {
@@ -574,6 +608,7 @@ test "Aeron doWork parses full publication-ready payload and maps log buffer" {
             allocator.destroy(entry.value_ptr.*);
         }
         aeron.publications.deinit(allocator);
+        aeron.pending_publications.deinit(allocator);
         aeron.subscriptions.deinit(allocator);
         aeron.pending_subscription_streams.deinit(allocator);
     }
@@ -604,7 +639,6 @@ test "Aeron sendKeepaliveIfDue writes client keepalive command" {
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},
-        .idle_strategy = ipc.idle_strategy.IdleStrategy.initBusySpin(),
         .embedded_driver = null,
     };
     defer aeron.publications.deinit(allocator);
@@ -652,7 +686,6 @@ test "Aeron removePublication encodes upstream RemoveMessageFlyweight layout" {
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},
-        .idle_strategy = ipc.idle_strategy.IdleStrategy.initBusySpin(),
         .embedded_driver = null,
     };
     defer aeron.publications.deinit(allocator);
@@ -699,7 +732,6 @@ test "Aeron removeSubscription encodes upstream RemoveMessageFlyweight layout" {
         .publications = .{},
         .subscriptions = .{},
         .pending_subscription_streams = .{},
-        .idle_strategy = ipc.idle_strategy.IdleStrategy.initBusySpin(),
         .embedded_driver = null,
     };
     defer aeron.publications.deinit(allocator);

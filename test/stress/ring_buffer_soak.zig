@@ -31,36 +31,18 @@ test "ring_buffer_soak: write/read N messages without loss" {
     // Message payload patterns: cycle through sizes 1, 32, 128, 512 bytes
     const sizes = [_]usize{ 1, 32, 128, 512 };
     var written: usize = 0;
-    var size_idx: usize = 0;
-
-    // Write phase: append messages with varying sizes
-    while (written < iterations) {
-        const payload_size = sizes[size_idx % sizes.len];
-        const payload = try allocator.alloc(u8, payload_size);
-        @memset(payload, @as(u8, @intCast((written % 256))));
-
-        if (rb.write(@as(i32, @intCast(written % 32)), payload)) {
-            written += 1;
-            size_idx += 1;
-        }
-    }
-
-    try std.testing.expectEqual(iterations, written);
-
-    // Read phase: verify all messages read back with correct content
     var read_count: usize = 0;
     var read_total_bytes: usize = 0;
+    var size_idx: usize = 0;
 
     const ReadContext = struct {
         count: *usize,
         total_bytes: *usize,
-        allocator: std.mem.Allocator,
     };
 
     var ctx = ReadContext{
         .count = &read_count,
         .total_bytes = &read_total_bytes,
-        .allocator = allocator,
     };
 
     const handler = struct {
@@ -72,7 +54,21 @@ test "ring_buffer_soak: write/read N messages without loss" {
         }
     }.handle;
 
-    // Read all available messages
+    // Produce and drain together so a long soak cannot deadlock on a full ring.
+    while (written < iterations) {
+        const payload_size = sizes[size_idx % sizes.len];
+        const payload = try allocator.alloc(u8, payload_size);
+        @memset(payload, @as(u8, @intCast((written % 256))));
+
+        if (rb.write(@as(i32, @intCast(written % 32)), payload)) {
+            written += 1;
+            size_idx += 1;
+        } else if (rb.read(handler, @ptrCast(&ctx), 128) == 0) {
+            return error.SoakStalled;
+        }
+    }
+
+    // Drain the final partial batch.
     while (rb.read(handler, @ptrCast(&ctx), 128) > 0) {}
 
     try std.testing.expectEqual(iterations, read_count);

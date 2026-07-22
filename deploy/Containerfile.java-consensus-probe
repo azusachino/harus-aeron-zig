@@ -1,0 +1,10 @@
+FROM eclipse-temurin:21-jdk AS builder
+
+COPY test/interop/aeron-all.jar /aeron-all.jar
+COPY examples/trading/java/JavaConsensusInteropProbe.java /src/JavaConsensusInteropProbe.java
+RUN mkdir -p /out && javac -cp /aeron-all.jar -d /out /src/JavaConsensusInteropProbe.java
+
+FROM eclipse-temurin:21-jre
+COPY --from=builder /aeron-all.jar /aeron-all.jar
+COPY --from=builder /out /trading
+ENTRYPOINT ["java"]

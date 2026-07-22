@@ -27,6 +27,18 @@ const SpinMutex = struct {
     }
 };
 
+fn sameAddress(left: net.Address, right: net.Address) bool {
+    if (left.any.family != right.any.family) return false;
+    return switch (left.any.family) {
+        std.posix.AF.INET => left.in.port == right.in.port and left.in.addr == right.in.addr,
+        std.posix.AF.INET6 => left.in6.port == right.in6.port and
+            left.in6.flowinfo == right.in6.flowinfo and
+            std.mem.eql(u8, &left.in6.addr, &right.in6.addr) and
+            left.in6.scope_id == right.in6.scope_id,
+        else => std.mem.eql(u8, std.mem.asBytes(&left.any), std.mem.asBytes(&right.any)),
+    };
+}
+
 pub const Image = struct {
     session_id: i32,
     stream_id: i32,
@@ -37,6 +49,9 @@ pub const Image = struct {
     receiver_hwm: counters.CounterHandle, // highest term_offset seen
     subscriber_position: counters.CounterHandle, // client-owned image position counter
     rebuild_position: i64, // tracks gap filling progress
+    last_status_position: i64,
+    last_status_ns: i64,
+    term_ids: [metadata.PARTITION_COUNT]i32,
     source_address: net.Address,
     nak_state: NakState,
     last_activity_ns: i64,
@@ -57,6 +72,9 @@ pub const Image = struct {
         // doesn't stall waiting for data in an earlier (empty) partition.
         const term_count = @as(i64, active_term_id - initial_term_id);
         const initial_rebuild_position = term_count * @as(i64, term_length);
+        var term_ids = [_]i32{std.math.minInt(i32)} ** metadata.PARTITION_COUNT;
+        const active_partition = @as(usize, @intCast(@mod(active_term_id - initial_term_id, @as(i32, @intCast(metadata.PARTITION_COUNT)))));
+        term_ids[active_partition] = active_term_id;
         if (builtin.mode == .Debug) {
             std.debug.print("[IMAGE] init: session={d} stream={d} initial_term_id={d} active_term_id={d} rebuild_start={d}\n", .{ session_id, stream_id, initial_term_id, active_term_id, initial_rebuild_position });
         }
@@ -70,6 +88,9 @@ pub const Image = struct {
             .receiver_hwm = receiver_hwm,
             .subscriber_position = subscriber_position,
             .rebuild_position = initial_rebuild_position,
+            .last_status_position = 0,
+            .last_status_ns = 0,
+            .term_ids = term_ids,
             .source_address = source_address,
             .nak_state = NakState.init(log_buffer.allocator, stream_id),
             .last_activity_ns = @as(i64, @intCast(time.nanoTimestamp())),
@@ -86,6 +107,17 @@ pub const Image = struct {
         return @as(i64, term_count) * self.term_length + term_offset;
     }
 
+    fn prepareTerm(self: *Image, partition: usize, term_id: i32) []u8 {
+        const term_buffer = self.log_buffer.termBuffer(partition);
+        if (self.term_ids[partition] != term_id) {
+            // A partition is reused after three terms. Clear old commit markers
+            // before the new term can be considered contiguous by rebuild scan.
+            @memset(term_buffer, 0);
+            self.term_ids[partition] = term_id;
+        }
+        return term_buffer;
+    }
+
     // Write an incoming DATA frame into the log buffer at the correct partition+offset
     // Returns true if written, false if out-of-bounds or duplicate
     pub fn insertFrame(self: *Image, counters_map: *counters.CountersMap, header: *const protocol.DataHeader, payload: []const u8) bool {
@@ -94,8 +126,14 @@ pub const Image = struct {
         const term_count = header.term_id - self.initial_term_id;
         const partition = @as(usize, @intCast(@mod(term_count, 3)));
 
+        // A late retransmission from a term already evicted from this partition must not
+        // roll the partition backwards and clear the newer term's committed frames.
+        if (self.term_ids[partition] != std.math.minInt(i32) and header.term_id < self.term_ids[partition]) {
+            return false;
+        }
+
         const frame_offset = @as(usize, @intCast(header.term_offset));
-        const term_buffer = self.log_buffer.termBuffer(partition);
+        const term_buffer = self.prepareTerm(partition, header.term_id);
 
         // Bounds check: frame_offset + DataHeader.LENGTH + payload.len <= term_buffer.len
         const total_frame_len = protocol.DataHeader.LENGTH + payload.len;
@@ -103,9 +141,19 @@ pub const Image = struct {
             return false; // Out of bounds
         }
 
-        // Write DataHeader at frame_offset
+        // Write every header field except frame_length first. frame_length is the
+        // release-commit marker: publishing it before the payload is copied lets a
+        // client Image observe a valid-looking frame and read zero-filled payload
+        // bytes. This ordering mirrors TermAppender's header/payload/commit sequence.
         const header_ptr = @as(*protocol.DataHeader, @ptrCast(@alignCast(&term_buffer[frame_offset])));
-        header_ptr.* = header.*;
+        header_ptr.version = header.version;
+        header_ptr.flags = header.flags;
+        header_ptr.type = header.type;
+        header_ptr.term_offset = header.term_offset;
+        header_ptr.session_id = header.session_id;
+        header_ptr.stream_id = header.stream_id;
+        header_ptr.term_id = header.term_id;
+        header_ptr.reserved_value = header.reserved_value;
 
         // Write payload at frame_offset + DataHeader.LENGTH
         const payload_offset = frame_offset + protocol.DataHeader.LENGTH;
@@ -117,7 +165,7 @@ pub const Image = struct {
         // Write original frame_length as commit signal (NOT aligned — payload length must be exact)
         // advanceRebuildPosition and TermReader both align at read time.
         const len_ptr = @as(*i32, @ptrCast(@alignCast(&term_buffer[frame_offset])));
-        len_ptr.* = @as(i32, @intCast(total_frame_len));
+        @atomicStore(i32, len_ptr, @as(i32, @intCast(total_frame_len)), .release);
 
         // Update receiver_hwm counter using absolute stream position.
         const new_hwm = self.positionFor(header.term_id, header.term_offset + aligned_len);
@@ -128,6 +176,44 @@ pub const Image = struct {
 
         self.advanceRebuildPosition(counters_map);
 
+        return true;
+    }
+
+    // LESSON(receiver): Padding is part of the reliable term stream; storing it locally lets rebuild position and STATUS cross the ring boundary. See docs/tutorial/03-driver/02-receiver.md
+    pub fn insertPadding(self: *Image, counters_map: *counters.CountersMap, header: *const protocol.DataHeader) bool {
+        const term_count = header.term_id - self.initial_term_id;
+        const partition = @as(usize, @intCast(@mod(term_count, @as(i32, @intCast(metadata.PARTITION_COUNT)))));
+        if (self.term_ids[partition] != std.math.minInt(i32) and header.term_id < self.term_ids[partition]) {
+            return false;
+        }
+        const frame_offset = @as(usize, @intCast(header.term_offset));
+        const padding_length = header.frame_length;
+        const term_buffer = self.prepareTerm(partition, header.term_id);
+
+        if (padding_length < @as(i32, @intCast(protocol.DataHeader.LENGTH)) or
+            frame_offset + @as(usize, @intCast(padding_length)) > term_buffer.len)
+        {
+            return false;
+        }
+
+        const header_ptr = @as(*protocol.DataHeader, @ptrCast(@alignCast(&term_buffer[frame_offset])));
+        header_ptr.version = header.version;
+        header_ptr.flags = header.flags;
+        header_ptr.type = header.type;
+        header_ptr.term_offset = header.term_offset;
+        header_ptr.session_id = header.session_id;
+        header_ptr.stream_id = header.stream_id;
+        header_ptr.term_id = header.term_id;
+        header_ptr.reserved_value = header.reserved_value;
+        const len_ptr = @as(*i32, @ptrCast(@alignCast(&term_buffer[frame_offset])));
+        @atomicStore(i32, len_ptr, padding_length, .release);
+
+        const new_hwm = self.positionFor(header.term_id, header.term_offset + padding_length);
+        const current_hwm = counters_map.get(self.receiver_hwm.counter_id);
+        if (new_hwm > current_hwm) {
+            counters_map.set(self.receiver_hwm.counter_id, new_hwm);
+        }
+        self.advanceRebuildPosition(counters_map);
         return true;
     }
 
@@ -187,7 +273,17 @@ pub const StatusSignal = struct {
     receiver_id: i64,
 };
 
+pub const NakSignal = struct {
+    session_id: i32,
+    stream_id: i32,
+    term_id: i32,
+    term_offset: i32,
+    length: i32,
+    source_address: net.Address,
+};
+
 const NAK_DELAY_NS: i64 = 1_000_000; // 1ms
+const STATUS_REFRESH_NS: i64 = 200_000_000; // 200ms, recover lost flow-control feedback
 
 pub const GapRange = struct { offset: i32, length: i32 };
 
@@ -246,6 +342,7 @@ pub const Receiver = struct {
     images: std.ArrayListUnmanaged(*Image),
     pending_setups: std.ArrayListUnmanaged(SetupSignal) = .empty,
     pending_status_messages: std.ArrayListUnmanaged(StatusSignal) = .empty,
+    pending_nak_messages: std.ArrayListUnmanaged(NakSignal) = .empty,
     recv_endpoint: *transport.ReceiveChannelEndpoint,
     send_endpoint: *transport.SendChannelEndpoint,
     counters_map: *counters.CountersMap,
@@ -257,6 +354,23 @@ pub const Receiver = struct {
     // Diagnostic counters (atomic for cross-thread visibility)
     data_frames_total: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     data_frames_before_image: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    zero_payload_frames: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    status_messages_received: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    status_messages_sent: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    padding_frames_received: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    last_padding_term_id: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_padding_term_offset: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_padding_length: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_status_stream_id: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_status_position: std.atomic.Value(i64) = std.atomic.Value(i64).init(0),
+    last_status_rebuild_position: std.atomic.Value(i64) = std.atomic.Value(i64).init(0),
+    last_status_subscriber_position: std.atomic.Value(i64) = std.atomic.Value(i64).init(0),
+    term_buffer_clears: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    last_clear_old_term_id: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_clear_new_term_id: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_clear_subscriber_position: std.atomic.Value(i64) = std.atomic.Value(i64).init(0),
+    insert_failures: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    nak_frames_sent: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -302,6 +416,7 @@ pub const Receiver = struct {
         self.images.deinit(self.allocator);
         self.pending_setups.deinit(self.allocator);
         self.pending_status_messages.deinit(self.allocator);
+        self.pending_nak_messages.deinit(self.allocator);
     }
 
     pub fn drainPendingSetups(self: *Receiver) []SetupSignal {
@@ -316,6 +431,88 @@ pub const Receiver = struct {
         defer self.mutex.unlock();
         const slice = self.pending_status_messages.toOwnedSlice(self.allocator) catch return &.{};
         return slice;
+    }
+
+    pub fn drainPendingNakMessages(self: *Receiver) []NakSignal {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        return self.pending_nak_messages.toOwnedSlice(self.allocator) catch return &.{};
+    }
+
+    pub fn statusMessagesSent(self: *const Receiver) u64 {
+        return self.status_messages_sent.load(.monotonic);
+    }
+
+    pub fn statusMessagesReceived(self: *const Receiver) u64 {
+        return self.status_messages_received.load(.monotonic);
+    }
+
+    pub fn zeroPayloadFrames(self: *const Receiver) u64 {
+        return self.zero_payload_frames.load(.monotonic);
+    }
+
+    pub fn paddingFramesReceived(self: *const Receiver) u64 {
+        return self.padding_frames_received.load(.monotonic);
+    }
+
+    pub fn lastPaddingTermId(self: *const Receiver) i32 {
+        return self.last_padding_term_id.load(.monotonic);
+    }
+
+    pub fn lastPaddingTermOffset(self: *const Receiver) i32 {
+        return self.last_padding_term_offset.load(.monotonic);
+    }
+
+    pub fn lastPaddingLength(self: *const Receiver) i32 {
+        return self.last_padding_length.load(.monotonic);
+    }
+
+    pub fn lastStatusStreamId(self: *const Receiver) i32 {
+        return self.last_status_stream_id.load(.monotonic);
+    }
+
+    pub fn lastStatusPosition(self: *const Receiver) i64 {
+        return self.last_status_position.load(.monotonic);
+    }
+
+    pub fn lastStatusRebuildPosition(self: *const Receiver) i64 {
+        return self.last_status_rebuild_position.load(.monotonic);
+    }
+
+    pub fn lastStatusSubscriberPosition(self: *const Receiver) i64 {
+        return self.last_status_subscriber_position.load(.monotonic);
+    }
+
+    pub fn termBufferClears(self: *const Receiver) u64 {
+        return self.term_buffer_clears.load(.monotonic);
+    }
+
+    pub fn lastClearOldTermId(self: *const Receiver) i32 {
+        return self.last_clear_old_term_id.load(.monotonic);
+    }
+
+    pub fn lastClearNewTermId(self: *const Receiver) i32 {
+        return self.last_clear_new_term_id.load(.monotonic);
+    }
+
+    pub fn lastClearSubscriberPosition(self: *const Receiver) i64 {
+        return self.last_clear_subscriber_position.load(.monotonic);
+    }
+
+    pub fn dataFramesTotal(self: *const Receiver) u64 {
+        return self.data_frames_total.load(.monotonic);
+    }
+
+    pub fn dataFramesBeforeImage(self: *const Receiver) u64 {
+        return self.data_frames_before_image.load(.monotonic);
+    }
+
+    pub fn insertFailures(self: *const Receiver) u64 {
+        return self.insert_failures.load(.monotonic);
+    }
+
+    pub fn nakFramesSent(self: *const Receiver) u64 {
+        return self.nak_frames_sent.load(.monotonic);
     }
 
     pub fn processDatagram(self: *Receiver, data: []const u8, src_addr: net.Address) i32 {
@@ -353,19 +550,38 @@ pub const Receiver = struct {
                 const payload_len: usize = if (payload_len_raw > 0) @intCast(payload_len_raw) else 0;
                 const payload_offset = protocol.DataHeader.LENGTH;
 
+                if (payload_len > 0 and payload_offset + payload_len <= frame_data.len and
+                    std.mem.allEqual(u8, frame_data[payload_offset .. payload_offset + payload_len], 0))
+                {
+                    _ = self.zero_payload_frames.fetchAdd(1, .monotonic);
+                }
+
                 self.mutex.lock();
 
                 var image_for_status: ?*Image = null;
                 var found_image = false;
                 for (self.images.items) |image| {
-                    if (image.session_id == header.session_id and image.stream_id == header.stream_id) {
+                    if (image.session_id == header.session_id and image.stream_id == header.stream_id and
+                        sameAddress(image.source_address, src_addr))
+                    {
                         found_image = true;
                         image.last_activity_ns = @as(i64, @intCast(time.nanoTimestamp()));
                         if (payload_offset + payload_len <= frame_data.len) {
                             const payload = frame_data[payload_offset .. payload_offset + payload_len];
 
+                            const term_count = header.term_id - image.initial_term_id;
+                            const partition = @as(usize, @intCast(@mod(term_count, @as(i32, @intCast(metadata.PARTITION_COUNT)))));
+                            const previous_term_id = image.term_ids[partition];
+                            if (previous_term_id != std.math.minInt(i32) and previous_term_id != header.term_id) {
+                                _ = self.term_buffer_clears.fetchAdd(1, .monotonic);
+                                self.last_clear_old_term_id.store(previous_term_id, .monotonic);
+                                self.last_clear_new_term_id.store(header.term_id, .monotonic);
+                                self.last_clear_subscriber_position.store(self.counters_map.get(image.subscriber_position.counter_id), .monotonic);
+                            }
+
                             const written = image.insertFrame(self.counters_map, header, payload);
                             if (!written) {
+                                _ = self.insert_failures.fetchAdd(1, .monotonic);
                                 if (builtin.mode == .Debug) {
                                     std.debug.print("[RECEIVER] insertFrame FAILED: session={d} stream={d} term_id={d} term_offset={d}\n", .{
                                         header.session_id, header.stream_id, header.term_id, header.term_offset,
@@ -426,6 +642,37 @@ pub const Receiver = struct {
                 }
 
                 work += 1;
+            } else if (frame_type_raw == @intFromEnum(protocol.FrameType.padding)) {
+                if (frame_data.len < protocol.DataHeader.LENGTH) break;
+                const header = @as(*const protocol.DataHeader, @ptrCast(@alignCast(&frame_data[0])));
+
+                _ = self.padding_frames_received.fetchAdd(1, .monotonic);
+                self.last_padding_term_id.store(header.term_id, .monotonic);
+                self.last_padding_term_offset.store(header.term_offset, .monotonic);
+                self.last_padding_length.store(header.frame_length, .monotonic);
+
+                self.mutex.lock();
+                var image_for_status: ?*Image = null;
+                for (self.images.items) |image| {
+                    if (image.session_id == header.session_id and image.stream_id == header.stream_id and
+                        sameAddress(image.source_address, src_addr))
+                    {
+                        if (image.insertPadding(self.counters_map, header)) {
+                            image.last_activity_ns = @as(i64, @intCast(time.nanoTimestamp()));
+                            image_for_status = image;
+                        }
+                        break;
+                    }
+                }
+                self.mutex.unlock();
+
+                if (image_for_status) |img| {
+                    self.sendStatus(img) catch |err| switch (err) {
+                        error.WouldBlock => {},
+                        else => std.log.err("receiver padding STATUS send failed session_id={} stream_id={} err={}", .{ img.session_id, img.stream_id, err }),
+                    };
+                }
+                work += 1;
             } else if (frame_type_raw == @intFromEnum(protocol.FrameType.setup)) {
                 if (frame_data.len < protocol.SetupHeader.LENGTH) {
                     offset += aligned_advance;
@@ -455,6 +702,7 @@ pub const Receiver = struct {
                     continue;
                 }
                 const status = @as(*const protocol.StatusMessage, @ptrCast(@alignCast(&frame_data[0])));
+                _ = self.status_messages_received.fetchAdd(1, .monotonic);
                 self.mutex.lock();
                 // STATUS frames are flow-control feedback for publications; queue for conductor/sender.
                 self.pending_status_messages.append(self.allocator, .{
@@ -467,8 +715,22 @@ pub const Receiver = struct {
                 }) catch {};
                 self.mutex.unlock();
                 work += 1;
+            } else if (frame_type_raw == @intFromEnum(protocol.FrameType.nak)) {
+                if (frame_data.len >= protocol.NakHeader.LENGTH) {
+                    const nak = @as(*const protocol.NakHeader, @ptrCast(@alignCast(&frame_data[0])));
+                    self.mutex.lock();
+                    self.pending_nak_messages.append(self.allocator, .{
+                        .session_id = nak.session_id,
+                        .stream_id = nak.stream_id,
+                        .term_id = nak.term_id,
+                        .term_offset = nak.term_offset,
+                        .length = nak.length,
+                        .source_address = src_addr,
+                    }) catch {};
+                    self.mutex.unlock();
+                    work += 1;
+                }
             }
-            // nak and other types: skip
 
             offset += aligned_advance;
         }
@@ -480,20 +742,51 @@ pub const Receiver = struct {
     pub fn doWork(self: *Receiver) i32 {
         var src_addr: net.Address = undefined;
         const bytes_read = self.recv_endpoint.recv(&self.recv_buf, &src_addr) catch |err| {
-            if (err == error.WouldBlock) {
-                return 0;
-            }
-            if (builtin.mode == .Debug) {
+            if (err != error.WouldBlock and builtin.mode == .Debug) {
                 std.debug.print("[RECEIVER] recv error: {any}\n", .{err});
             }
-            return 0;
+            return self.refreshSubscriberStatuses();
         };
 
         if (bytes_read == 0) {
-            return 0;
+            return self.refreshSubscriberStatuses();
         }
 
         return self.processDatagram(self.recv_buf[0..bytes_read], src_addr);
+    }
+
+    fn refreshSubscriberStatuses(self: *Receiver) i32 {
+        var work: i32 = 0;
+        const now_ns = @as(i64, @intCast(time.nanoTimestamp()));
+        self.mutex.lock();
+        const images = self.images.items;
+        for (images) |image| {
+            if (image.nak_state.shouldSend(now_ns)) {
+                self.mutex.unlock();
+                self.sendNak(image) catch |err| {
+                    std.log.err("receiver idle NAK send failed session_id={} stream_id={} err={}", .{ image.session_id, image.stream_id, err });
+                };
+                image.nak_state.clear();
+                work += 1;
+                self.mutex.lock();
+            }
+
+            const subscriber_position = self.counters_map.get(image.subscriber_position.counter_id);
+            const consumption_position = @min(image.rebuild_position, subscriber_position);
+            if (consumption_position > image.last_status_position or
+                now_ns - image.last_status_ns >= STATUS_REFRESH_NS)
+            {
+                self.mutex.unlock();
+                self.sendStatus(image) catch |err| switch (err) {
+                    error.WouldBlock => {},
+                    else => std.log.err("receiver refresh STATUS send failed session_id={} stream_id={} err={}", .{ image.session_id, image.stream_id, err }),
+                };
+                work += 1;
+                self.mutex.lock();
+            }
+        }
+        self.mutex.unlock();
+        return work;
     }
 
     pub fn onAddSubscription(self: *Receiver, image: *Image) !void {
@@ -505,6 +798,17 @@ pub const Receiver = struct {
     pub fn hasImage(self: *Receiver, session_id: i32, stream_id: i32) bool {
         for (self.images.items) |image| {
             if (image.session_id == session_id and image.stream_id == stream_id) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn hasImageFrom(self: *Receiver, session_id: i32, stream_id: i32, source_address: net.Address) bool {
+        for (self.images.items) |image| {
+            if (image.session_id == session_id and image.stream_id == stream_id and
+                sameAddress(image.source_address, source_address))
+            {
                 return true;
             }
         }
@@ -542,6 +846,7 @@ pub const Receiver = struct {
 
             const nak_bytes = @as([*]const u8, @ptrCast(&nak_header))[0..protocol.NakHeader.LENGTH];
             _ = try self.send_endpoint.send(image.source_address, nak_bytes);
+            _ = self.nak_frames_sent.fetchAdd(1, .monotonic);
 
             // Log send_nak event
             if (self.event_log) |el| {
@@ -553,7 +858,11 @@ pub const Receiver = struct {
 
     // Send a STATUS message to source_address acknowledging receipt
     pub fn sendStatus(self: *Receiver, image: *Image) !void {
-        const consumption_position = image.rebuild_position;
+        // STATUS must describe the slowest client-visible position, not merely
+        // network receipt. Otherwise a fast source can lap the three-term ring
+        // and overwrite frames before the subscriber reads them.
+        const subscriber_position = self.counters_map.get(image.subscriber_position.counter_id);
+        const consumption_position = @min(image.rebuild_position, subscriber_position);
         const consumption_term_id = image.initial_term_id + @as(i32, @intCast(@divTrunc(consumption_position, @as(i64, @intCast(image.term_length)))));
         const consumption_term_offset = @as(i32, @intCast(@mod(consumption_position, @as(i64, @intCast(image.term_length)))));
 
@@ -566,11 +875,23 @@ pub const Receiver = struct {
         status.stream_id = image.stream_id;
         status.consumption_term_id = consumption_term_id;
         status.consumption_term_offset = consumption_term_offset;
-        status.receiver_window = @as(i32, @divTrunc(image.term_length, 4));
+        // Advertise one complete term. This is the initial local-driver window;
+        // the subscriber position counter still bounds the next refresh, while
+        // a same-driver Java publication/subscription can drain a sustained
+        // burst without stalling at the old quarter-term threshold.
+        status.receiver_window = image.term_length;
         status.receiver_id = 0;
+
+        self.last_status_stream_id.store(image.stream_id, .monotonic);
+        self.last_status_position.store(consumption_position, .monotonic);
+        self.last_status_rebuild_position.store(image.rebuild_position, .monotonic);
+        self.last_status_subscriber_position.store(subscriber_position, .monotonic);
 
         const status_bytes = @as([*]const u8, @ptrCast(&status))[0..protocol.StatusMessage.LENGTH];
         _ = try self.send_endpoint.send(image.source_address, status_bytes);
+        _ = self.status_messages_sent.fetchAdd(1, .monotonic);
+        image.last_status_position = consumption_position;
+        image.last_status_ns = @as(i64, @intCast(time.nanoTimestamp()));
     }
 };
 
@@ -690,6 +1011,39 @@ test "Receiver onAddSubscription and onRemoveSubscription" {
     try std.testing.expect(!receiver.hasImage(1, 2));
 }
 
+test "Receiver distinguishes same session and stream by source address" {
+    const allocator = std.testing.allocator;
+
+    var meta_buffer align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
+    var values_buffer align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
+    var counters_map = counters.CountersMap.init(&meta_buffer, &values_buffer);
+    const dummy_socket: net.socket_t = undefined;
+    var recv_ep = transport.ReceiveChannelEndpoint{ .socket = dummy_socket, .bound_address = undefined };
+    var send_ep = transport.SendChannelEndpoint{ .socket = dummy_socket };
+    var receiver = try Receiver.init(allocator, &recv_ep, &send_ep, &counters_map, null);
+    defer receiver.deinit();
+
+    // onAddSubscription transfers image ownership to Receiver. Allocate both
+    // objects accordingly so receiver.deinit can release the production-shaped
+    // ownership graph during this lifecycle test.
+    const log_buf = try allocator.create(logbuffer.LogBuffer);
+    log_buf.* = try logbuffer.LogBuffer.init(allocator, 64 * 1024);
+    errdefer {
+        log_buf.deinit();
+        allocator.destroy(log_buf);
+    }
+    const hwm_handle = counters_map.allocate(counters.RECEIVER_HWM, "source-aware-hwm");
+    const sub_pos_handle = counters_map.allocate(counters.SUBSCRIBER_POSITION, "source-aware-sub");
+    const source = net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123);
+    const other_source = net.Address.initIp4(.{ 127, 0, 0, 1 }, 40124);
+    const image = try allocator.create(Image);
+    image.* = Image.init(7, 103, 64 * 1024, 1500, 0, 0, log_buf, hwm_handle, sub_pos_handle, source);
+
+    try receiver.onAddSubscription(image);
+    try std.testing.expect(receiver.hasImageFrom(7, 103, source));
+    try std.testing.expect(!receiver.hasImageFrom(7, 103, other_source));
+}
+
 test "Image insertFrame writes data at correct offset" {
     const allocator = std.testing.allocator;
 
@@ -736,12 +1090,116 @@ test "Image insertFrame writes data at correct offset" {
     // Verify data was written
     const term_buffer = log_buf.termBuffer(0);
     try std.testing.expect(term_buffer.len > 0);
+    try std.testing.expectEqual(
+        @as(i32, @intCast(protocol.DataHeader.LENGTH + payload.len)),
+        std.mem.readInt(i32, term_buffer[0..4], .little),
+    );
+    try std.testing.expectEqualSlices(
+        u8,
+        payload,
+        term_buffer[protocol.DataHeader.LENGTH .. protocol.DataHeader.LENGTH + payload.len],
+    );
 
     // Verify HWM was updated
     const hwm = counters_map.get(hwm_handle.counter_id);
     try std.testing.expect(hwm > 0);
     try std.testing.expectEqual(hwm, image.rebuild_position);
     try std.testing.expectEqual(@as(i64, 0), counters_map.get(sub_pos_handle.counter_id));
+}
+
+test "Image clears a reused term partition before rebuilding" {
+    const allocator = std.testing.allocator;
+    var meta_buffer align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
+    var values_buffer align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
+    var counters_map = counters.CountersMap.init(&meta_buffer, &values_buffer);
+    var log_buf = try logbuffer.LogBuffer.init(allocator, 64 * 1024);
+    defer log_buf.deinit();
+
+    const hwm_handle = counters_map.allocate(counters.RECEIVER_HWM, "wrap-hwm");
+    const sub_pos_handle = counters_map.allocate(counters.SUBSCRIBER_POSITION, "wrap-sub");
+    var image = Image.init(1, 2, 64 * 1024, 1500, 0, 0, &log_buf, hwm_handle, sub_pos_handle, undefined);
+
+    var header: protocol.DataHeader = undefined;
+    header.frame_length = @as(i32, @intCast(protocol.DataHeader.LENGTH + 3));
+    header.version = protocol.VERSION;
+    header.flags = 0;
+    header.type = @intFromEnum(protocol.FrameType.data);
+    header.term_offset = 0;
+    header.session_id = 1;
+    header.stream_id = 2;
+    header.term_id = 0;
+    header.reserved_value = 0;
+    try std.testing.expect(image.insertFrame(&counters_map, &header, "old"));
+
+    image.rebuild_position = 3 * @as(i64, image.term_length);
+    header.term_id = 3;
+    try std.testing.expect(image.insertFrame(&counters_map, &header, "new"));
+
+    const term_buffer = log_buf.termBuffer(0);
+    try std.testing.expectEqualStrings("new", term_buffer[protocol.DataHeader.LENGTH .. protocol.DataHeader.LENGTH + 3]);
+    try std.testing.expectEqual(@as(i32, 3), image.term_ids[0]);
+}
+
+test "Image rejects stale frames after a reused term partition advances" {
+    const allocator = std.testing.allocator;
+    var meta_buffer align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
+    var values_buffer align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
+    var counters_map = counters.CountersMap.init(&meta_buffer, &values_buffer);
+    var log_buf = try logbuffer.LogBuffer.init(allocator, 64 * 1024);
+    defer log_buf.deinit();
+
+    const hwm_handle = counters_map.allocate(counters.RECEIVER_HWM, "stale-hwm");
+    const sub_pos_handle = counters_map.allocate(counters.SUBSCRIBER_POSITION, "stale-sub");
+    var image = Image.init(1, 2, 64 * 1024, 1500, 0, 0, &log_buf, hwm_handle, sub_pos_handle, undefined);
+
+    var header: protocol.DataHeader = undefined;
+    header.frame_length = @as(i32, @intCast(protocol.DataHeader.LENGTH + 3));
+    header.version = protocol.VERSION;
+    header.flags = 0;
+    header.type = @intFromEnum(protocol.FrameType.data);
+    header.term_offset = 0;
+    header.session_id = 1;
+    header.stream_id = 2;
+    header.term_id = 3;
+    header.reserved_value = 0;
+    try std.testing.expect(image.insertFrame(&counters_map, &header, "new"));
+
+    header.term_id = 0;
+    try std.testing.expect(!image.insertFrame(&counters_map, &header, "old"));
+    const term_buffer = log_buf.termBuffer(0);
+    try std.testing.expectEqualStrings("new", term_buffer[protocol.DataHeader.LENGTH .. protocol.DataHeader.LENGTH + 3]);
+    try std.testing.expectEqual(@as(i32, 3), image.term_ids[0]);
+}
+
+test "Image insertPadding advances rebuild position across a term" {
+    const allocator = std.testing.allocator;
+
+    var meta_buffer align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
+    var values_buffer align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
+    var counters_map = counters.CountersMap.init(&meta_buffer, &values_buffer);
+
+    var log_buf = try logbuffer.LogBuffer.init(allocator, 64 * 1024);
+    defer log_buf.deinit();
+
+    const hwm_handle = counters_map.allocate(counters.RECEIVER_HWM, "test-padding-hwm");
+    const sub_pos_handle = counters_map.allocate(counters.SUBSCRIBER_POSITION, "test-padding-sub");
+    var image = Image.init(1, 2, 64 * 1024, 1500, 0, 0, &log_buf, hwm_handle, sub_pos_handle, undefined);
+    image.rebuild_position = 64 * 1024 - 32;
+
+    var header: protocol.DataHeader = undefined;
+    header.frame_length = 32;
+    header.version = protocol.VERSION;
+    header.flags = protocol.DataHeader.PADDING_FLAG;
+    header.type = @intFromEnum(protocol.FrameType.padding);
+    header.term_offset = 64 * 1024 - 32;
+    header.session_id = 1;
+    header.stream_id = 2;
+    header.term_id = 0;
+    header.reserved_value = 0;
+
+    try std.testing.expect(image.insertPadding(&counters_map, &header));
+    try std.testing.expectEqual(@as(i64, 64 * 1024), image.rebuild_position);
+    try std.testing.expectEqual(@as(i64, 64 * 1024), counters_map.get(hwm_handle.counter_id));
 }
 
 test "Image hasGap detects missing frame" {
@@ -870,4 +1328,42 @@ test "Receiver queues STATUS messages for sender flow control" {
     try std.testing.expectEqual(@as(i32, 1001), pending[0].stream_id);
     try std.testing.expectEqual(@as(i32, 2048), pending[0].consumption_term_offset);
     try std.testing.expectEqual(@as(i32, 4096), pending[0].receiver_window);
+}
+
+test "Receiver queues NAK messages for sender retransmission" {
+    const allocator = std.testing.allocator;
+    var meta_buffer align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
+    var values_buffer align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
+    var counters_map = counters.CountersMap.init(&meta_buffer, &values_buffer);
+
+    const dummy_socket: net.socket_t = undefined;
+    var recv_endpoint = transport.ReceiveChannelEndpoint{
+        .socket = dummy_socket,
+        .bound_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 0),
+    };
+    var send_endpoint = transport.SendChannelEndpoint{ .socket = dummy_socket };
+    var receiver = try Receiver.init(allocator, &recv_endpoint, &send_endpoint, &counters_map, null);
+    defer receiver.deinit();
+
+    var nak: protocol.NakHeader = undefined;
+    nak.frame_length = protocol.NakHeader.LENGTH;
+    nak.version = protocol.VERSION;
+    nak.flags = 0;
+    nak.type = @intFromEnum(protocol.FrameType.nak);
+    nak.session_id = 9;
+    nak.stream_id = 1001;
+    nak.term_id = 7;
+    nak.term_offset = 2048;
+    nak.length = 4096;
+
+    const bytes = @as([*]const u8, @ptrCast(&nak))[0..protocol.NakHeader.LENGTH];
+    try std.testing.expectEqual(@as(i32, 1), receiver.processDatagram(bytes, net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123)));
+
+    const pending = receiver.drainPendingNakMessages();
+    defer allocator.free(pending);
+    try std.testing.expectEqual(@as(usize, 1), pending.len);
+    try std.testing.expectEqual(@as(i32, 9), pending[0].session_id);
+    try std.testing.expectEqual(@as(i32, 7), pending[0].term_id);
+    try std.testing.expectEqual(@as(i32, 2048), pending[0].term_offset);
+    try std.testing.expectEqual(@as(i32, 4096), pending[0].length);
 }

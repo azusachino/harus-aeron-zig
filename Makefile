@@ -1,8 +1,6 @@
 NIX_RUN := $(if $(IN_NIX_SHELL),,nix develop --command )
 export ZIG_GLOBAL_CACHE_DIR := $(CURDIR)/.zig-global-cache
 export ZIG_LOCAL_CACHE_DIR := $(CURDIR)/.zig-cache
-AERON_VERSION := 1.50.4
-AERON_ALL_JAR_URL := https://repo1.maven.org/maven2/io/aeron/aeron-all/$(AERON_VERSION)/aeron-all-$(AERON_VERSION).jar
 AERON_UPSTREAM_REPO ?= https://github.com/aeron-io/aeron.git
 AERON_UPSTREAM_REF ?= release/1.50.x
 AERON_UPSTREAM_DIR ?= vendor/aeron
@@ -11,6 +9,9 @@ ZIG_UPSTREAM_REF ?= 0.16.x
 ZIG_UPSTREAM_DIR ?= vendor/zig
 INTEROP_ZIG_BUILD_ENV_IMAGE ?= harus-aeron-zig-build-env:latest
 DOCS_PORT ?= 8000
+SOAK_ITERS ?= 1000000
+SOAK_OPTIMIZE ?= ReleaseFast
+INTEROP_SOAK_MESSAGES ?= 1000
 
 .DEFAULT_GOAL := help
 
@@ -22,10 +23,10 @@ endif
 
 .PHONY: help fmt fmt-check build test lint check clean run tutorial-check lesson-lint \
        docs docs-serve docs-build \
-       fuzz bench stress \
+       fuzz bench stress soak-0.9 interop-soak-0.9 \
        nix-image k8s-up k8s-down k8s-status k8s-logs colima-up colima-down \
        setup setup-interop setup-interop-base setup-upstream-aeron setup-upstream-zig \
-       interop interop-smoke interop-status interop-preflight test-protocol test-driver test-archive test-cluster test-scenarios examples status
+       interop interop-smoke interop-status interop-preflight test-protocol test-driver test-archive test-cluster test-scenarios test-examples examples status
 
 help:  ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "Usage: make \033[36m<target>\033[0m\n\n"} \
@@ -71,6 +72,9 @@ test-cluster:  ## Run cluster scenario tests
 
 test-scenarios: test-protocol test-driver test-archive test-cluster  ## Run all scenario tests
 
+test-examples:  ## Run happy/evil/edge behavior tests for examples
+	$(NIX_RUN) zig build test-examples
+
 examples:  ## Build all examples
 	$(NIX_RUN) zig build examples
 
@@ -79,7 +83,7 @@ lint: fmt-check
 lesson-lint:  ## Verify all LESSON annotation slugs have a matching docs/tutorial/ chapter file
 	bash scripts/lesson-lint.sh
 
-check: fmt-check build test test-scenarios lesson-lint  ## Full check: fmt + build + all tests
+check: fmt-check build test test-scenarios test-examples examples lesson-lint  ## Full check: fmt + build + all tests
 
 docs: docs-serve  ## Preview tutorial/docs site locally
 
@@ -101,6 +105,7 @@ clean:
 setup: setup-interop  ## Prepare local helper artifacts for interop and benchmarks
 
 setup-interop:
+	@python3 scripts/trading.py ensure-java-artifact
 	@mkdir -p vendor
 	@std_dir="$$( $(NIX_RUN) zig env | sed -n 's/.*"std_dir": *"\([^"]*\)".*/\1/p' )"; \
 	if [ -n "$$std_dir" ]; then \
@@ -117,11 +122,12 @@ setup-interop:
 
 setup-interop-base:
 	@$(MAKE) interop-preflight
+	@python3 scripts/trading.py ensure-java-artifact
 	@if $(CONTAINER_ENGINE) image inspect "$(INTEROP_ZIG_BUILD_ENV_IMAGE)" >/dev/null 2>&1; then \
 		echo "Using cached interop build env image: $(INTEROP_ZIG_BUILD_ENV_IMAGE)"; \
 	else \
 		echo "Building interop build env image: $(INTEROP_ZIG_BUILD_ENV_IMAGE)"; \
-		$(CONTAINER_ENGINE) build -f deploy/Dockerfile --target build-env -t "$(INTEROP_ZIG_BUILD_ENV_IMAGE)" .; \
+		$(CONTAINER_ENGINE) build -f deploy/Containerfile --target build-env -t "$(INTEROP_ZIG_BUILD_ENV_IMAGE)" .; \
 	fi
 
 setup-upstream-aeron:
@@ -196,6 +202,9 @@ bench:  ## Run benchmarks (ReleaseFast)
 stress:  ## Run stress tests
 	$(NIX_RUN) zig build stress
 
+soak-0.9:  ## Run the long 0.9 local soak suite (override SOAK_ITERS)
+	SOAK_ITERS=$(SOAK_ITERS) $(NIX_RUN) zig build stress -Doptimize=$(SOAK_OPTIMIZE)
+
 # =============================================================================
 # Interop Testing
 # =============================================================================
@@ -229,12 +238,17 @@ interop-preflight:
 interop:  ## Run full interop test suite (100 messages, all scenarios)
 	@$(MAKE) interop-preflight
 	@$(MAKE) setup-interop-base
-	AERON_VERSION=$(AERON_VERSION) ZIG_BUILD_ENV_IMAGE=$(INTEROP_ZIG_BUILD_ENV_IMAGE) MSG_COUNT=100 $(COMPOSE) -f deploy/docker-compose.ci.yml up --build --abort-on-container-exit --exit-code-from java-client
+	ZIG_BUILD_ENV_IMAGE=$(INTEROP_ZIG_BUILD_ENV_IMAGE) MSG_COUNT=100 $(COMPOSE) -f deploy/docker-compose.ci.yml up --build --abort-on-container-exit --exit-code-from java-client
 
 interop-smoke:  ## Run quick smoke interop test (10 messages, CI-friendly)
 	@$(MAKE) interop-preflight
 	@$(MAKE) setup-interop-base
-	AERON_VERSION=$(AERON_VERSION) ZIG_BUILD_ENV_IMAGE=$(INTEROP_ZIG_BUILD_ENV_IMAGE) MSG_COUNT=10 $(COMPOSE) -f deploy/docker-compose.ci.yml up --build --abort-on-container-exit --exit-code-from java-client
+	ZIG_BUILD_ENV_IMAGE=$(INTEROP_ZIG_BUILD_ENV_IMAGE) MSG_COUNT=10 $(COMPOSE) -f deploy/docker-compose.ci.yml up --build --abort-on-container-exit --exit-code-from java-client
+
+interop-soak-0.9:  ## Run an extended 0.9 Java↔Zig interop soak (override INTEROP_SOAK_MESSAGES)
+	@$(MAKE) interop-preflight
+	@$(MAKE) setup-interop-base
+	ZIG_BUILD_ENV_IMAGE=$(INTEROP_ZIG_BUILD_ENV_IMAGE) MSG_COUNT=$(INTEROP_SOAK_MESSAGES) $(COMPOSE) -f deploy/docker-compose.ci.yml up --build --abort-on-container-exit --exit-code-from java-client
 
 interop-status:  ## Show status of running interop jobs
 	@echo "=== Interop Jobs ==="

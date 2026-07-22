@@ -5,6 +5,14 @@ const aeron = @import("aeron");
 const Aeron = aeron.Aeron;
 const MediaDriver = aeron.driver.MediaDriver;
 
+fn sleepNs(nanoseconds: u64) void {
+    var ts: std.c.timespec = .{
+        .sec = @intCast(nanoseconds / std.time.ns_per_s),
+        .nsec = @intCast(nanoseconds % std.time.ns_per_s),
+    };
+    _ = std.c.nanosleep(&ts, null);
+}
+
 pub fn main() !void {
     // ZIG: DebugAllocator tracks memory allocations and detects leaks on deinit.
     // AERON: Clients need an allocator for CnC.dat mapping and internal Publication/Subscription handles.
@@ -40,11 +48,11 @@ pub fn main() !void {
     // ZIG: Wait for the Conductor to respond via the broadcast buffer.
     // AERON: We must poll doWork() to see the RESPONSE_ON_PUBLICATION_READY event.
     var publication: ?*aeron.ExclusivePublication = null;
-    var timer = try std.time.Timer.start();
-    while (publication == null and timer.read() < 10 * std.time.ns_per_s) {
+    const ready_start_ms = aeron.time.milliTimestamp();
+    while (publication == null and aeron.time.milliTimestamp() - ready_start_ms < 10_000) {
         _ = client.doWork();
         publication = client.getPublication(registration_id);
-        std.Thread.sleep(100 * std.time.ns_per_ms);
+        sleepNs(100 * std.time.ns_per_ms);
     }
 
     if (publication == null) {
@@ -57,9 +65,9 @@ pub fn main() !void {
 
     // Publish 100 messages
     var buffer: [256]u8 = undefined;
-    var publish_timer = try std.time.Timer.start();
+    const publish_start_ms = aeron.time.milliTimestamp();
     var i: u32 = 0;
-    while (i < 100 and publish_timer.read() < 10 * std.time.ns_per_s) {
+    while (i < 100 and aeron.time.milliTimestamp() - publish_start_ms < 10_000) {
         _ = client.doWork(); // Poll for connection updates
 
         // ZIG: bufPrint formats strings into a fixed-size stack buffer to avoid allocation.
@@ -75,11 +83,11 @@ pub fn main() !void {
                 i += 1;
             },
             .back_pressure => {
-                std.Thread.sleep(1 * std.time.ns_per_ms);
+                sleepNs(1 * std.time.ns_per_ms);
             },
             .not_connected => {
                 // IPC needs a subscriber to connect
-                std.Thread.sleep(10 * std.time.ns_per_ms);
+                sleepNs(10 * std.time.ns_per_ms);
             },
             else => |r| {
                 std.debug.print("Error publishing message {d}: {any}\n", .{ i, r });

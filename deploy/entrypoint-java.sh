@@ -23,6 +23,7 @@ echo "[CLIENT] Found cnc.dat: $(ls -l $AERON_DIR_PATH/cnc.dat)"
 rm -f /tmp/smoke-ready /tmp/checker-done
 
 JAVA_OPTS="--add-opens java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/java.util.zip=ALL-UNNAMED"
+JAVA_OPTS="$JAVA_OPTS -Daeron.sample.channel=${AERON_SAMPLE_CHANNEL:-aeron:udp?endpoint=zig-driver:20121}"
 
 # Run InteropSmoke in background — it establishes pub/sub and populates counters.
 java $JAVA_OPTS \

@@ -10,7 +10,8 @@ RUN if [ "${ZIG_BUILD_ENV_IMAGE}" = "nixos/nix:latest" ]; then \
 
 FROM build-env AS builder
 COPY . .
-RUN nix --extra-experimental-features nix-command --extra-experimental-features flakes develop --command make build
+RUN nix --extra-experimental-features nix-command --extra-experimental-features flakes develop --command make build \
+    && rm -rf .zig-cache .zig-global-cache
 
 FROM builder
 WORKDIR /app

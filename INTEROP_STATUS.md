@@ -2,7 +2,7 @@
 
 Goal: `make interop-smoke` passes (Zig driver ↔ Java client, real UDP path, 10 messages).
 
-## Current Status: PASSING ✅ (2026-07-03)
+## Current Status: PASSING ✅ (2026-07-19)
 
 `make interop-smoke` against `aeron@1.50.4` completes with both containers exiting `0`:
 
@@ -19,6 +19,33 @@ The Java client drives the full wire path through the Zig driver: `ADD_SUBSCRIPT
 → `ON_SUBSCRIPTION_READY` round-trip via the ring buffer / broadcast buffer, real UDP
 `SETUP` frame parsing, `DATA` frame reassembly, and `STATUS` message replies — plus a
 reconnect cycle.
+
+The extended 0.9 gate also passed on 2026-07-19 with the vendored Java artifact
+and `INTEROP_SOAK_MESSAGES=1000`:
+
+```text
+MSG_COUNT=1000
+all required counter types detected
+MultiStreamSmoke passed
+ExclusivePublicationSmoke passed
+ReconnectSmoke passed
+[CLIENT] All checks passed
+```
+
+The run is reproducible with:
+
+```bash
+COMPOSE=podman-compose INTEROP_SOAK_MESSAGES=1000 make interop-soak-0.9
+```
+
+The gate caught and closed three current 0.9 issues: the root Compose build
+context needed `deploy/` prefixes in the Java Containerfile, Java containers
+needed the `zig-driver` UDP endpoint instead of a container-local `localhost`,
+and the Agrona ring-buffer trailer offsets needed to match Java's reserved
+128-byte first slot (`TAIL=128`, `HEAD_CACHE=256`, `HEAD=384`, `CORRELATION=512`).
+The Java smoke now drains while offering, and the local initial flow-control
+window spans one complete term so a sustained 1,000-message run does not stop
+at the old 16 KiB quarter-term threshold.
 
 ## History
 

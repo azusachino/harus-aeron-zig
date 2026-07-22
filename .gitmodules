@@ -6,3 +6,6 @@
 	path = vendor/zig
 	url = https://codeberg.org/ziglang/zig.git
 	branch = 0.16.x
+[submodule "vendor/bun"]
+	path = vendor/bun
+	url = https://github.com/oven-sh/bun.git

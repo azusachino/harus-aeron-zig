@@ -74,7 +74,7 @@ pub fn main() !void {
 
                 for (0..3) |j| {
                     if (i == j) continue;
-                    if (nodes[j].election.onRequestVote(term, log_term, log_pos, @intCast(i))) {
+                    if (nodes[j].election.onRequestVote(term, log_term, log_pos, @intCast(i), now_ns)) {
                         nodes[i].election.onVote(term, @intCast(i), @intCast(j), true);
                     }
                 }
@@ -184,6 +184,7 @@ pub fn main() !void {
         nodes[1].election.leader_ship_term_id,
         nodes[1].election.log_position,
         1,
+        now_ns,
     );
     nodes[1].election.onVote(nodes[1].election.candidate_term_id, 1, 2, true);
 

@@ -2,6 +2,7 @@
 // Reference: https://github.com/aeron-io/aeron/blob/master/aeron-driver/src/main/java/io/aeron/driver/Sender.java
 
 const std = @import("std");
+const builtin = @import("builtin");
 const net = @import("../net.zig");
 const time = @import("../time.zig");
 const logbuffer = @import("../logbuffer/log_buffer.zig");
@@ -13,6 +14,8 @@ const endpoint = @import("../transport/endpoint.zig");
 const event_log_mod = @import("../event_log.zig");
 const flow_control = @import("flow_control.zig");
 const INVALID_SOCKET: net.socket_t = std.math.maxInt(net.socket_t);
+const MAX_DATA_FRAMES_PER_WORK: i32 = 4;
+const MAX_RETRANSMIT_FRAMES_PER_WORK: usize = 32;
 
 pub const RetransmitRequest = struct {
     session_id: i32,
@@ -20,6 +23,7 @@ pub const RetransmitRequest = struct {
     term_id: i32,
     term_offset: i32,
     length: i32,
+    source_address: net.Address,
     timestamp_ms: i64,
 };
 
@@ -47,6 +51,31 @@ pub const Sender = struct {
     retransmit_queue: std.ArrayList(RetransmitRequest),
     current_time_ms: i64,
     event_log: ?*event_log_mod.EventLog,
+    status_messages_applied: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    last_status_session_id: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_status_stream_id: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_status_term_id: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_status_term_offset: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_status_window: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_status_limit: std.atomic.Value(i64) = std.atomic.Value(i64).init(0),
+    data_frames_sent: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    last_sent_term_id: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_sent_term_offset: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_sent_frame_length: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    stale_frames_skipped: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    last_expected_term_id: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_expected_term_offset: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    retransmit_requests: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    retransmits_sent: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
+    last_retransmit_term_id: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_retransmit_term_offset: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_retransmit_length: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_retransmit_source_port: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_retransmit_frame_term_id: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_retransmit_frame_term_offset: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_retransmit_frame_session_id: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_retransmit_frame_stream_id: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
+    last_retransmit_frame_length: std.atomic.Value(i32) = std.atomic.Value(i32).init(0),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -101,6 +130,9 @@ pub const Sender = struct {
         // Always send SETUP periodically — required before any STATUS can arrive
         const now_ms = self.current_time_ms;
         if (now_ms - publication.last_setup_time_ms >= 50) {
+            if (builtin.mode == .Debug and publication.stream_id == 103 and publication.last_setup_time_ms == 0) {
+                std.debug.print("[SENDER] SETUP: session={d} dest={any}\n", .{ publication.session_id, publication.dest_address });
+            }
             if (self.sendSetupFrame(publication)) {
                 publication.last_setup_time_ms = now_ms;
                 work_count += 1;
@@ -220,15 +252,18 @@ pub const Sender = struct {
         var work_count: i32 = 0;
         var current_pos: i64 = sender_pos;
 
-        // Get metadata and active partition
-        const meta = publication.log_buffer.metaData();
-        const term_count = meta.activeTermCount();
-        const active_partition = metadata.activePartitionIndex(term_count);
-        const term_buffer = publication.log_buffer.termBuffer(active_partition);
         const term_length = publication.log_buffer.term_length;
 
-        while (current_pos < pub_limit) {
-            // Compute position within active term
+        // Keep a duty cycle bounded. Draining a full receiver window in one
+        // loop can burst hundreds of UDP datagrams before the peer's driver
+        // gets a chance to report loss or advance its rebuild position. The
+        // Java sender applies the same kind of bounded work scheduling.
+        while (current_pos < pub_limit and work_count < MAX_DATA_FRAMES_PER_WORK) {
+            // Follow the stream position across rotating term partitions. The active
+            // partition is not necessarily the partition containing sender_pos.
+            const term_count = @as(i32, @intCast(@divTrunc(current_pos, @as(i64, term_length))));
+            const partition = metadata.activePartitionIndex(term_count);
+            const term_buffer = publication.log_buffer.termBuffer(partition);
             const term_offset = @as(i32, @intCast(@mod(current_pos, @as(i64, term_length))));
             const buffer_offset = @as(usize, @intCast(term_offset));
 
@@ -241,6 +276,18 @@ pub const Sender = struct {
 
             // If frame_length <= 0, no committed data yet
             if (frame_length <= 0) break;
+
+            // A reused term partition still contains committed bytes from the
+            // previous term until the publisher overwrites them. Frame length
+            // alone is therefore not an availability check: sending that old
+            // frame at the new stream position makes the Java receiver reject
+            // it and creates an unrecoverable NAK loop.
+            const expected_term_id = publication.initial_term_id +% term_count;
+            const committed_header = @as(*const protocol.DataHeader, @ptrCast(@alignCast(&term_buffer[buffer_offset])));
+            if (committed_header.term_id != expected_term_id or committed_header.term_offset != term_offset) {
+                _ = self.stale_frames_skipped.fetchAdd(1, .monotonic);
+                break;
+            }
 
             // Compute aligned_len: pad to FRAME_ALIGNMENT=32
             const align_size = @as(i32, @intCast(protocol.FRAME_ALIGNMENT));
@@ -262,6 +309,17 @@ pub const Sender = struct {
                     break;
                 },
             }
+
+            _ = self.data_frames_sent.fetchAdd(1, .monotonic);
+            const sent_header = @as(*const protocol.DataHeader, @ptrCast(@alignCast(&frame_data[0])));
+            self.last_expected_term_id.store(publication.initial_term_id +% term_count, .monotonic);
+            self.last_expected_term_offset.store(term_offset, .monotonic);
+            if (sent_header.term_id != publication.initial_term_id +% term_count or sent_header.term_offset != term_offset) {
+                _ = self.stale_frames_skipped.fetchAdd(1, .monotonic);
+            }
+            self.last_sent_term_id.store(sent_header.term_id, .monotonic);
+            self.last_sent_term_offset.store(sent_header.term_offset, .monotonic);
+            self.last_sent_frame_length.store(sent_header.frame_length, .monotonic);
 
             // Log frame_out event
             if (self.event_log) |el| {
@@ -291,20 +349,23 @@ pub const Sender = struct {
 
             // Find publication with matching session_id and stream_id
             var found = false;
+            var sent = false;
             for (self.publications.items) |publication| {
                 if (publication.session_id == req.session_id and publication.stream_id == req.stream_id) {
-                    if (self.sendRetransmit(publication, req)) {
-                        work_count += 1;
-                    }
+                    const retransmits = self.sendRetransmit(publication, &self.retransmit_queue.items[i]);
+                    work_count += @as(i32, @intCast(retransmits));
+                    sent = self.retransmit_queue.items[i].length == 0;
                     found = true;
                     break;
                 }
             }
 
-            if (found) {
-                // Remove processed retransmit
+            if (found and sent) {
+                // Remove only a successfully sent retransmit. A non-blocking
+                // socket may temporarily reject the send; retain the request
+                // so the next duty cycle can retry it.
                 _ = self.retransmit_queue.swapRemove(i);
-            } else {
+            } else if (!found or !sent) {
                 i += 1;
             }
         }
@@ -312,9 +373,7 @@ pub const Sender = struct {
         return work_count;
     }
 
-    fn sendRetransmit(self: *Sender, publication: *NetworkPublication, req: RetransmitRequest) bool {
-        _ = self;
-
+    fn sendRetransmit(self: *Sender, publication: *NetworkPublication, req: *RetransmitRequest) usize {
         // Find the correct term partition for req.term_id relative to initial_term_id
         const term_count_delta = req.term_id -% publication.initial_term_id;
         const partition = @mod(@as(i32, @intCast(term_count_delta)), @as(i32, @intCast(metadata.PARTITION_COUNT)));
@@ -327,26 +386,73 @@ pub const Sender = struct {
         const length = @as(usize, @intCast(req.length));
 
         if (term_offset + length > term_buffer.len) {
-            return false;
+            req.length = 0;
+            return 0;
         }
 
-        // Send the requested bytes
-        const data = term_buffer[term_offset .. term_offset + length];
-        if (publication.send_channel.send(publication.dest_address, data)) |_| {
-            return true;
-        } else |err| switch (err) {
-            error.WouldBlock => return false,
-            else => {
-                std.log.err(
-                    "sender retransmit send failed session_id={} stream_id={} term_id={} term_offset={} length={} err={}",
-                    .{ publication.session_id, publication.stream_id, req.term_id, req.term_offset, req.length, err },
-                );
-                return false;
-            },
+        // A NAK range can cover many frames. Split it back into Aeron-sized
+        // datagrams; sending the raw range as one UDP packet can exceed MTU
+        // and leaves the receiver unable to recover the gap.
+        var offset = term_offset;
+        var remaining = length;
+        var frames_sent: usize = 0;
+        while (remaining > 0) {
+            if (frames_sent >= MAX_RETRANSMIT_FRAMES_PER_WORK) break;
+            if (offset + @sizeOf(i32) > term_buffer.len) {
+                req.length = 0;
+                return frames_sent;
+            }
+            const frame_length = std.mem.readInt(i32, term_buffer[offset..][0..4], .little);
+            if (frame_length < @as(i32, @intCast(protocol.DataHeader.LENGTH))) {
+                req.length = 0;
+                return frames_sent;
+            }
+            const aligned_len = std.mem.alignForward(i32, frame_length, @as(i32, @intCast(protocol.FRAME_ALIGNMENT)));
+            if (aligned_len <= 0 or aligned_len > remaining) {
+                req.length = 0;
+                return frames_sent;
+            }
+            if (offset + @as(usize, @intCast(aligned_len)) > term_buffer.len) {
+                req.length = 0;
+                return frames_sent;
+            }
+
+            const frame_data = term_buffer[offset .. offset + @as(usize, @intCast(aligned_len))];
+            const frame_header = @as(*const protocol.DataHeader, @ptrCast(@alignCast(&frame_data[0])));
+            if (frame_header.term_id != req.term_id or frame_header.term_offset != @as(i32, @intCast(offset))) {
+                break;
+            }
+            if (publication.send_channel.send(req.source_address, frame_data)) |_| {
+                _ = self.retransmits_sent.fetchAdd(1, .monotonic);
+                self.last_retransmit_frame_term_id.store(frame_header.term_id, .monotonic);
+                self.last_retransmit_frame_term_offset.store(frame_header.term_offset, .monotonic);
+                self.last_retransmit_frame_session_id.store(frame_header.session_id, .monotonic);
+                self.last_retransmit_frame_stream_id.store(frame_header.stream_id, .monotonic);
+                self.last_retransmit_frame_length.store(frame_header.frame_length, .monotonic);
+            } else |err| switch (err) {
+                error.WouldBlock => break,
+                else => {
+                    std.log.err(
+                        "sender retransmit send failed session_id={} stream_id={} term_id={} term_offset={} length={} err={}",
+                        .{ publication.session_id, publication.stream_id, req.term_id, req.term_offset, req.length, err },
+                    );
+                    req.length = 0;
+                    return frames_sent;
+                },
+            }
+            offset += @as(usize, @intCast(aligned_len));
+            remaining -= @as(usize, @intCast(aligned_len));
+            req.term_offset += aligned_len;
+            req.length -= aligned_len;
+            frames_sent += 1;
         }
+        return frames_sent;
     }
 
     pub fn onAddPublication(self: *Sender, publication: *NetworkPublication) !void {
+        if (builtin.mode == .Debug and publication.stream_id == 103) {
+            std.debug.print("[SENDER] ADD: session={d} stream={d} dest={any}\n", .{ publication.session_id, publication.stream_id, publication.dest_address });
+        }
         publication.last_setup_time_ms = self.current_time_ms;
         if (publication.send_channel.socket != INVALID_SOCKET) {
             if (self.sendSetupFrame(publication)) {
@@ -378,16 +484,86 @@ pub const Sender = struct {
         term_id: i32,
         term_offset: i32,
         length: i32,
+        source_address: net.Address,
     ) !void {
+        const new_end = @as(i64, term_offset) + @as(i64, length);
+        for (self.retransmit_queue.items) |queued| {
+            if (queued.session_id == session_id and queued.stream_id == stream_id and queued.term_id == term_id) {
+                const queued_end = @as(i64, queued.term_offset) + @as(i64, queued.length);
+                if (@as(i64, term_offset) < queued_end and @as(i64, queued.term_offset) < new_end) return;
+            }
+        }
+        _ = self.retransmit_requests.fetchAdd(1, .monotonic);
+        self.last_retransmit_term_id.store(term_id, .monotonic);
+        self.last_retransmit_term_offset.store(term_offset, .monotonic);
+        self.last_retransmit_length.store(length, .monotonic);
+        self.last_retransmit_source_port.store(@as(i32, @intCast(source_address.getPort())), .monotonic);
         const req = RetransmitRequest{
             .session_id = session_id,
             .stream_id = stream_id,
             .term_id = term_id,
             .term_offset = term_offset,
             .length = length,
+            .source_address = source_address,
             .timestamp_ms = self.current_time_ms,
         };
         try self.retransmit_queue.append(self.allocator, req);
+    }
+
+    pub fn retransmitRequests(self: *const Sender) u64 {
+        return self.retransmit_requests.load(.monotonic);
+    }
+
+    pub fn retransmitsSent(self: *const Sender) u64 {
+        return self.retransmits_sent.load(.monotonic);
+    }
+
+    pub fn lastRetransmitTermId(self: *const Sender) i32 {
+        return self.last_retransmit_term_id.load(.monotonic);
+    }
+
+    pub fn lastRetransmitTermOffset(self: *const Sender) i32 {
+        return self.last_retransmit_term_offset.load(.monotonic);
+    }
+
+    pub fn lastRetransmitLength(self: *const Sender) i32 {
+        return self.last_retransmit_length.load(.monotonic);
+    }
+
+    pub fn lastRetransmitSourcePort(self: *const Sender) i32 {
+        return self.last_retransmit_source_port.load(.monotonic);
+    }
+
+    pub fn lastRetransmitFrameTermId(self: *const Sender) i32 {
+        return self.last_retransmit_frame_term_id.load(.monotonic);
+    }
+
+    pub fn lastRetransmitFrameTermOffset(self: *const Sender) i32 {
+        return self.last_retransmit_frame_term_offset.load(.monotonic);
+    }
+
+    pub fn lastRetransmitFrameSessionId(self: *const Sender) i32 {
+        return self.last_retransmit_frame_session_id.load(.monotonic);
+    }
+
+    pub fn lastRetransmitFrameStreamId(self: *const Sender) i32 {
+        return self.last_retransmit_frame_stream_id.load(.monotonic);
+    }
+
+    pub fn lastRetransmitFrameLength(self: *const Sender) i32 {
+        return self.last_retransmit_frame_length.load(.monotonic);
+    }
+
+    pub fn staleFramesSkipped(self: *const Sender) u64 {
+        return self.stale_frames_skipped.load(.monotonic);
+    }
+
+    pub fn lastExpectedTermId(self: *const Sender) i32 {
+        return self.last_expected_term_id.load(.monotonic);
+    }
+
+    pub fn lastExpectedTermOffset(self: *const Sender) i32 {
+        return self.last_expected_term_offset.load(.monotonic);
     }
 
     pub fn onStatusMessage(
@@ -415,7 +591,20 @@ pub const Sender = struct {
                     receiver_id,
                     self.current_time_ms * std.time.ns_per_ms,
                 );
-                self.counters_map.set(publication.publisher_limit.counter_id, new_limit);
+                const current_limit = self.counters_map.get(publication.publisher_limit.counter_id);
+                // UDP STATUS messages may arrive out of order. A stale STATUS must
+                // never move the publisher limit backwards and strand a publication
+                // that has already advanced beyond that old window.
+                if (new_limit > current_limit) {
+                    self.counters_map.set(publication.publisher_limit.counter_id, new_limit);
+                }
+                _ = self.status_messages_applied.fetchAdd(1, .monotonic);
+                self.last_status_session_id.store(session_id, .monotonic);
+                self.last_status_stream_id.store(stream_id, .monotonic);
+                self.last_status_term_id.store(consumption_term_id, .monotonic);
+                self.last_status_term_offset.store(consumption_term_offset, .monotonic);
+                self.last_status_window.store(receiver_window, .monotonic);
+                self.last_status_limit.store(new_limit, .monotonic);
                 publication.last_activity_ns = self.current_time_ms * std.time.ns_per_ms;
                 var meta = publication.log_buffer.metaData();
                 meta.setIsConnected(true);
@@ -423,6 +612,50 @@ pub const Sender = struct {
                 return;
             }
         }
+    }
+
+    pub fn statusMessagesApplied(self: *const Sender) u64 {
+        return self.status_messages_applied.load(.monotonic);
+    }
+
+    pub fn lastStatusSessionId(self: *const Sender) i32 {
+        return self.last_status_session_id.load(.monotonic);
+    }
+
+    pub fn lastStatusStreamId(self: *const Sender) i32 {
+        return self.last_status_stream_id.load(.monotonic);
+    }
+
+    pub fn lastStatusTermId(self: *const Sender) i32 {
+        return self.last_status_term_id.load(.monotonic);
+    }
+
+    pub fn lastStatusTermOffset(self: *const Sender) i32 {
+        return self.last_status_term_offset.load(.monotonic);
+    }
+
+    pub fn lastStatusWindow(self: *const Sender) i32 {
+        return self.last_status_window.load(.monotonic);
+    }
+
+    pub fn lastStatusLimit(self: *const Sender) i64 {
+        return self.last_status_limit.load(.monotonic);
+    }
+
+    pub fn dataFramesSent(self: *const Sender) u64 {
+        return self.data_frames_sent.load(.monotonic);
+    }
+
+    pub fn lastSentTermId(self: *const Sender) i32 {
+        return self.last_sent_term_id.load(.monotonic);
+    }
+
+    pub fn lastSentTermOffset(self: *const Sender) i32 {
+        return self.last_sent_term_offset.load(.monotonic);
+    }
+
+    pub fn lastSentFrameLength(self: *const Sender) i32 {
+        return self.last_sent_frame_length.load(.monotonic);
     }
 
     pub fn setCurrentTimeMs(self: *Sender, time_ms: i64) void {
@@ -548,7 +781,14 @@ test "Sender: onRetransmit adds to queue" {
     var sender = try Sender.init(allocator, undefined, &counters_map);
     defer sender.deinit();
 
-    try sender.onRetransmit(1, 10, 5, 100, 256);
+    try sender.onRetransmit(
+        1,
+        10,
+        5,
+        100,
+        256,
+        net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
+    );
     try std.testing.expectEqual(@as(usize, 1), sender.retransmit_queue.items.len);
     try std.testing.expectEqual(@as(i32, 1), sender.retransmit_queue.items[0].session_id);
     try std.testing.expectEqual(@as(i32, 10), sender.retransmit_queue.items[0].stream_id);
@@ -684,6 +924,8 @@ test "Sender: STATUS updates publisher limit" {
 
     sender.onStatusMessage(7, 1001, 3, 1024, 4096, 77);
     try std.testing.expectEqual(@as(i64, 5120), counters_map.get(pub_limit.counter_id));
+    sender.onStatusMessage(7, 1001, 2, 0, 4096, 77);
+    try std.testing.expectEqual(@as(i64, 5120), counters_map.get(pub_limit.counter_id));
     try std.testing.expect(log_buf.metaData().isConnected());
     try std.testing.expectEqual(@as(i32, 1), log_buf.metaData().activeTransportCount());
 }
@@ -716,6 +958,54 @@ test "Sender: sendDataFrames reads committed frame from log buffer" {
     for (4..64) |i| {
         try std.testing.expectEqual(@as(u8, @intCast(i % 256)), term_buffer[i]);
     }
+}
+
+test "Sender: skips stale committed frames in a reused term partition" {
+    const allocator = std.testing.allocator;
+    var meta align(64) = [_]u8{0} ** (counters.METADATA_LENGTH * 4);
+    var values align(64) = [_]u8{0} ** (counters.COUNTER_LENGTH * 4);
+    var counters_map = counters.CountersMap.init(&meta, &values);
+    const sock = try net.openSocket(std.posix.AF.INET, std.posix.SOCK.DGRAM, 0);
+    defer net.closeSocket(sock);
+    var send_endpoint = endpoint.SendChannelEndpoint{ .socket = sock };
+
+    const sender_pos = counters_map.allocate(counters.SENDER_POSITION, "sender-pos");
+    const pub_limit = counters_map.allocate(counters.PUBLISHER_LIMIT, "pub-limit");
+    var sender = try Sender.init(allocator, &send_endpoint, &counters_map);
+    defer sender.deinit();
+
+    var log_buf = try logbuffer.LogBuffer.init(allocator, 64 * 1024);
+    defer log_buf.deinit();
+    const stale = @as(*protocol.DataHeader, @ptrCast(@alignCast(&log_buf.termBuffer(1)[0])));
+    stale.frame_length = 64;
+    stale.version = protocol.VERSION;
+    stale.flags = protocol.DataHeader.BEGIN_FLAG | protocol.DataHeader.END_FLAG;
+    stale.type = @intFromEnum(protocol.FrameType.data);
+    stale.term_offset = 0;
+    stale.session_id = 7;
+    stale.stream_id = 1001;
+    stale.term_id = 0;
+    stale.reserved_value = 0;
+
+    var publication = NetworkPublication{
+        .session_id = 7,
+        .stream_id = 1001,
+        .initial_term_id = 0,
+        .log_buffer = &log_buf,
+        .sender_position = sender_pos,
+        .publisher_limit = pub_limit,
+        .send_channel = &send_endpoint,
+        .dest_address = net.Address.initIp4(.{ 127, 0, 0, 1 }, 40123),
+        .mtu = 1408,
+        .last_setup_time_ms = 0,
+        .last_heartbeat_time_ms = 0,
+        .last_activity_ns = 0,
+        .flow_control_strategy = flow_control.FlowControl{ .unicast = .{} },
+    };
+
+    const frames_sent = sender.sendDataFrames(&publication, 64 * 1024, 64 * 1024 + 64);
+    try std.testing.expectEqual(@as(i32, 0), frames_sent);
+    try std.testing.expectEqual(@as(u64, 1), sender.staleFramesSkipped());
 }
 
 test "Sender: heartbeat sent when publication idle" {

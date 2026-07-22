@@ -479,6 +479,7 @@ test "ConsensusModule follower heartbeat timeout triggers failover election" {
         node1.election.leaderShipTermId(),
         node1.election.log_position,
         1,
+        node1_ballot_time,
     );
     try std.testing.expect(granted);
 
@@ -641,6 +642,7 @@ test "ConsensusModule follower catch up preserves progress through failover" {
         follower.election.leaderShipTermId(),
         follower.election.log_position,
         1,
+        follower_ballot_time,
     );
     try std.testing.expect(granted);
     follower.election.onVote(follower.election.candidate_term_id, 1, 2, true);

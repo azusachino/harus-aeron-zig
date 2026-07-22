@@ -1,0 +1,17 @@
+FROM eclipse-temurin:21-jdk AS builder
+
+COPY test/interop/aeron-all.jar /aeron-all.jar
+
+COPY examples/trading/java /src
+RUN mkdir -p /out && javac -cp /aeron-all.jar -d /out \
+    /src/TradingOrderBook.java \
+    /src/TradingOrderBookTest.java \
+    /src/TradingSample.java \
+    /src/BtcUsdtClusterService.java \
+    /src/JavaTradingClusterNode.java \
+    /src/JavaTradingClusterClient.java
+
+FROM eclipse-temurin:21-jre
+COPY --from=builder /aeron-all.jar /aeron-all.jar
+COPY --from=builder /out /trading
+ENTRYPOINT ["java"]

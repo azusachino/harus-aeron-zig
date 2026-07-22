@@ -10,12 +10,12 @@ All notable changes to this project will be documented in this file.
 - Migrated the codebase to Zig 0.16 (`ArrayList` `.empty`, `alignedAlloc(.@"8", …)`, `DebugAllocator`, local `time` module).
 
 ### Added
-- Completed Phase 11 release requirements.
+- Continued Phase 11 hardening on the unreleased 0.9 line.
 - **Task P11-1 (Ring Buffer Recovery)**: Added `ManyToOneRingBuffer.unblock()` to handle crashed writers holding negative sentinels or zero-value gaps in the ring buffer, fully integrated with driver conductor.
 - **Task P11-2 (Cluster Snapshotting & Recovery)**: Auto-wired `ClusterConductor` snapshotting on `handleSnapshotBegin` to serialize node state directly into the Aeron Archive catalog/data segments, plus recovery loading in `loadLastSnapshot()` during initialization.
 - **Task P11-4 (Wildcard/Ephemeral Bindings)**: Bound wildcard IP interfaces (`0.0.0.0` or `::`) and ephemeral ports (`:0`) dynamically, allocating type-14 local socket address status counters to propagate ports back to subscribers.
-- **Task P11-5 (Tutorial Complete)**: Created all missing code stubs in `tutorial/archive/` and `tutorial/cluster/`, aligned all prose chapters under `docs/tutorial/`, added a Workspace guide in `tutorial/README.md`, and validated using a custom lesson linter (`make check`).
-- **Release Baselines**: Verified complete Java-Zig interop smoke validation matrix and established performance baselines for throughput, round-trip latency, and fanout overhead.
+- **Task P11-5 (Tutorial Sync)**: Created the archive and cluster tutorial stubs, aligned the prose chapters, and validated the lesson structure with a custom linter (`make check`). Tutorial implementations remain an active hardening task.
+- **Validation Baselines**: Recorded Java-Zig interop smoke and performance observations; extended 0.9 smoke/soak validation remains open.
 - Extracted the IPC primitives into a standalone `lib/agrona` module (ring buffer, broadcast, idle strategy, counters) with a `root.zig` entry point.
 - Real UDP `SETUP` frame parsing in the receiver, plus connected ring-buffer → conductor → broadcast round-trip tests (`test/driver/{setup_frame_parse,conductor_ipc,subscription_lifecycle,publication_lifecycle}_test.zig`).
 

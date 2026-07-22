@@ -17,6 +17,11 @@ pub const STARTUP_CANVASS_TIMEOUT_NS: i64 = 5_000_000_000; // 5 seconds
 /// Leader heartbeat timeout for followers to detect leader failure
 pub const LEADER_HEARTBEAT_TIMEOUT_NS: i64 = 500_000_000; // 500ms
 
+/// Aeron uses NULL_VALUE (-1) for a member that has not written a leadership
+/// term yet. Keeping this sentinel is required for Java Cluster RequestVote
+/// comparisons during the initial election.
+pub const NULL_LEADERSHIP_TERM_ID: i64 = -1;
+
 // =============================================================================
 // ElectionState enum
 // =============================================================================
@@ -50,7 +55,7 @@ pub const MemberState = struct {
     /// Latest known log position from this member
     log_position: i64 = 0,
     /// Latest known leadership term from this member
-    leader_ship_term_id: i64 = 0,
+    leader_ship_term_id: i64 = NULL_LEADERSHIP_TERM_ID,
     /// Whether this member granted a vote in current ballot
     is_vote_granted: bool = false,
 };
@@ -84,6 +89,10 @@ pub const Election = struct {
     votes_received: u32,
     /// Memory allocator for heap allocations
     allocator: std.mem.Allocator,
+    /// Per-member deadline stagger to avoid split-vote lockstep when all
+    /// members start their timers at the same wall-clock instant. Real Aeron
+    /// Cluster randomizes election timeouts per member for the same reason.
+    jitter_ns: i64,
 
     // =========================================================================
     // Initialization and Cleanup
@@ -99,7 +108,7 @@ pub const Election = struct {
             try members.append(allocator, .{
                 .member_id = @intCast(i),
                 .log_position = 0,
-                .leader_ship_term_id = 0,
+                .leader_ship_term_id = NULL_LEADERSHIP_TERM_ID,
                 .is_vote_granted = false,
             });
         }
@@ -109,12 +118,13 @@ pub const Election = struct {
             .member_id = member_id,
             .leader_member_id = -1,
             .candidate_term_id = 0,
-            .leader_ship_term_id = 0,
+            .leader_ship_term_id = NULL_LEADERSHIP_TERM_ID,
             .log_position = 0,
             .election_deadline_ns = 0,
             .cluster_members = members,
             .votes_received = 0,
             .allocator = allocator,
+            .jitter_ns = @as(i64, member_id) * 150_000_000, // 150ms stagger per member id
         };
     }
 
@@ -155,7 +165,7 @@ pub const Election = struct {
             ElectionState.init => {
                 // Transition to canvass, set initial timeout
                 self.state = ElectionState.canvass;
-                self.election_deadline_ns = now_ns + STARTUP_CANVASS_TIMEOUT_NS;
+                self.election_deadline_ns = now_ns + STARTUP_CANVASS_TIMEOUT_NS + self.jitter_ns;
             },
 
             ElectionState.canvass => {
@@ -165,7 +175,7 @@ pub const Election = struct {
                     self.candidate_term_id += 1;
                     self.votes_received = 1; // Vote for self
                     self.state = ElectionState.candidate_ballot;
-                    self.election_deadline_ns = now_ns + ELECTION_TIMEOUT_NS;
+                    self.election_deadline_ns = now_ns + ELECTION_TIMEOUT_NS + self.jitter_ns;
                 }
             },
 
@@ -181,7 +191,7 @@ pub const Election = struct {
                 } else if (now_ns >= self.election_deadline_ns) {
                     // Timeout: restart canvass
                     self.state = ElectionState.canvass;
-                    self.election_deadline_ns = now_ns + ELECTION_TIMEOUT_NS;
+                    self.election_deadline_ns = now_ns + ELECTION_TIMEOUT_NS + self.jitter_ns;
                 }
             },
 
@@ -190,7 +200,7 @@ pub const Election = struct {
                 if (now_ns >= self.election_deadline_ns) {
                     // Timeout: restart canvass
                     self.state = ElectionState.canvass;
-                    self.election_deadline_ns = now_ns + ELECTION_TIMEOUT_NS;
+                    self.election_deadline_ns = now_ns + ELECTION_TIMEOUT_NS + self.jitter_ns;
                 }
             },
 
@@ -202,7 +212,7 @@ pub const Election = struct {
                 if (now_ns >= self.election_deadline_ns) {
                     self.state = ElectionState.canvass;
                     self.leader_member_id = -1;
-                    self.election_deadline_ns = now_ns + ELECTION_TIMEOUT_NS;
+                    self.election_deadline_ns = now_ns + ELECTION_TIMEOUT_NS + self.jitter_ns;
                 }
             },
 
@@ -231,6 +241,7 @@ pub const Election = struct {
         log_leader_ship_term_id: i64,
         log_position: i64,
         candidate_member_id: i32,
+        now_ns: i64,
     ) bool {
         // Check if candidate has a newer or equal log
         const has_newer_or_equal_log = log_leader_ship_term_id > self.leader_ship_term_id or
@@ -246,7 +257,7 @@ pub const Election = struct {
             self.state = ElectionState.follower_ballot;
             self.leader_member_id = candidate_member_id;
             self.candidate_term_id = candidate_term_id;
-            self.election_deadline_ns = 0; // Will be set by caller
+            self.election_deadline_ns = now_ns + ELECTION_TIMEOUT_NS + self.jitter_ns;
             return true;
         }
 
@@ -454,11 +465,23 @@ test "onRequestVote grants vote for higher term" {
         0, // log term
         0, // log position
         1, // candidate
+        1000, // now_ns
     );
 
     try std.testing.expectEqual(true, granted);
     try std.testing.expectEqual(ElectionState.follower_ballot, election.state);
     try std.testing.expectEqual(@as(i32, 1), election.leader_member_id);
+    try std.testing.expectEqual(@as(i64, 1000 + ELECTION_TIMEOUT_NS), election.election_deadline_ns);
+}
+
+test "onRequestVote grants Java's initial null log term" {
+    var election = try Election.init(std.testing.allocator, 2, 3);
+    defer election.deinit();
+
+    const granted = election.onRequestVote(2, NULL_LEADERSHIP_TERM_ID, 0, 1, 1000);
+
+    try std.testing.expect(granted);
+    try std.testing.expectEqual(ElectionState.follower_ballot, election.state);
 }
 
 test "onRequestVote rejects stale term" {
@@ -477,6 +500,7 @@ test "onRequestVote rejects stale term" {
         2, // log term
         100, // log position
         1, // candidate
+        1000, // now_ns
     );
 
     try std.testing.expectEqual(false, granted);
@@ -564,8 +588,8 @@ test "three node election full simulation" {
     try std.testing.expectEqual(ElectionState.candidate_ballot, node0.state);
 
     // node1 and node2 should grant votes to node0
-    const granted1 = node1.onRequestVote(node0.candidate_term_id, node0.leader_ship_term_id, node0.log_position, 0);
-    const granted2 = node2.onRequestVote(node0.candidate_term_id, node0.leader_ship_term_id, node0.log_position, 0);
+    const granted1 = node1.onRequestVote(node0.candidate_term_id, node0.leader_ship_term_id, node0.log_position, 0, candidate_time);
+    const granted2 = node2.onRequestVote(node0.candidate_term_id, node0.leader_ship_term_id, node0.log_position, 0, candidate_time);
 
     try std.testing.expectEqual(true, granted1);
     try std.testing.expectEqual(true, granted2);

@@ -1,0 +1,31 @@
+services:
+  zig-member:
+    build:
+      context: ../..
+      dockerfile: deploy/Containerfile.zig-consensus-member
+    environment:
+      CLUSTER_MEMBER_ID: "2"
+      CONSENSUS_PORT: "9022"
+      AERON_DIR: /dev/shm/aeron
+      CLUSTER_CONSENSUS_ENDPOINTS: "0=java-probe:9023,1=java-probe:9023,2=zig-member:9022"
+    tmpfs:
+      - /dev/shm:exec,size=1g
+    networks: [trading]
+
+  java-probe:
+    build:
+      context: ../..
+      dockerfile: deploy/Containerfile.java-consensus-probe
+    command: ["--add-opens", "java.base/jdk.internal.misc=ALL-UNNAMED", "--add-opens", "java.base/java.util.zip=ALL-UNNAMED", "-cp", "/aeron-all.jar:/trading", "trading.JavaConsensusInteropProbe"]
+    environment:
+      AERON_DIR: /dev/shm/aeron
+      CONSENSUS_ENDPOINT: "zig-member:9022"
+      RESPONSE_PORT: "9023"
+    tmpfs:
+      - /dev/shm:exec,size=1g
+    networks: [trading]
+
+networks:
+  trading:
+    name: aeron-trading
+    external: true
