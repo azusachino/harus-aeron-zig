@@ -142,7 +142,7 @@ test "ReceiverTest: STATUS response uses the image source address and wire layou
     defer image.deinit();
 
     try receiver.sendStatus(&image);
-    var bytes: [protocol.StatusMessage.LENGTH]u8 = undefined;
+    var bytes: [protocol.StatusMessage.LENGTH]u8 align(8) = undefined;
     var received: usize = 0;
     var source: net.Address = undefined;
     var source_len: std.posix.socklen_t = @sizeOf(std.posix.sockaddr.storage);

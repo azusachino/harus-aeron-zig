@@ -105,7 +105,7 @@ clean:
 setup: setup-interop  ## Prepare local helper artifacts for interop and benchmarks
 
 setup-interop:
-	@uv run scripts/trading.py ensure-java-artifact
+	@python3 scripts/trading.py ensure-java-artifact
 	@mkdir -p vendor
 	@std_dir="$$( $(NIX_RUN) zig env | sed -n 's/.*"std_dir": *"\([^"]*\)".*/\1/p' )"; \
 	if [ -n "$$std_dir" ]; then \
@@ -122,7 +122,7 @@ setup-interop:
 
 setup-interop-base:
 	@$(MAKE) interop-preflight
-	@uv run scripts/trading.py ensure-java-artifact
+	@python3 scripts/trading.py ensure-java-artifact
 	@if $(CONTAINER_ENGINE) image inspect "$(INTEROP_ZIG_BUILD_ENV_IMAGE)" >/dev/null 2>&1; then \
 		echo "Using cached interop build env image: $(INTEROP_ZIG_BUILD_ENV_IMAGE)"; \
 	else \
