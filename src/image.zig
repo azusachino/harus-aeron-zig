@@ -121,7 +121,7 @@ test "Image poll reads from term buffer" {
 test "Image poll publishes the client-owned subscriber position" {
     const allocator = std.testing.allocator;
     var meta: [counters.METADATA_LENGTH * 4]u8 = undefined;
-    var values: [counters.COUNTER_LENGTH * 4]u8 = undefined;
+    var values: [counters.COUNTER_LENGTH * 4]u8 align(64) = undefined;
     @memset(&meta, 0);
     @memset(&values, 0);
     var counters_map = counters.CountersMap.init(&meta, &values);

@@ -122,6 +122,7 @@ setup-interop:
 
 setup-interop-base:
 	@$(MAKE) interop-preflight
+	@uv run scripts/trading.py ensure-java-artifact
 	@if $(CONTAINER_ENGINE) image inspect "$(INTEROP_ZIG_BUILD_ENV_IMAGE)" >/dev/null 2>&1; then \
 		echo "Using cached interop build env image: $(INTEROP_ZIG_BUILD_ENV_IMAGE)"; \
 	else \
